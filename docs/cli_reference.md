@@ -68,7 +68,7 @@ Commit complete.
 ```
 
 On failure (one `% <reason>` line per error) nothing is written and the
-candidate is kept. If writing to disk fails, `% Commit failed: could not write configuration (<ErrorClass>)` is printed instead of `Commit complete.`, the candidate is kept, and `commit` can be retried; the definition file is written before `settings.yaml`, so a failure between the two can leave the definition saved but not yet selected (see [architecture.md](architecture.md#commit-validation-scope)). A no-op commit prints `No changes to commit.`. The "not
+candidate is kept. If writing to disk fails, `% Commit failed: could not write configuration (<ErrorClass>)` is printed instead of `Commit complete.`, the candidate is kept, and `commit` can be retried; for a create/edit the definition file is written before `settings.yaml`, so a failure between the two can leave the definition saved but not yet selected; for a *deletion* `settings.yaml` is written first and the file deleted second, so a failure between the two can leave an unreferenced file but never a persisted selection of a deleted definition (see [architecture.md](architecture.md#commit-validation-scope)). A no-op commit prints `No changes to commit.`. The "not
 modified" line appears only when `settings.yaml` was really not rewritten.
 
 None of `root`/`exit`/`end`/`clear` ever commits, and `commit` never
@@ -479,8 +479,11 @@ active access-info is configured.`); a missing/invalid active topology or
 scenario is a broken running state and fails the same way loading it
 anywhere else would.
 
-`reference` is **multi-select** — `active_references` is an ordered list,
-so:
+`reference` is **multi-select** — `active_references` is an ordered list
+(committed references keep their committed order; newly activated ones are
+appended in activation order; there is no reorder command, so unselecting
+and re-selecting the same reference is an exact net-zero: no diff, no
+`settings.yaml` rewrite), so:
 
 - bare `show running-config reference` renders *every* active reference,
   in committed order (never sorted, never merged), separated by a single
@@ -536,8 +539,9 @@ it is EXEC-only (see "`show version`" above and "`show running-config` vs.
 | Command | Effect |
 |---------|--------|
 | `access-info <name>` | Select the access-info MCP/`terminal_open()` will use. `<name>` must already exist as a committed access-info definition, *or* be the access-info currently being created/edited in this same configure session, *or* one not currently pending whole-definition deletion in global configuration mode — Tab/`?` dynamically list exactly this set (`Select access-info for MCP`), never a generic `<name>` placeholder. |
+| `access-info` (bare) | Enter the **name-less** submode `network-lab(config-running-access-info)#` (see below). Entering never changes the candidate. `access-info ?` lists the existing names plus `<cr>`. The same bare form exists for `topology`, `scenario` and `reference` (`config-running-topology` / `-scenario` / `-reference`); in **global** configuration mode every bare `access-info`/`topology`/`scenario`/`reference` is still `% Incomplete command.` (those `?` have no `<cr>`). |
 | `no access-info` | Remove the access-info selection from the candidate (omission, not a sentinel value). A legitimate, fail-closed state once committed: `terminal_open()` then refuses every device until one is selected again. |
-| `topology <name>` | Select the topology MCP will use (`Select topology for MCP`). Same existence/dynamic-completion rule as `access-info`. There is deliberately no `no topology` here to unset it — `active_topology` is a mandatory running-config field (`commit` already rejects a missing one), so there is nothing safe for it to fall back to. This is unrelated to `no topology <name>` in global configuration mode, which deletes a **stored topology definition** instead — see "`no <kind> <name>`" below. |
+| `topology <name>` | Select the topology MCP will use (`Select topology for MCP`). Same existence/dynamic-completion rule as `access-info`. There is no `no topology` here; `active_topology` is a mandatory running-config field. The only way to unselect it in the *candidate* is `no <name>` in `config-running-topology`, and `commit` rejects a candidate without one (`% Running configuration is missing a valid active topology.`). This is unrelated to `no topology <name>` in global configuration mode, which deletes a **stored topology definition** instead — see "`no <kind> <name>`" below. |
 | `scenario <name>` | Select the scenario MCP will use (`Select scenario for MCP`). Same existence/dynamic-completion rule. |
 | `reference <name>` | Activate `<name>` among the selected references (`Activate reference for MCP` — additive, not a singleton "select"). Same existence/dynamic-completion rule; duplicates are rejected. |
 | `no reference <name>` | Remove `<name>` from the selected references. |
@@ -545,6 +549,22 @@ it is EXEC-only (see "`show version`" above and "`show running-config` vs.
 | `show` / `show configuration` | The running-config candidate's delta: only the selection(s) that actually changed (e.g. just `access-info test_lab`, or just `no access-info`) — unrelated unchanged selections are never repeated. |
 | `show running-config` | Show the full committed selection on disk (unaffected by the candidate). |
 | `commit` / `clear` / `root` / `end` / `exit` | As in global configuration mode. `root`/`exit` return one level up, to global configuration mode (no dirty guard — still the same overall configure session). `commit` stays in `running` mode. |
+
+### Name-less selection submodes (`config-running-access-info` / `-topology` / `-scenario` / `-reference`)
+
+All four kinds share one design (written below for access-info; the same rules apply to the others with the per-kind differences listed after the bullets). Entered with the bare keyword from `config-running`; the selection policy of each kind is unchanged: access-info 0 or 1, topology exactly 1, scenario exactly 1, reference 0 or more (additive, duplicates are a no-op).
+
+- `<name>` (a definition name typed on its own) selects it through the same method as `access-info <name>` and **stays** in this submode; the single-selection rules and Net-zero behavior are identical to the named path (same name again, or A → B → A, leaves the candidate clean).
+- Invalid names print the usual `% Access information '<name>' does not exist.`; the candidate, the submode and the stored definitions are unchanged.
+- `no <name>` **unselects** the access-info currently selected in the running candidate and stays in this submode. `<name>` must equal the current selection exactly (no prefix matching; otherwise `% Access information '<name>' is not currently selected.`, candidate unchanged — also when nothing is selected). Bare `no` is `% Incomplete command.`; `no ?` lists only the candidate's selected name (none when unselected) with no `<cr>`, and Help/Tab are recomputed from the candidate after every change (commit/clear included). It uses the same Candidate update as `config-running# no access-info`, never deletes a definition (global `no access-info <name>` does that) and never touches `running_descriptions`. Net-zero follows the usual rules (`no A` then `A`, or `A` then `no A` from an unselected baseline, is clean).
+- There is no `description` here: `description foo` is rejected with `% Invalid input ...` plus `% Use the named mode: access-info <name>`. Edit descriptions in the named submode (`access-info <name>` → `description <text>` / `no description`). **`no description` in this submode is never a description removal**: it is `no <name>` with the name `description` — it unselects only if the selected access-info is literally named `description`, otherwise it is rejected as not selected (also when nothing is selected). The submode keeps no hidden "last selected" target.
+- `?` lists the keywords valid here (`show`, `no`, `clear`, `commit`, `root`, `end`, `exit`, `help`) plus the selectable names.
+- **Keyword collisions**: keywords win and match case-insensitively and by unique prefix, so a definition named `show`, `Show`, `sh…`, `c` (ambiguous: clear/commit) or `e` (end/exit) cannot be selected by typing it here. Select it from the parent with `access-info <name>` (always works; that enters its named submode). A definition literally named `description` or `no` is selectable here as a plain name.
+- `exit` returns to `config-running` keeping the candidate (never refused for a dirty running candidate); `root`/`end` follow the usual rules (`end` is refused while dirty); `commit`/`clear` stay in this submode, and a failed commit keeps it too. `show` / `show configuration` show the running-config selection / candidate delta, like the other running modes.
+
+**Per-kind differences.** *Topology / Scenario*: `no <name>` may leave the **candidate** unselected (`show configuration` prints `no topology` / `no scenario`; that line has no `config-running` grammar, so replaying it stops with an error rather than guessing), but `commit` is rejected with the existing validation (`% Running configuration is missing a valid active topology.` / `... active scenario.`) — the candidate, the submode and the committed settings stay as they were, there is no auto-rollback, selecting a valid one again (in the same commit) makes `commit` succeed, and `clear` restores the committed selection. Scenario is required today because the existing commit validation already requires it; nothing new was added. *Reference*: `no <name>` removes one selected reference (`% Reference '<name>' is not currently selected.` otherwise) and `no ?` lists every candidate-selected reference; selecting a reference with a pending definition deletion is refused (D6), unselect→reselect restores the committed order and is net-zero (D7), and a `no <name>` plus a global `no reference <name>` in one commit keeps the settings-first persistence order (Case 12).
+
+Paste: the mode is recognized by the distinct name `running_<kind>_common` (never a running-entry mode, so it never reaches the description handlers). A `!` closes this submode and `config-running` only when it follows a command executed *inside* that section (a leading `!`, a `!` right after entering a mode, or right after `exit` is a no-op), so `show configuration` output replays from either `config-running` or global configuration mode. **Behavior change**: a bare `access-info` line used to be an incomplete-command error that stopped a paste; it is now valid, and later lines up to the next `!` are read as definition names. `show running-config` output (bare `topology`/`scenario`/`reference` headings) remains non-replayable and stops at the first such heading; because the `!` closes the submode, a heading is never mistaken for an access-info named `topology`.
 
 ### Running-entry submodes (`config-running-<kind>-<name>`)
 
@@ -919,7 +939,7 @@ Deletion is candidate-only until `commit` — nothing is unlinked by `no
 still shows its committed content (for access-info, in clear text, same
 policy as everywhere else), and MCP/runtime continue reading the
 committed definition, exactly as before, right up until a successful
-commit. `show configuration` renders exactly one whole-definition line
+commit. A deletion of a reference that is still active fails at `commit` with `% Cannot remove reference '<name>' because it is active in running-config.` followed by `% Deselect it with 'no reference <name>' under 'running-config', then commit again.`; the candidate is kept and `clear` cancels it. A reference with a pending deletion cannot be newly selected under `running-config` (`% Reference '<name>' is pending deletion in this session. Use 'clear' ...`); deselecting it there and committing both in one commit still works. `show configuration` renders exactly one whole-definition line
 (`no access-info test_lab`, never a per-field/per-device diff — an
 access-info deletion never renders any of that definition's stored
 credentials). `clear` cancels the pending deletion (restores the
@@ -1309,10 +1329,14 @@ switched away from.
 2. On any validation failure: **zero disk writes**, the candidate and
    current mode are retained unchanged, and every failure is printed as a
    `% ...` line.
-3. On success, the dirty definition file (if any) is written first, then
+3. On success, a created/edited definition file is written first, then
    `lab/settings.yaml` if the running-config candidate is dirty — in that
    order, since a running-config selection may reference a definition just
-   created in this same commit. Writes are atomic (temp file, flush,
+   created in this same commit. A **deletion** is written in the opposite
+   order (`settings.yaml` first, then the file is deleted; deletability is
+   checked before any write), so a failure in between can leave an
+   unreferenced file but never a persisted selection of a deleted
+   definition; retrying `commit` finishes the delete. Writes are atomic (temp file, flush,
    `os.replace()`); an unchanged definition that was only opened is never
    rewritten, and a fully clean commit ("No changes to commit.") writes
    nothing at all.
@@ -1509,6 +1533,13 @@ mathematically minimal generic recursive diff:
   A brand-new object (never committed) is diffed against nothing, so every
   field you set on it shows up — entering a new, still-empty object alone
   produces no output at all (nothing has actually changed yet).
+
+- In **global** `show configuration`, running-config selection removals are
+  grouped under a `running-config` section (` no reference <name>`, closed by
+  `!`) so they cannot be mistaken for the top-level `no reference <name>`
+  stored-definition deletion; inside `config-running` the same removal is
+  shown as the plain `no reference <name>`. A pasted `!` closes the
+  `running-config` section like the access-info blocks.
 
 - **Structured additions/removals** use the same set/`no` rendering, e.g.
   a newly-added `reference` shows as an addition, `no access-info` shows as

@@ -116,16 +116,32 @@ def _split_pasted_command_lines(text: str) -> list[str]:
 # fails as an unknown command. This is deliberately NOT a generic "!" ==
 # "exit" alias: it only applies inside a multi-line paste (never to a
 # single manually-typed line, see execute_command_line()/run()), and only
-# in these three access-info modes -- topology/scenario/reference paste
-# behavior is unchanged, and a stray "!" at global configuration or EXEC
+# in these three access-info modes and `running` (so the `running-config`
+# section that global `show configuration` emits for selection removals
+# closes before a following global-level line) -- topology/scenario/
+# reference paste behavior is unchanged, and a stray "!" at global configuration or EXEC
 # is an explicit, deliberate no-op (never exit/end/quit, never terminates
 # the CLI), so an imperfect copy/paste with one extra trailing "!" cannot
 # silently leave configuration mode.
 _STRUCTURAL_BANG_EXIT_MODES = ("access_device", "access_jump_host", "access_info")
 
+# Modes whose `show`/`show configuration` mean the running-config selection
+# (candidate delta / committed selection), as opposed to a definition.
+_RUNNING_SCOPE_MODES = ("running", *cfgmod.RUNNING_COMMON_MODES, *cfgmod.RUNNING_ENTRY_MODES)
 
-def _apply_structural_bang(session: cfgmod.CliSession) -> None:
-    if session.mode in _STRUCTURAL_BANG_EXIT_MODES:
+
+# `running` and the name-less access-info submode are only closed by a "!"
+# that follows at least one command executed *inside* that section (one that
+# did not itself change mode): a leading "!" (show running-config / show
+# configuration output starts with one), a "!" right after entering the mode,
+# or a "!" right after `exit` never climbs another level.
+_CONTENT_BANG_EXIT_MODES = ("running", *cfgmod.RUNNING_COMMON_MODES)
+
+
+def _apply_structural_bang(session: cfgmod.CliSession, section_has_content: bool = True) -> None:
+    if session.mode in _STRUCTURAL_BANG_EXIT_MODES or (
+        session.mode in _CONTENT_BANG_EXIT_MODES and section_has_content
+    ):
         h_exit(session, {})
 
 
@@ -193,6 +209,8 @@ def prompt_text(session: cfgmod.CliSession) -> str:
         return f"network-lab(config-scenario-{session.definition_name})# "
     if session.mode == "reference":
         return f"network-lab(config-reference-{session.definition_name})# "
+    if session.mode in cfgmod.RUNNING_COMMON_MODES:
+        return f"network-lab(config-running-{cfgmod.RUNNING_COMMON_MODES[session.mode].replace('_', '-')})# "
     if session.mode in cfgmod.RUNNING_ENTRY_MODES:
         kind = cfgmod.RUNNING_ENTRY_MODES[session.mode].replace("_", "-")
         return f"network-lab(config-running-{kind}-{session.current_running_entry_name})# "
@@ -260,8 +278,14 @@ def _monitor_terminal_target_names(session: cfgmod.CliSession) -> tuple[str, ...
 def build_context(session: cfgmod.CliSession) -> grammar.CliContext:
     lab_root = session.lab_root
     candidate_references: tuple[str, ...] = ()
+    candidate_access_info_names: tuple[str, ...] = ()
+    candidate_topology_names: tuple[str, ...] = ()
+    candidate_scenario_names: tuple[str, ...] = ()
     if session.settings_candidate is not None:
         candidate_references = tuple(session.settings_candidate.get("active_references") or [])
+        candidate_access_info_names = tuple(filter(None, (session.settings_candidate.get("active_access_info"),)))
+        candidate_topology_names = tuple(filter(None, (session.settings_candidate.get("active_topology"),)))
+        candidate_scenario_names = tuple(filter(None, (session.settings_candidate.get("active_scenario"),)))
     topology_device_names: tuple[str, ...] = ()
     access_info_device_names: tuple[str, ...] = ()
     access_info_jump_host_names: tuple[str, ...] = ()
@@ -304,6 +328,9 @@ def build_context(session: cfgmod.CliSession) -> grammar.CliContext:
         reference_names=reference_names_list,
         access_info_names=access_info_names_list,
         candidate_reference_names=candidate_references,
+        candidate_access_info_names=candidate_access_info_names,
+        candidate_topology_names=candidate_topology_names,
+        candidate_scenario_names=candidate_scenario_names,
         topology_candidate_device_names=topology_device_names,
         access_info_candidate_device_names=access_info_device_names,
         access_info_candidate_jump_host_names=access_info_jump_host_names,
@@ -766,6 +793,20 @@ def _running_config_delta_lines(original: dict, candidate: dict) -> list[str]:
     return lines
 
 
+def _scope_running_removals(lines: list[str]) -> list[str]:
+    """Global-mode `show configuration` aggregates two independent candidate
+    scopes. A top-level `no reference A` there means "delete the stored
+    definition" (the global command), so a running-config *selection* removal
+    is grouped under an explicit `running-config` section instead -- the same
+    text would otherwise be ambiguous. Running-mode output is untouched (there
+    `no reference A` is exactly the selection removal)."""
+    removals = [line for line in lines if line.startswith("no ")]
+    if not removals:
+        return lines
+    kept = [line for line in lines if not line.startswith("no ")]
+    return kept + ["running-config", *(f" {line}" for line in removals), "!"]
+
+
 def render_configuration_candidate(session: cfgmod.CliSession) -> str:
     """`show configuration` (and bare `show` in a configuration mode):
     **uncommitted changes only** in the current context -- never a full
@@ -776,12 +817,14 @@ def render_configuration_candidate(session: cfgmod.CliSession) -> str:
     definition mode (or its device/jump-host submode) shows only that
     object's delta, scoped to the current sub-object where applicable.
     Entering a new, still-empty object produces no output at all."""
-    if session.mode == "running" or session.mode in cfgmod.RUNNING_ENTRY_MODES:
+    if session.mode in _RUNNING_SCOPE_MODES:
         return "\n".join(_running_config_delta_lines(session.committed_settings or {}, session.settings_candidate or {}))
 
     if session.mode == "global":
         parts = []
-        settings_lines = _running_config_delta_lines(session.committed_settings or {}, session.settings_candidate or {})
+        settings_lines = _scope_running_removals(
+            _running_config_delta_lines(session.committed_settings or {}, session.settings_candidate or {})
+        )
         if settings_lines:
             parts.append("\n".join(settings_lines))
         if session.definition_kind is not None:
@@ -931,7 +974,7 @@ def h_exec_exit(session: cfgmod.CliSession, args: dict) -> None:
 # only in these three modes; everywhere else it means the current
 # topology/access-info/scenario/reference (or device submode) definition's
 # own committed state instead (render_committed_definition()).
-_MCP_SELECTION_MODES = ("exec", "global", "running", *cfgmod.RUNNING_ENTRY_MODES)
+_MCP_SELECTION_MODES = ("exec", "global", *_RUNNING_SCOPE_MODES)
 
 
 def h_show_running_config(session: cfgmod.CliSession, args: dict) -> None:
@@ -2223,6 +2266,7 @@ for _mode in (
     "scenario",
     "reference",
     *cfgmod.RUNNING_ENTRY_MODES,
+    *cfgmod.RUNNING_COMMON_MODES,
 ):
     HANDLERS[f"{_mode}.show_running_config"] = h_show_running_config
     HANDLERS[f"{_mode}.show_configuration"] = h_show_configuration
@@ -2238,6 +2282,58 @@ for _mode in (
         # one level via cfgmod._EXIT_PARENT_MODE, unguarded.
         HANDLERS[f"{_mode}.exit"] = h_exit
         HANDLERS[f"{_mode}.root"] = h_root
+
+
+_COMMON_KIND_LABELS = {
+    "access_info": "Access information",
+    "topology": "Topology",
+    "scenario": "Scenario",
+    "reference": "Reference",
+}
+
+
+def _register_running_common_handlers(kind: str) -> None:
+    """Handlers for `config-running-<kind>` (name-less). Selection and
+    unselection call the SAME session methods as the parent/named commands;
+    only the Mode Transition differs (stay in the submode)."""
+    mode = f"running_{kind}_common"
+
+    def enter(session: cfgmod.CliSession, args: dict) -> None:
+        session.enter_running_common(kind)
+
+    def select(session: cfgmod.CliSession, args: dict) -> None:
+        name = args["name"]
+        if kind == "access_info":
+            session.select_access_info(name)
+        elif kind == "topology":
+            session.select_topology(name)
+        elif kind == "scenario":
+            session.set_scenario(name)
+        else:
+            session.select_reference_idempotent(name)
+
+    def no(session: cfgmod.CliSession, args: dict) -> None:
+        # Exact match against the Candidate's current selection, then the
+        # same Candidate update as the parent-mode unselect.
+        name = args["name"]
+        if kind == "reference":
+            session.remove_reference(name)  # raises "... is not currently selected."
+            return
+        if session.settings_candidate.get(f"active_{kind}") != name:
+            raise cfgmod.ConfigError(f"{_COMMON_KIND_LABELS[kind]} '{name}' is not currently selected.")
+        {
+            "access_info": session.clear_access_info_selection,
+            "topology": session.clear_topology_selection,
+            "scenario": session.clear_scenario_selection,
+        }[kind]()
+
+    HANDLERS[f"running.{kind}_common"] = enter
+    HANDLERS[f"{mode}.select"] = select
+    HANDLERS[f"{mode}.no_select"] = no
+
+
+for _kind in cfgmod.RUNNING_COMMON_MODES.values():
+    _register_running_common_handlers(_kind)
 
 
 # --------------------------------------------------------------------------
@@ -2378,6 +2474,8 @@ def execute_command_line(session: cfgmod.CliSession, line: str, *, interactive: 
     result = grammar.parse(session.mode, line)
     if not result.ok:
         print_parse_error(result.error)
+        if session.mode in cfgmod.RUNNING_COMMON_MODES and line.split(None, 1)[0].lower() == "description":
+            print("% Use the named mode: access-info <name>")
         return False
 
     handler = HANDLERS[result.action]
@@ -2422,12 +2520,20 @@ def execute_input_block(session: cfgmod.CliSession, text: str) -> None:
     Propagates `_ExitCli` uncaught, so a pasted `exit`/`quit` at EXEC level
     unwinds the REPL loop exactly like a manually typed one."""
     if "\n" in _normalize_newlines(text):
+        section_has_content = False
         for line in _split_pasted_command_lines(text):
             if line == "!":
-                _apply_structural_bang(session)
+                _apply_structural_bang(session, section_has_content)
+                section_has_content = False
                 continue
+            mode_before = session.mode
             if not execute_command_line(session, line, interactive=False):
                 break
+            # A line that moved between modes (enter or `exit`/`root`) opens a
+            # fresh, still-empty section: a following "!" is then redundant
+            # (e.g. `exit` + "!" in legacy scripts, or "!" right after
+            # `running-config`) and must not climb another level.
+            section_has_content = session.mode == mode_before
     else:
         execute_command_line(session, text)
 

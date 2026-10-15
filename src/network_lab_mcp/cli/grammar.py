@@ -54,6 +54,12 @@ class CliContext:
     reference_names: tuple[str, ...] = ()
     access_info_names: tuple[str, ...] = ()
     candidate_reference_names: tuple[str, ...] = ()
+    # The access-info currently selected in the running-config *candidate*
+    # (0 or 1 name): the only legal `no <name>` target in the name-less
+    # `config-running-access-info` submode.
+    candidate_access_info_names: tuple[str, ...] = ()
+    candidate_topology_names: tuple[str, ...] = ()
+    candidate_scenario_names: tuple[str, ...] = ()
     topology_candidate_device_names: tuple[str, ...] = ()
     access_info_candidate_device_names: tuple[str, ...] = ()
     access_info_candidate_jump_host_names: tuple[str, ...] = ()
@@ -253,6 +259,18 @@ def provide_reference_names(ctx: CliContext, prefix: str, committed: tuple[str, 
 
 def provide_access_info_names(ctx: CliContext, prefix: str, committed: tuple[str, ...] = ()) -> list[str]:
     return [n for n in ctx.access_info_names if n.startswith(prefix)]
+
+
+def provide_candidate_access_info_names(ctx: CliContext, prefix: str, committed: tuple[str, ...] = ()) -> list[str]:
+    return [n for n in ctx.candidate_access_info_names if n.startswith(prefix)]
+
+
+def provide_candidate_topology_names(ctx: CliContext, prefix: str, committed: tuple[str, ...] = ()) -> list[str]:
+    return [n for n in ctx.candidate_topology_names if n.startswith(prefix)]
+
+
+def provide_candidate_scenario_names(ctx: CliContext, prefix: str, committed: tuple[str, ...] = ()) -> list[str]:
+    return [n for n in ctx.candidate_scenario_names if n.startswith(prefix)]
 
 
 def provide_candidate_reference_names(ctx: CliContext, prefix: str, committed: tuple[str, ...] = ()) -> list[str]:
@@ -854,6 +872,8 @@ def _build_running_root() -> Node:
     access_info_node = root.add_literal("access-info", "Select access-info for MCP")
     access_info_next = access_info_node.add_argument(access_info_arg)
     access_info_next.set_command("running.access_info", "Select access-info for MCP")
+    # Bare `<kind>` enters the shared (name-less) selection submode.
+    access_info_node.set_command("running.access_info_common", "Enter the access-info selection submode")
 
     topology_arg = Argument(
         "name",
@@ -865,6 +885,7 @@ def _build_running_root() -> Node:
     topology_node = root.add_literal("topology", "Select topology for MCP")
     topology_next = topology_node.add_argument(topology_arg)
     topology_next.set_command("running.topology", "Select topology for MCP")
+    topology_node.set_command("running.topology_common", "Enter the topology selection submode")
 
     scenario_arg = Argument(
         "name",
@@ -876,6 +897,7 @@ def _build_running_root() -> Node:
     scenario_node = root.add_literal("scenario", "Select scenario for MCP")
     scenario_next = scenario_node.add_argument(scenario_arg)
     scenario_next.set_command("running.scenario", "Select scenario for MCP")
+    scenario_node.set_command("running.scenario_common", "Enter the scenario selection submode")
 
     reference_arg = Argument(
         "name",
@@ -887,6 +909,7 @@ def _build_running_root() -> Node:
     reference_node = root.add_literal("reference", "Activate reference for MCP")
     reference_next = reference_node.add_argument(reference_arg)
     reference_next.set_command("running.reference_add", "Activate reference for MCP")
+    reference_node.set_command("running.reference_common", "Enter the reference selection submode")
 
     no_node = root.add_literal("no", "Negate a running configuration item")
     no_access_info_node = no_node.add_literal("access-info", "Remove the access information selection")
@@ -897,6 +920,7 @@ def _build_running_root() -> Node:
         "Currently selected reference name",
         provider=provide_candidate_reference_names,
         hint="<name>",
+        enumerate_when_empty=True,
     )
     no_reference_next = no_reference_node.add_argument(no_reference_arg)
     no_reference_next.set_command("running.reference_remove", "Remove a reference used by MCP")
@@ -946,6 +970,75 @@ def _build_running_entry_root(mode: str) -> Node:
         bare_show=True,
         show_keyword_description="Show contents of configuration",
     )
+    _add_common_subtree(root, mode)
+    return root
+
+
+_RUNNING_COMMON_KINDS = {
+    # kind -> (CLI keyword, definition-name description)
+    "access_info": ("access-info", "Access-info definition name"),
+    "topology": ("topology", "Topology definition name"),
+    "scenario": ("scenario", "Scenario definition name"),
+    "reference": ("reference", "Reference definition name"),
+}
+
+
+def _build_running_common_root(kind: str) -> Node:
+    """Shared name-less selection submode (`config-running-<kind>`). Typing
+    a definition name selects it through the same Candidate update as
+    `config-running# <kind> <name>` and stays here. Fixed keywords win over a
+    same-named definition (keywords match case-insensitively and by unique
+    prefix, see _match_literal()); such a definition stays selectable from
+    the parent via `<kind> <name>`. Deliberately has no `description`:
+    description editing lives only in the named submode (it needs a
+    definition name). `no <name>` here is a selection removal only (exact
+    currently-selected name), never reaching the named-mode `no
+    description`."""
+    mode = f"running_{kind}_common"
+    label, name_description = _RUNNING_COMMON_KINDS[kind]
+    selected_provider = {
+        "access_info": provide_candidate_access_info_names,
+        "topology": provide_candidate_topology_names,
+        "scenario": provide_candidate_scenario_names,
+        "reference": provide_candidate_reference_names,
+    }[kind]
+    running_provider = {
+        "access_info": provide_running_access_info_names,
+        "topology": provide_running_topology_names,
+        "scenario": provide_running_scenario_names,
+        "reference": provide_running_reference_names,
+    }[kind]
+    root = Node()
+    name_arg = Argument(
+        "name",
+        name_description,
+        provider=running_provider,
+        hint="<name>",
+        enumerate_when_empty=True,
+    )
+    select_text = "Activate reference for MCP" if kind == "reference" else f"Select {label} for MCP"
+    root.add_argument(name_arg).set_command(f"{mode}.select", select_text)
+    _add_show_subtree(
+        root,
+        mode,
+        running_config_description="Contents of running configuration",
+        include_configuration=True,
+        configuration_description="Contents of uncommitted configuration",
+        bare_show=True,
+        show_keyword_description="Show contents of configuration",
+    )
+    # `no <name>`: unselect a CURRENTLY selected definition (exact name only;
+    # bare `no` is incomplete). Never deletes a definition.
+    no_text = f"Remove selected {label}"
+    no_node = root.add_literal("no", no_text)
+    no_arg = Argument(
+        "name",
+        f"Currently selected {label}",
+        provider=selected_provider,
+        hint="<name>",
+        enumerate_when_empty=True,
+    )
+    no_node.add_argument(no_arg).set_command(f"{mode}.no_select", no_text)
     _add_common_subtree(root, mode)
     return root
 
@@ -1330,6 +1423,10 @@ MODE_ROOTS: dict[str, Node] = {
     "exec": _build_exec_root(),
     "global": _build_global_root(),
     "running": _build_running_root(),
+    "running_access_info_common": _build_running_common_root("access_info"),
+    "running_topology_common": _build_running_common_root("topology"),
+    "running_scenario_common": _build_running_common_root("scenario"),
+    "running_reference_common": _build_running_common_root("reference"),
     "running_access_info": _build_running_entry_root("running_access_info"),
     "running_topology": _build_running_entry_root("running_topology"),
     "running_scenario": _build_running_entry_root("running_scenario"),

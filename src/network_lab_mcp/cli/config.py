@@ -113,9 +113,21 @@ RUNNING_ENTRY_MODES = {
     "running_reference": "reference",
 }
 
+# Name-less running-config selection submodes (`config-running-<kind>`),
+# mode -> definition kind. Deliberately separate from RUNNING_ENTRY_MODES.
+RUNNING_COMMON_MODES = {
+    "running_access_info_common": "access_info",
+    "running_topology_common": "topology",
+    "running_scenario_common": "scenario",
+    "running_reference_common": "reference",
+}
+
 _EXIT_PARENT_MODE = {
     "running": "global",
     **{mode: "running" for mode in RUNNING_ENTRY_MODES},
+    # Name-less selection submodes: NOT running-entry modes (no current
+    # entry name, no description target).
+    **{mode: "running" for mode in RUNNING_COMMON_MODES},
     "topology": "global",
     "access_info": "global",
     "scenario": "global",
@@ -721,19 +733,58 @@ class CliSession:
             raise ConfigError(f"Scenario '{name}' does not exist.")
         self.settings_candidate["active_scenario"] = name
 
+    def select_reference_idempotent(self, name: str) -> None:
+        """Select `name` among the references unless it already is (what
+        `config-running# reference <name>` does before entering its
+        submode): a re-selection is a no-op, new ones use add_reference()."""
+        if name not in (self.settings_candidate.get("active_references") or []):
+            self.add_reference(name)
+
     def add_reference(self, name: str) -> None:
         refs = self.settings_candidate.setdefault("active_references", [])
         if name in refs:
             raise ConfigError(f"Reference '{name}' is already selected.")
         if not self._definition_will_exist("reference", lab.reference_exists, name):
             raise ConfigError(f"Reference '{name}' does not exist.")
+        if self._is_pending_whole_deletion("reference", name):
+            raise ConfigError(
+                f"Reference '{name}' is pending deletion in this session. "
+                f"Use 'clear' to cancel the deletion before selecting it."
+            )
         refs.append(name)
+        self._stabilize_reference_order()
 
     def remove_reference(self, name: str) -> None:
         refs = self.settings_candidate.setdefault("active_references", [])
         if name not in refs:
             raise ConfigError(f"Reference '{name}' is not currently selected.")
         refs.remove(name)
+        self._stabilize_reference_order()
+
+    def _stabilize_reference_order(self) -> None:
+        """Order of `active_references` is only ever (a) the committed order
+        for references that were already active, followed by (b) newly
+        activated ones in activation order -- there is no command to
+        reorder. Re-deriving it after every add/remove makes an
+        unselect-then-reselect sequence an exact net-zero (identical list),
+        so the order-sensitive dirty check, the set-based delta renderer and
+        the commit write all agree."""
+        refs = self.settings_candidate.get("active_references")
+        if not isinstance(refs, list):
+            return
+        committed = list((self.committed_settings or {}).get("active_references") or [])
+        stable = [r for r in committed if r in refs] + [r for r in refs if r not in committed]
+        refs[:] = stable
+
+    def _is_pending_whole_deletion(self, kind: str, name: str) -> bool:
+        """True while `no <kind> <name>` is a pending (uncommitted) deletion
+        candidate. Cancelled by `clear` or by re-entering the definition."""
+        return (
+            self.definition_kind == kind
+            and self.definition_name == name
+            and self.definition_candidate is None
+            and self.definition_original is not None
+        )
 
     # ---- running-config entry descriptions (metadata of an ACTIVE entry;
     # never a selection, never written to a definition) ----
@@ -758,6 +809,25 @@ class CliSession:
         self._require_active_running_entry(kind, name)
         self.current_running_entry_name = name
         self.mode = f"running_{kind}"
+
+    def enter_running_common(self, kind: str) -> None:
+        """Enter the name-less selection submode of `kind`. Entry alone
+        never touches the candidate."""
+        self.current_running_entry_name = None
+        self.mode = f"running_{kind}_common"
+
+    def enter_running_access_info_common(self) -> None:
+        self.enter_running_common("access_info")
+
+    def clear_topology_selection(self) -> None:
+        """Candidate-only unselect (omission). The committed running-config
+        must always have an active topology: a candidate without one is
+        allowed to exist, but commit() rejects it."""
+        self.settings_candidate.pop("active_topology", None)
+
+    def clear_scenario_selection(self) -> None:
+        """Candidate-only unselect; commit() rejects a missing scenario."""
+        self.settings_candidate.pop("active_scenario", None)
 
     def set_current_running_description(self, text: str) -> None:
         self._reconcile_running_entry_mode()
@@ -859,33 +929,57 @@ class CliSession:
             label = _DEFINITION_KIND_LABELS[kind]
             if definition_being_deleted and self.definition_kind == kind and self.definition_name == name:
                 errors.append(f"Cannot remove {label.lower()} '{name}' because it is active in running-config.")
+                if kind == "reference":
+                    errors.append(
+                        f"Deselect it with 'no reference {name}' under 'running-config', then commit again."
+                    )
             else:
                 errors.append(f"{label} '{name}' does not exist.")
+
+        if definition_being_deleted and not _DEFINITION_DELETABILITY_CHECKS[self.definition_kind](
+            self.definition_name, self.lab_root
+        ):
+            # Checked up front, before any write: a deletion that would be
+            # refused by delete_*() must never be preceded by a settings write.
+            errors.append(f"{_DEFINITION_KIND_LABELS[self.definition_kind]} '{self.definition_name}' cannot be deleted.")
 
         if errors:
             raise CommitValidationError(list(dict.fromkeys(errors)))
 
-        if definition_being_written:
-            written_target = (self.definition_kind, self.definition_name, "deleted" if definition_being_deleted else "saved")
-            if definition_being_deleted:
-                _DEFINITION_DELETERS[self.definition_kind](self.definition_name, self.lab_root)
-                self.definition_kind = None
-                self.definition_name = None
-                self.definition_original = None
-                self.definition_candidate = None
-            else:
-                _DEFINITION_WRITERS[self.definition_kind](self.definition_name, self.definition_candidate, self.lab_root)
-                self.definition_original = copy.deepcopy(self.definition_candidate)
-        else:
-            written_target = None
-        self._reset_mutation_tracking()
-
+        # Write order (the two files are not one transaction; each write is
+        # individually atomic). A deletion writes settings.yaml FIRST: the
+        # validated candidate no longer selects the definition, so a failure
+        # after the settings write leaves only an unreferenced file (retry
+        # finishes the delete), never a persisted selection of a deleted
+        # definition. A create/edit writes the definition FIRST, since the
+        # new settings may select it.
+        written_target = None
         settings_written = False
-        if self.settings_dirty():
+
+        def _write_settings() -> bool:
+            if not self.settings_dirty():
+                return False
             self.settings_candidate = normalized_settings(self.settings_candidate)
             lab.write_settings(self.settings_candidate, self.lab_root)
             self.committed_settings = copy.deepcopy(self.settings_candidate)
-            settings_written = True
+            return True
+
+        if definition_being_deleted:
+            settings_written = _write_settings()
+            _DEFINITION_DELETERS[self.definition_kind](self.definition_name, self.lab_root)
+            written_target = (self.definition_kind, self.definition_name, "deleted")
+            self.definition_kind = None
+            self.definition_name = None
+            self.definition_original = None
+            self.definition_candidate = None
+            self._reset_mutation_tracking()
+        else:
+            if definition_being_written:
+                _DEFINITION_WRITERS[self.definition_kind](self.definition_name, self.definition_candidate, self.lab_root)
+                self.definition_original = copy.deepcopy(self.definition_candidate)
+                written_target = (self.definition_kind, self.definition_name, "saved")
+            self._reset_mutation_tracking()
+            settings_written = _write_settings()
 
         # Sorted + deduplicated (identity is unique per source/field/target),
         # so warnings are deterministic. Target type and name only: no

@@ -383,6 +383,13 @@ network-lab(config-running)# commit
 Commit complete.
 ```
 
+Under `config-running`, each of `access-info`, `topology`, `scenario` and
+`reference` can also be entered without a name (`config-running-<kind>`),
+where typing a definition name selects it and `no <name>` unselects the
+currently selected one. A topology or scenario may be unselected in the
+candidate, but `commit` is rejected until one is selected again. See
+[docs/cli_reference.md](docs/cli_reference.md).
+
 Discovery behavior in brief:
 
 - `discover topology` collects LLDP/CDP only; `discover topology l3` also

@@ -1323,8 +1323,13 @@ the candidate; an I/O failure during `commit` prints `% Commit failed: could
 not write configuration (<ErrorClass>)` (no raw exception text), never
 `Commit complete.`, and keeps the session and candidate.
 
-**Persistence -- observed (fault-injection tests).** The definition file is
-written before `settings.yaml`. If the definition write fails, nothing
+**Persistence -- observed (fault-injection tests).** For a *deletion*
+(`no <kind> <name>` committed together with the matching running-config
+deselection/switch) `settings.yaml` is written first and the definition file
+deleted second, after an up-front deletability check: a failure in between
+leaves an unreferenced file (retry finishes the delete), never a persisted
+selection of a deleted definition (`tests/test_reference_cli_consistency.py`).
+For a create/edit, the definition file is written before `settings.yaml`. If the definition write fails, nothing
 changed. If `settings.yaml` then fails (function-level or `os.replace`
 failure), the definition stays saved, `settings.yaml` keeps its old
 content (the new definition is simply not yet selected, so no new broken
@@ -1671,3 +1676,8 @@ specific part of the system narrow and easy to reason about (see the goals
 above). None of them is currently on a roadmap; if one is ever revisited,
 it will be because a concrete need justifies the added complexity, not
 because it was merely deferred.
+
+
+### Name-less running selection submodes (access-info, topology, scenario, reference)
+
+`config-running-<kind>` (internal modes `running_<kind>_common`, listed in `cfgmod.RUNNING_COMMON_MODES`, built by `cli/grammar.py::_build_running_common_root(kind)` and wired by `main.py::_register_running_common_handlers(kind)`) are selection-only submodes entered by the bare keyword under `config-running`. Selection calls `select_access_info` / `select_topology` / `set_scenario` / `select_reference_idempotent` and unselection `clear_access_info_selection` / `clear_topology_selection` / `clear_scenario_selection` / `remove_reference` -- the same `settings_candidate` mutations as the parent/named commands; a topology/scenario candidate may be unselected but `commit()`'s existing "missing a valid active topology/scenario" validation rejects it. The text below describes the access-info case; the others are identical apart from the selection method. It reuses `CliSession.select_access_info()` (the same Selection `access-info <name>` performs before entering its named submode) and the existing `settings_candidate` / dirty tracking; no new state, and it is intentionally not in `RUNNING_ENTRY_MODES`, so no description handler can reach it (`description` is not in its grammar; its `no <name>` is a selection removal handled by `h_running_access_info_common_no`, which exact-matches the candidate selection and then calls the same `h_running_access_info_remove` as `config-running# no access-info`; Help/Tab names come from `CliContext.candidate_access_info_names`, rebuilt from the candidate on every call). Fixed keywords take precedence over definition names (`_match_literal`: case-insensitive, unique-prefix); same-named definitions stay selectable through `access-info <name>`. In pasted blocks, `!` exits `running` / this submode only after a command that ran inside the section (`execute_input_block`). Provisional: only access-info has it.
