@@ -33,6 +33,7 @@ def cdp_table(*rows):
 
 
 LLDP_EMPTY = f"{LLDP_HDR}\nTotal entries displayed: 0\n"
+CDP_EMPTY = f"{CDP_HDR}\n"  # recognized CDP table, zero neighbors (valid success)
 
 
 # ---- parser-level classification (T01-T03, T07, T09-T14) ------------------
@@ -132,25 +133,25 @@ R1R2 = ("HOST-R2", "Gi0/0/0/2", "Gi0/0/0/2")
 
 
 def test_i01_lldp_disabled_cdp_links_retained(lab_root, monkeypatch):
-    r = _run(lab_root, monkeypatch, {"R1": (LLDP_OFF, cdp_table(R1R2)), "R2": (LLDP_EMPTY, "")})
+    r = _run(lab_root, monkeypatch, {"R1": (LLDP_OFF, cdp_table(R1R2)), "R2": (LLDP_EMPTY, CDP_EMPTY)})
     assert _pairs(r) == [("R1", "Gi0/0/0/2", "R2", "Gi0/0/0/2")]
-    assert r.protocol_warnings == ["Device 'R1': LLDP is disabled; no LLDP neighbor observations."]
+    # Disabled beside a working protocol is a protocol status, not a warning.
+    assert r.protocol_status == {"LLDP disabled": ["R1"]}
+    assert r.protocol_warnings == []
 
 
 def test_i02_cdp_disabled_lldp_links_retained(lab_root, monkeypatch):
-    r = _run(lab_root, monkeypatch, {"R1": (lldp_table(R1R2), CDP_OFF), "R2": (LLDP_EMPTY, "")})
+    r = _run(lab_root, monkeypatch, {"R1": (lldp_table(R1R2), CDP_OFF), "R2": (LLDP_EMPTY, CDP_EMPTY)})
     assert _pairs(r) == [("R1", "Gi0/0/0/2", "R2", "Gi0/0/0/2")]
-    assert r.protocol_warnings == ["Device 'R1': CDP is disabled; no CDP neighbor observations."]
+    assert r.protocol_status == {"CDP disabled": ["R1"]}
+    assert r.protocol_warnings == []
 
 
-def test_i03_both_disabled_no_fabricated_links(lab_root, monkeypatch):
-    r = _run(lab_root, monkeypatch, {"R1": (LLDP_OFF, CDP_OFF), "R2": (LLDP_EMPTY, "")})
-    assert r.managed_links == [] and r.unresolved == []
-    assert r.protocol_warnings[:2] == [
-        "Device 'R1': LLDP is disabled; no LLDP neighbor observations.",
-        "Device 'R1': CDP is disabled; no CDP neighbor observations.",
-    ]
-    assert "No physical links were discovered" in r.protocol_warnings[-1]
+def test_i03_both_disabled_is_fatal_no_usable_protocol(lab_root, monkeypatch):
+    # IC-4: a device with no usable discovery protocol fails Discovery
+    # (previously: success with a warning and zero links).
+    with pytest.raises(discovery.DiscoveryError, match=r"Device 'R1': no usable neighbor discovery protocol \(LLDP disabled, CDP disabled\)"):
+        _run(lab_root, monkeypatch, {"R1": (LLDP_OFF, CDP_OFF), "R2": (LLDP_EMPTY, CDP_EMPTY)})
 
 
 def test_i04_disabled_device_is_not_a_contradiction_and_one_way_policy_kept(lab_root, monkeypatch):
@@ -159,7 +160,7 @@ def test_i04_disabled_device_is_not_a_contradiction_and_one_way_policy_kept(lab_
     r = _run(
         lab_root,
         monkeypatch,
-        {"R1": (LLDP_OFF, CDP_OFF), "R2": (lldp_table(("HOST-R1", "Gi0/0/0/5", "Gi0/0/0/9")), "")},
+        {"R1": (LLDP_OFF, CDP_EMPTY), "R2": (lldp_table(("HOST-R1", "Gi0/0/0/5", "Gi0/0/0/9")), CDP_EMPTY)},
     )
     assert r.conflicts == []
     assert _pairs(r) == [("R2", "Gi0/0/0/5", "R1", "Gi0/0/0/9")]
@@ -170,10 +171,10 @@ def test_i05_i12_other_devices_continue_and_no_inference(lab_root, monkeypatch):
         lab_root,
         monkeypatch,
         {
-            "R1": (LLDP_OFF, CDP_OFF),
+            "R1": (LLDP_OFF, CDP_EMPTY),
             "R2": (lldp_table(("HOST-R3", "Gi0/0/0/2", "Gi0/0/0/2")), CDP_OFF),
             "R3": (LLDP_OFF, cdp_table(("HOST-R2", "Gi0/0/0/2", "Gi0/0/0/2"))),
-            "R4": (LLDP_OFF, CDP_OFF),
+            "R4": (LLDP_OFF, CDP_EMPTY),
         },
     )
     assert _pairs(r) == [("R2", "Gi0/0/0/2", "R3", "Gi0/0/0/2")]
@@ -181,21 +182,28 @@ def test_i05_i12_other_devices_continue_and_no_inference(lab_root, monkeypatch):
     assert r.connected_count == 4
 
 
-def test_i06_all_disabled_candidate_has_devices_no_links(lab_root, monkeypatch, capsys):
-    _run(lab_root, monkeypatch, {"R1": (LLDP_OFF, CDP_OFF), "R2": (LLDP_OFF, CDP_OFF)})
+def test_i06_all_disabled_fails_discovery_and_leaves_candidate_untouched(lab_root, monkeypatch, capsys):
+    _targets(lab_root, ["R1", "R2"])
+    monkeypatch.setattr(
+        discovery,
+        "_bootstrap_collect",
+        lambda d, c: {
+            "hostname": f"HOST-{d}",
+            "show_version": "x",
+            "show_lldp_neighbors": LLDP_OFF,
+            "show_cdp_neighbors": CDP_OFF,
+        },
+    )
     session = cfgmod.CliSession(lab_root)
     session.enter_configure()
     capsys.readouterr()
-    climain.execute_command_line(session, "discover topology")
+    assert climain.execute_command_line(session, "discover topology") is False
     out = capsys.readouterr().out
-    # existing committed links of a same-named topology are preserved; none are added
-    assert session.definition_candidate["links"] == lab.load_topology("sample_lab", lab_root)["links"]
-    assert {"R1", "R2"} <= set(session.definition_candidate["devices"])
-    assert "Neighbor discovery warnings (5):" in out
-    assert "Topology discovery completed with warnings." in out
-    assert "LLDP structure" not in out and "Local Intf" not in out
-    assert SENTINEL not in out
-    assert session.mode == "topology"
+    assert "no usable neighbor discovery protocol" in out
+    assert "% Topology candidate not updated." in out
+    assert session.definition_kind is None and session.definition_candidate is None
+    assert session.mode == "global"
+    assert SENTINEL not in out and "Local Intf" not in out
     assert not lab.topology_exists("sample_lab_new", lab_root)
 
 
@@ -214,9 +222,10 @@ def test_i07_cdp_command_actually_runs_after_lldp_disabled(monkeypatch):
         return outputs[cmd]
 
     monkeypatch.setattr(discovery, "_run_command", run)
-    monkeypatch.setattr(discovery, "_run_command_tolerant", lambda d, c, p: sent.append(c) or "")
     info = discovery._bootstrap_collect("R1", {})
-    assert sent == ["show version", "show lldp neighbors", "show cdp neighbors", "show ipv4 interface brief"]
+    # L2 mode: no L3-only command is ever sent.
+    assert sent == ["show version", "show lldp neighbors", "show cdp neighbors"]
+    assert "show_ipv4_interface_brief" not in info
     assert info["show_cdp_neighbors"] == CDP_OFF
     assert all(not c.startswith(("configure", "lldp", "cdp", "commit")) for c in sent)  # read-only
 
@@ -232,64 +241,94 @@ def test_i07_cdp_command_actually_runs_after_lldp_disabled(monkeypatch):
 )
 def test_i08_i09_errors_are_not_masked_by_the_other_protocol(lab_root, monkeypatch, lldp, cdp):
     with pytest.raises(discovery.DiscoveryError):
-        _run(lab_root, monkeypatch, {"R1": (lldp, cdp), "R2": (LLDP_EMPTY, "")})
+        _run(lab_root, monkeypatch, {"R1": (lldp, cdp), "R2": (LLDP_EMPTY, CDP_EMPTY)})
 
 
 def test_i10_conflict_detection_preserved(lab_root, monkeypatch):
-    r = _run(
-        lab_root,
-        monkeypatch,
-        {
-            "R1": (lldp_table(("HOST-R2", "Gi0/0/0/2", "Gi0/0/0/2")), cdp_table(("HOST-R3", "Gi0/0/0/2", "Gi0/0/0/2"))),
-            "R2": (LLDP_EMPTY, ""),
-            "R3": (LLDP_EMPTY, ""),
-        },
-    )
-    assert len(r.conflicts) == 1 and r.managed_links == []
+    # IC-6: a reconciliation conflict is fatal (previously reported and skipped).
+    with pytest.raises(discovery.DiscoveryError, match="reconciliation conflict: R1 Gi0/0/0/2: conflicting"):
+        _run(
+            lab_root,
+            monkeypatch,
+            {
+                "R1": (
+                    lldp_table(("HOST-R2", "Gi0/0/0/2", "Gi0/0/0/2")),
+                    cdp_table(("HOST-R3", "Gi0/0/0/2", "Gi0/0/0/2")),
+                ),
+                "R2": (LLDP_EMPTY, CDP_EMPTY),
+                "R3": (LLDP_EMPTY, CDP_EMPTY),
+            },
+        )
 
 
 def test_i11_duplicate_lldp_cdp_dedup(lab_root, monkeypatch):
-    r = _run(lab_root, monkeypatch, {"R1": (lldp_table(R1R2), cdp_table(R1R2)), "R2": (LLDP_EMPTY, "")})
+    r = _run(lab_root, monkeypatch, {"R1": (lldp_table(R1R2), cdp_table(R1R2)), "R2": (LLDP_EMPTY, CDP_EMPTY)})
     assert len(r.managed_links) == 1 and r.protocol_warnings == []
 
 
 def test_i13_warnings_deterministic_and_unique(lab_root, monkeypatch):
-    outputs = {f"R{i}": (LLDP_OFF, CDP_OFF) for i in range(1, 9)}
-    runs = [_run(lab_root, monkeypatch, outputs).protocol_warnings for _ in range(5)]
-    assert all(w == runs[0] for w in runs)
-    assert len(set(runs[0])) == len(runs[0])
-    assert runs[0][0].startswith("Device 'R1': LLDP") and runs[0][1].startswith("Device 'R1': CDP")
+    outputs = {f"R{i}": (LLDP_OFF, CDP_EMPTY) for i in range(1, 9)}
+    results = [_run(lab_root, monkeypatch, outputs) for _ in range(5)]
+    runs = [(r.protocol_status, r.protocol_warnings) for r in results]
+    assert all(run == runs[0] for run in runs)
+    status, warnings = runs[0]
+    assert status == {"LLDP disabled": [f"R{i}" for i in range(1, 9)]}  # target order, unique
+    assert len(warnings) == 1 and "No physical links were discovered" in warnings[0]
 
 
 def test_i14_i15_cleanup_on_success_and_failure(lab_root, monkeypatch, _env):
-    _run(lab_root, monkeypatch, {"R1": (LLDP_OFF, CDP_OFF), "R2": (LLDP_OFF, CDP_OFF)})
+    _run(lab_root, monkeypatch, {"R1": (LLDP_OFF, CDP_EMPTY), "R2": (LLDP_EMPTY, CDP_OFF)})
     assert sorted(_env) == ["R1", "R2"]
     _env.clear()
     with pytest.raises(discovery.DiscoveryError):
-        _run(lab_root, monkeypatch, {"R1": ("% CDP is not enabled\n", ""), "R2": (LLDP_OFF, CDP_OFF)})
+        _run(lab_root, monkeypatch, {"R1": ("% CDP is not enabled\n", CDP_EMPTY), "R2": (LLDP_OFF, CDP_OFF)})
     assert sorted(_env) == ["R1", "R2"]
 
 
-def test_i19_iosxe_behavior_unchanged(lab_root, monkeypatch):
+def test_i19_iosxe_lldp_disabled_is_a_protocol_status_and_unrecognized_cdp_is_fatal(lab_root, monkeypatch):
     _targets(lab_root, ["X1"], {"X1": "iosxe"})
-    monkeypatch.setattr(
-        discovery,
-        "_bootstrap_collect_iosxe",
-        lambda d, c: {
+
+    def collect(cdp):
+        return lambda d, c: {
             "hostname": "HOST-X1",
             "show_version": "x",
             "show_lldp_neighbors": "% LLDP is not enabled\n",
-            "show_cdp_neighbors": "garbage\n",
-            "show_ip_interface_brief": "",
-            "show_vrf": "",
-        },
-    )
+            "show_cdp_neighbors": cdp,
+        }
+
+    monkeypatch.setattr(discovery, "_bootstrap_collect_iosxe", collect(CDP_EMPTY))
     r = discovery.discover_topology(lab_root)
-    assert r.managed_links == [] and r.protocol_warnings == []  # XE path: no new warnings
+    assert r.managed_links == []
+    assert r.protocol_status == {"LLDP disabled": ["X1"]}
+
+    # IC-3: unrecognized CDP output is a parser failure (previously: zero neighbors).
+    monkeypatch.setattr(discovery, "_bootstrap_collect_iosxe", collect("garbage\n"))
+    with pytest.raises(discovery.DiscoveryError, match="not recognized as valid CDP"):
+        discovery.discover_topology(lab_root)
+
+    # Both known "not enabled" texts on IOS XE: no usable protocol.
+    monkeypatch.setattr(discovery, "_bootstrap_collect_iosxe", collect("% CDP is not enabled\n"))
+    with pytest.raises(discovery.DiscoveryError, match="no usable neighbor discovery protocol"):
+        discovery.discover_topology(lab_root)
+
+
+def test_ios_classic_cdp_only_matrix(lab_root, monkeypatch):
+    """Classic IOS has no LLDP (not applicable): CDP success(0) is a
+    success without warnings; CDP disabled leaves no usable protocol."""
+    _targets(lab_root, ["I1"], {"I1": "ios"})
+
+    def collect(cdp):
+        return lambda d, c: {"hostname": "HOST-I1", "show_version": "x", "show_cdp_neighbors": cdp}
+
+    monkeypatch.setattr(discovery, "_bootstrap_collect_ios", collect(CDP_EMPTY))
+    assert discovery.discover_topology(lab_root).protocol_warnings == []
+    monkeypatch.setattr(discovery, "_bootstrap_collect_ios", collect("% CDP is not enabled\n"))
+    with pytest.raises(discovery.DiscoveryError, match=r"LLDP not applicable, CDP disabled"):
+        discovery.discover_topology(lab_root)
 
 
 def test_i16_i18_no_warnings_leaves_summary_unchanged(lab_root, monkeypatch, capsys):
-    _run(lab_root, monkeypatch, {"R1": (lldp_table(R1R2), ""), "R2": (LLDP_EMPTY, "")})
+    _run(lab_root, monkeypatch, {"R1": (lldp_table(R1R2), CDP_EMPTY), "R2": (LLDP_EMPTY, CDP_EMPTY)})
     session = cfgmod.CliSession(lab_root)
     session.enter_configure()
     capsys.readouterr()
@@ -301,6 +340,6 @@ def test_i16_i18_no_warnings_leaves_summary_unchanged(lab_root, monkeypatch, cap
 
 
 def test_i20_warnings_contain_no_credentials_or_raw_output(lab_root, monkeypatch):
-    r = _run(lab_root, monkeypatch, {"R1": (LLDP_OFF, CDP_OFF), "R2": (LLDP_OFF, CDP_OFF)})
-    text = "\n".join(r.protocol_warnings)
+    r = _run(lab_root, monkeypatch, {"R1": (LLDP_OFF, CDP_EMPTY), "R2": (LLDP_EMPTY, CDP_OFF)})
+    text = "\n".join(r.protocol_warnings + [f"{k} {v}" for k, v in r.protocol_status.items()])
     assert SENTINEL not in text and "JST" not in text and "%" not in text

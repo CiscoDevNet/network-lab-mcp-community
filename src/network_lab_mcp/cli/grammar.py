@@ -703,7 +703,13 @@ def _build_global_root() -> Node:
         "topology", "Discover topology from active access information"
     )
     discover_topology_node.set_command(
-        "global.discover_topology", "Discover topology from active access information"
+        "global.discover_topology", "Discover topology using LLDP/CDP"
+    )
+    discover_topology_l3_node = discover_topology_node.add_literal(
+        "l3", "Include Layer 3 interface information"
+    )
+    discover_topology_l3_node.set_command(
+        "global.discover_topology_l3", "Discover topology using LLDP/CDP plus Layer 3 interface information"
     )
 
     access_info_arg = Argument(

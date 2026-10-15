@@ -14,10 +14,11 @@ enriched with stable Layer-3 interface context (IPv4 address + VRF).
         -> multi-protocol link reconciliation (reconcile_links): the same
            physical link seen via both protocols (or reciprocally from both
            ends) becomes exactly one link; a local interface where LLDP and
-           CDP disagree about the neighbor is reported as a conflict
-           instead of silently picking one
-        -> per-device Layer-3 interface enrichment (optional, additive --
-           see "L3 topology enrichment" below): ipv4_address + vrf only,
+           CDP disagree about the neighbor is a conflict, which (like any
+           managed physical interface in more than one link) fails
+           Discovery instead of silently picking one
+        -> per-device Layer-3 interface enrichment (only for `discover
+           topology l3`; see "L3 topology enrichment" below): ipv4_address + vrf only,
            never a prefix length, never operational (up/down) state
         -> DiscoveryResult (in-memory only)
 
@@ -33,11 +34,11 @@ access-info specifies (ssh or telnet). Telnet is unauthenticated-in-transit
 and unencrypted -- suitable only for isolated lab environments, never
 presented as a secure transport (see README.md/docs/architecture.md).
 
-L3 topology enrichment is deliberately additive, never a
-Discovery blocker: neighbor discovery (LLDP/CDP) remains the primary,
-required mechanism; if a device's optional L3 command(s) fail (transport
-timeout or unrecognized output), that one device's L3 enrichment is
-skipped (with a warning) while its LLDP/CDP-discovered links are kept.
+L3 topology enrichment is opt-in (`discover topology l3`): the default
+L2 run sends no L3-only command and never carries L3 data into the candidate.
+When requested it fails closed -- any device's L3 command, transport or
+parse failure fails the whole Discovery (no partial candidate). Neighbor
+discovery (LLDP/CDP) remains the only source of links.
 Only a stable, directly observed IPv4 address + VRF are stored -- never a
 prefix length, never inferred subnets, and never a link inferred from
 address similarity (links come from LLDP/CDP or an explicit topology edit
@@ -54,6 +55,7 @@ and a generic discovery/plugin framework."""
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import re
 from dataclasses import dataclass, field
 
@@ -268,25 +270,6 @@ def _run_command(
     return _extract_command_output(full_text, command_text, prompt_re)
 
 
-def _run_command_tolerant(device_id: str, command_text: str, prompt_re: re.Pattern) -> str:
-    """Like _run_command(), but for the *optional* L3 enrichment commands
-    only: a transport-level failure (the prompt never
-    returns -- e.g. an unsupported command that hangs rather than
-    returning an error line, or a genuinely broken session) must not fail
-    the whole device's collection just because L3 enrichment is best-
-    effort. Returns "" on that failure instead of raising -- an empty
-    string never looks like a recognized L3 table header, so the caller's
-    own L3 parser will treat it as "L3 unavailable/unparseable for this
-    device" (a warning, not a DiscoveryError) exactly like any other
-    unrecognized L3 output. This is deliberately NOT used for LLDP/CDP or
-    any of the existing required commands -- those keep failing the whole
-    device closed."""
-    try:
-        return _run_command(device_id, command_text, prompt_re)
-    except terminal.TerminalError:
-        return ""
-
-
 def _disable_terminal_paging(device_id: str, prompt_re: re.Pattern) -> None:
     """Send `terminal length 0` immediately after successful login and
     confirm the device prompt has returned before any Discovery show
@@ -316,12 +299,11 @@ def _disable_terminal_paging(device_id: str, prompt_re: re.Pattern) -> None:
         raise terminal.TerminalError(f"Timed out disabling terminal paging: {exc}") from exc
 
 
-def _bootstrap_collect(device_id: str, device_config: dict) -> dict:
+def _bootstrap_collect(device_id: str, device_config: dict, include_l3: bool = False) -> dict:
     """IOS XR collection: log in, disable pagination, and collect the
     read-only commands -- `show version` (identity/diagnostic parity),
     both neighbor-discovery protocols (IOS XR gets LLDP and CDP), and
-    `show ipv4 interface brief` (L3 enrichment, collected tolerantly --
-    see _run_command_tolerant()). `show running-config` is deliberately
+    `show ipv4 interface brief` (L3 enrichment, only when `include_l3`). `show running-config` is deliberately
     not collected: nothing in the Discovery result, parser, or
     reconciliation logic ever read it, so collecting the device's
     complete configuration -- which can be large and carries far more
@@ -339,19 +321,23 @@ def _bootstrap_collect(device_id: str, device_config: dict) -> dict:
         show_version = _run_command(device_id, "show version")
         show_lldp_neighbors = _run_command(device_id, "show lldp neighbors")
         show_cdp_neighbors = _run_command(device_id, "show cdp neighbors")
-        show_ipv4_interface_brief = _run_command_tolerant(device_id, "show ipv4 interface brief", _IOSXR_PROMPT_RE)
+        show_ipv4_interface_brief = (
+            _run_command(device_id, "show ipv4 interface brief") if include_l3 else None
+        )
     except terminal.TerminalError as exc:
         raise DiscoveryError(f"Device '{device_id}': {exc}") from exc
-    return {
+    collected = {
         "hostname": hostname,
         "show_version": show_version,
         "show_lldp_neighbors": show_lldp_neighbors,
         "show_cdp_neighbors": show_cdp_neighbors,
-        "show_ipv4_interface_brief": show_ipv4_interface_brief,
     }
+    if include_l3:
+        collected["show_ipv4_interface_brief"] = show_ipv4_interface_brief
+    return collected
 
 
-def _bootstrap_collect_iosxe(device_id: str, device_config: dict) -> dict:
+def _bootstrap_collect_iosxe(device_id: str, device_config: dict, include_l3: bool = False) -> dict:
     """IOS XE collection: log in, disable pagination (see
     _disable_terminal_paging()'s own docstring for the real C9200L
     failure this fixes), and collect `show version` (diagnostic parity
@@ -359,7 +345,7 @@ def _bootstrap_collect_iosxe(device_id: str, device_config: dict) -> dict:
     LLDP, in addition to CDP -- `% LLDP is not enabled` is handled by the
     caller, not here, exactly like CDP-unavailable already was), and the
     L3 enrichment commands `show vrf` + `show ip interface brief`
-    (collected tolerantly -- see _run_command_tolerant()). `show
+    (only when `include_l3`). `show
     running-config` is skipped since it is unused downstream for IOS XR
     too (kept minimal, "collect at minimum"). Fails closed (DiscoveryError)
     on any login, paging, LLDP/CDP command, or timeout failure."""
@@ -369,26 +355,30 @@ def _bootstrap_collect_iosxe(device_id: str, device_config: dict) -> dict:
         show_version = _run_command(device_id, "show version", _IOS_STYLE_PROMPT_RE)
         show_lldp_neighbors = _run_command(device_id, "show lldp neighbors", _IOS_STYLE_PROMPT_RE)
         show_cdp_neighbors = _run_command(device_id, "show cdp neighbors", _IOS_STYLE_PROMPT_RE)
-        show_vrf = _run_command_tolerant(device_id, "show vrf", _IOS_STYLE_PROMPT_RE)
-        show_ip_interface_brief = _run_command_tolerant(device_id, "show ip interface brief", _IOS_STYLE_PROMPT_RE)
+        show_vrf = _run_command(device_id, "show vrf", _IOS_STYLE_PROMPT_RE) if include_l3 else None
+        show_ip_interface_brief = (
+            _run_command(device_id, "show ip interface brief", _IOS_STYLE_PROMPT_RE) if include_l3 else None
+        )
     except terminal.TerminalError as exc:
         raise DiscoveryError(f"Device '{device_id}': {exc}") from exc
-    return {
+    collected = {
         "hostname": hostname,
         "show_version": show_version,
         "show_lldp_neighbors": show_lldp_neighbors,
         "show_cdp_neighbors": show_cdp_neighbors,
-        "show_vrf": show_vrf,
-        "show_ip_interface_brief": show_ip_interface_brief,
     }
+    if include_l3:
+        collected["show_vrf"] = show_vrf
+        collected["show_ip_interface_brief"] = show_ip_interface_brief
+    return collected
 
 
-def _bootstrap_collect_ios(device_id: str, device_config: dict) -> dict:
+def _bootstrap_collect_ios(device_id: str, device_config: dict, include_l3: bool = False) -> dict:
     """Classic IOS collection (deliberately minimal -- preserving the same
     "collect at minimum" principle used for IOS XE): log in, disable
     pagination, `show version`, `show cdp neighbors` (classic IOS has no
     LLDP support), and the L3 enrichment commands `show vrf` + `show ip
-    interface brief` (tolerant). No `show running-config` (unused
+    interface brief` (only when `include_l3`). No `show running-config` (unused
     downstream). Fails closed (DiscoveryError) on any login, paging, CDP
     command, or timeout failure."""
     try:
@@ -396,17 +386,21 @@ def _bootstrap_collect_ios(device_id: str, device_config: dict) -> dict:
         _disable_terminal_paging(device_id, _IOS_STYLE_PROMPT_RE)
         show_version = _run_command(device_id, "show version", _IOS_STYLE_PROMPT_RE)
         show_cdp_neighbors = _run_command(device_id, "show cdp neighbors", _IOS_STYLE_PROMPT_RE)
-        show_vrf = _run_command_tolerant(device_id, "show vrf", _IOS_STYLE_PROMPT_RE)
-        show_ip_interface_brief = _run_command_tolerant(device_id, "show ip interface brief", _IOS_STYLE_PROMPT_RE)
+        show_vrf = _run_command(device_id, "show vrf", _IOS_STYLE_PROMPT_RE) if include_l3 else None
+        show_ip_interface_brief = (
+            _run_command(device_id, "show ip interface brief", _IOS_STYLE_PROMPT_RE) if include_l3 else None
+        )
     except terminal.TerminalError as exc:
         raise DiscoveryError(f"Device '{device_id}': {exc}") from exc
-    return {
+    collected = {
         "hostname": hostname,
         "show_version": show_version,
         "show_cdp_neighbors": show_cdp_neighbors,
-        "show_vrf": show_vrf,
-        "show_ip_interface_brief": show_ip_interface_brief,
     }
+    if include_l3:
+        collected["show_vrf"] = show_vrf
+        collected["show_ip_interface_brief"] = show_ip_interface_brief
+    return collected
 
 
 # --------------------------------------------------------------------------
@@ -707,8 +701,8 @@ def parse_cdp_neighbors(raw_text: str, local_device_id: str) -> list[NeighborObs
 
 # --------------------------------------------------------------------------
 # L3 interface enrichment: ipv4_address + vrf only, per
-# interface -- additive topology context, never a Discovery blocker, never
-# a link/connectivity source. See the module docstring's "L3 topology
+# interface -- topology context only (collected on `discover topology l3`),
+# never a link/connectivity source. See the module docstring's "L3 topology
 # enrichment" paragraph for the overall design.
 # --------------------------------------------------------------------------
 
@@ -930,9 +924,8 @@ def _build_device_interface_fields(
     interface, or one whose address matches the access-info connection
     address for this same device (never persist the
     management address into topology L3 data), becomes an explicit `None`
-    removal signal so build_topology_devices_and_links() can safely drop
-    any stale prior value for that same interface without erasing
-    anything else."""
+    removal signal (build_discovery_candidate() leaves it out of the
+    rebuilt candidate)."""
     fields: dict[str, dict | None] = {}
     for raw_name, (ipv4_address, vrf) in raw_l3.items():
         canonical = _canonicalize_interface_name(raw_name)
@@ -1113,6 +1106,11 @@ class DiscoveryResult:
     conflicts: list[LinkConflict] = field(default_factory=list)
     identity_map: dict[str, str] = field(default_factory=dict)
     protocol_warnings: list[str] = field(default_factory=list)
+    # Normal protocol-availability facts of a successful run (not warnings):
+    # {"CDP disabled": [device, ...], "CDP unsupported": [...], ...} in a fixed
+    # label order, devices in target order.
+    protocol_status: dict[str, list[str]] = field(default_factory=dict)
+    include_l3: bool = False
 
 
 def _select_targets_by_type(access_data: dict, wanted_type: str) -> dict[str, dict]:
@@ -1154,19 +1152,17 @@ def _select_ios_targets(access_data: dict) -> dict[str, dict]:
     return _select_targets_by_type(access_data, "ios")
 
 
-def _disabled_warning(device_id: str, protocol: str) -> str:
-    """Fixed-text warning: logical device name + protocol only, never raw
-    device output."""
-    return f"Device '{device_id}': {protocol} is disabled; no {protocol} neighbor observations."
+# Display/serialization order of the protocol-status labels.
+_PROTOCOL_STATUS_LABELS = ("LLDP disabled", "LLDP unsupported", "CDP disabled", "CDP unsupported")
 
 
-def discover_topology(lab_root=None) -> DiscoveryResult:
+def discover_topology(lab_root=None, include_l3: bool = False) -> DiscoveryResult:
     """Run the full Discovery flow against committed running-config's
     selected access-info and return an in-memory DiscoveryResult.
 
     Never touches the committed candidate/topology/settings -- turning this
-    into a topology candidate is the caller's job (cli/config.py), exactly
-    like any other topology edit. Conservative or nothing: if any supported
+    into a topology candidate (a rebuild, see build_discovery_candidate())
+    is the caller's job (cli/config.py). Conservative or nothing: if any supported
     target fails login/collection, the whole operation fails
     (DiscoveryError) before any bootstrap session is even considered for
     reconciliation -- there is no partial result.
@@ -1175,8 +1171,12 @@ def discover_topology(lab_root=None) -> DiscoveryResult:
     (LLDP + CDP), and classic IOS (CDP only). `nxos`/`host` and any
     unrecognized type are silently skipped, not failed; only zero supported
     targets of *any* kind fails. L3 enrichment (IPv4 + VRF context) is
-    collected per device on top of neighbor discovery, additively -- see
-    the module docstring."""
+    collected only when `include_l3` is True (`discover topology l3`);
+    the default L2-only run never sends an L3 command. Fatal (DiscoveryError,
+    nothing returned): any login/command/timeout failure, an unrecognized
+    LLDP/CDP output, a device with no usable neighbor protocol, a
+    reconciliation conflict or physical-interface reuse, and -- for an
+    explicit L3 request -- any L3 collection or parse failure."""
     lab_root = lab_root or lab.find_lab_root()
     access_info_name = resolve_default_topology_name(lab_root)
     if not lab.access_info_exists(access_info_name, lab_root):
@@ -1200,23 +1200,24 @@ def discover_topology(lab_root=None) -> DiscoveryResult:
     # bootstrap session; nothing here is mutated by more than one worker,
     # and no candidate/topology state is touched until every result has
     # been collected below.
+    collect_kwargs = {"include_l3": True} if include_l3 else {}
     worker_count = min(len(all_targets), DISCOVERY_MAX_WORKERS)
     futures: dict[str, concurrent.futures.Future] = {}
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {
-                device_id: executor.submit(_bootstrap_collect, device_id, device_cfg)
+                device_id: executor.submit(_bootstrap_collect, device_id, device_cfg, **collect_kwargs)
                 for device_id, device_cfg in iosxr_targets.items()
             }
             futures.update(
                 {
-                    device_id: executor.submit(_bootstrap_collect_iosxe, device_id, device_cfg)
+                    device_id: executor.submit(_bootstrap_collect_iosxe, device_id, device_cfg, **collect_kwargs)
                     for device_id, device_cfg in iosxe_targets.items()
                 }
             )
             futures.update(
                 {
-                    device_id: executor.submit(_bootstrap_collect_ios, device_id, device_cfg)
+                    device_id: executor.submit(_bootstrap_collect_ios, device_id, device_cfg, **collect_kwargs)
                     for device_id, device_cfg in ios_targets.items()
                 }
             )
@@ -1258,50 +1259,66 @@ def discover_topology(lab_root=None) -> DiscoveryResult:
     observation_count = 0
     cdp_observation_count = 0
     protocol_warnings: list[str] = []
+    status_devices: dict[str, list[str]] = {label: [] for label in _PROTOCOL_STATUS_LABELS}
     for device_id, info in collected.items():
         observations: list[NeighborObservation] = []
-        if device_id in iosxr_targets:
-            # Both protocols were already collected for this device, so a
-            # disabled LLDP never prevents the CDP output below from being
-            # used (and vice versa). "Disabled" is a known observation-less
-            # state, not evidence that no link exists.
-            lldp_text = info["show_lldp_neighbors"]
-            if iosxr_protocol_disabled(lldp_text, "lldp", device_id):
-                protocol_warnings.append(_disabled_warning(device_id, "LLDP"))
+        lldp_state = "unavailable"  # IOS: classic IOS has no LLDP (not applicable)
+        if device_id in iosxr_targets or device_id in iosxe_targets:
+            lldp_text = info.get("show_lldp_neighbors", "")
+            lldp_disabled = (
+                iosxr_protocol_disabled(lldp_text, "lldp", device_id)
+                if device_id in iosxr_targets
+                else bool(_LLDP_UNAVAILABLE_RE.search(lldp_text))
+            )
+            if lldp_disabled:
+                lldp_state = "disabled"
             else:
                 try:
                     lldp_observations = parse_lldp_neighbors(lldp_text, device_id)
                 except LldpParseError as exc:
                     raise DiscoveryError(str(exc)) from exc
+                lldp_state = "success"
                 observation_count += len(lldp_observations)
                 observations.extend(lldp_observations)
-            cdp_text = info.get("show_cdp_neighbors", "")
-            if iosxr_protocol_disabled(cdp_text, "cdp", device_id):
-                protocol_warnings.append(_disabled_warning(device_id, "CDP"))
-                cdp_text = ""
+
+        cdp_text = info.get("show_cdp_neighbors", "")
+        cdp_state = "success"
+        if _cdp_table_recognized(cdp_text):
             cdp_observations = parse_cdp_neighbors(cdp_text, device_id)
+            if not cdp_observations and _cdp_table_has_body(cdp_text):
+                raise DiscoveryError(
+                    f"Device '{device_id}': 'show cdp neighbors' table could not be parsed "
+                    "(rows present but none recognized)."
+                )
             cdp_observation_count += len(cdp_observations)
             observations.extend(cdp_observations)
-        elif device_id in iosxe_targets:
-            # "% LLDP is not enabled" (or any other
-            # unrecognized response) means zero LLDP observations, not a
-            # device/parser failure -- IOS XE's LLDP support is optional/
-            # commonly disabled, unlike IOS XR's. Bypassing the strict
-            # parser entirely for this known signal keeps
-            # parse_lldp_neighbors() itself, and IOS XR's own still-strict
-            # behavior, completely unchanged.
-            lldp_text = info.get("show_lldp_neighbors", "")
-            if not _LLDP_UNAVAILABLE_RE.search(lldp_text):
-                try:
-                    lldp_observations = parse_lldp_neighbors(lldp_text, device_id)
-                except LldpParseError as exc:
-                    raise DiscoveryError(str(exc)) from exc
-                observation_count += len(lldp_observations)
-                observations.extend(lldp_observations)
-        if device_id not in iosxr_targets:
-            cdp_observations = parse_cdp_neighbors(info.get("show_cdp_neighbors", ""), device_id)
-            cdp_observation_count += len(cdp_observations)
-            observations.extend(cdp_observations)
+        elif iosxr_protocol_disabled(cdp_text, "cdp", device_id):
+            cdp_state = "disabled"
+        elif device_id in iosxr_targets and _iosxr_lnt_cdp_unsupported(info.get("show_version", ""), cdp_text):
+            cdp_state = "unsupported"
+        else:
+            raise DiscoveryError(
+                f"Device '{device_id}': 'show cdp neighbors' output was not recognized as valid "
+                "CDP structure (no 'Device ID ... Local Intrfce ... Port ID' table header found)."
+            )
+
+        # Collection-status priority: a device needs at least one protocol
+        # that actually ran and was recognized (an empty neighbor table
+        # counts); "disabled" is a warning only when another protocol
+        # succeeded, "unavailable" (not supported / not applicable) is a
+        # capability fact, never a warning.
+        if "success" not in (lldp_state, cdp_state):
+            raise DiscoveryError(
+                f"Device '{device_id}': no usable neighbor discovery protocol "
+                f"(LLDP {lldp_state if lldp_state != 'unavailable' else 'not applicable'}, "
+                f"CDP {cdp_state})."
+            )
+        # Disabled / unsupported beside a working protocol is a normal
+        # protocol status of this run, reported separately from warnings.
+        if lldp_state == "disabled":
+            status_devices["LLDP disabled"].append(device_id)
+        if cdp_state in ("disabled", "unsupported"):
+            status_devices[f"CDP {cdp_state}"].append(device_id)
 
         for obs in observations:
             remote_id = resolve_remote_identity(obs.remote_device_id_raw, identity_map)
@@ -1319,7 +1336,9 @@ def discover_topology(lab_root=None) -> DiscoveryResult:
                 )
 
     links, conflicts = reconcile_links(resolved)
-    if protocol_warnings and not links:
+    _fail_on_link_ambiguity(links, conflicts, unresolved)
+    protocol_status = {label: devs for label, devs in status_devices.items() if devs}
+    if protocol_status and not links:
         protocol_warnings.append(
             "No physical links were discovered; the topology candidate will contain devices but no links."
         )
@@ -1328,29 +1347,28 @@ def discover_topology(lab_root=None) -> DiscoveryResult:
     devices.update({device_id: {"type": "iosxe"} for device_id in iosxe_targets})
     devices.update({device_id: {"type": "ios"} for device_id in ios_targets})
 
-    # L3 enrichment: additive, per-device, never a Discovery
-    # blocker -- an L3ParseError here only skips *this device's*
-    # enrichment (with a warning), never the whole operation, and never
-    # touches its already-collected LLDP/CDP links above.
-    l3_warnings: list[str] = []
+    # L3 enrichment runs only for an explicit `discover topology l3`, and
+    # then fails closed: a missing/unrecognized L3 output for any device
+    # fails the whole Discovery (nothing is returned, so no candidate is
+    # ever partially enriched).
     l3_enriched_device_count = 0
     l3_interface_count = 0
-    for device_id, info in collected.items():
-        management_address = all_targets[device_id].get("address")
-        try:
-            if device_id in iosxr_targets:
-                raw_l3 = parse_ipv4_interface_brief(info.get("show_ipv4_interface_brief", ""))
-            else:
-                ip_brief = parse_ip_interface_brief(info.get("show_ip_interface_brief", ""))
-                vrf_by_interface = parse_show_vrf(info.get("show_vrf", ""))
-                raw_l3 = _combine_ios_style_l3(ip_brief, vrf_by_interface)
-        except L3ParseError as exc:
-            l3_warnings.append(f"Device '{device_id}': L3 enrichment skipped: {exc}")
-            continue
-        interface_fields = _build_device_interface_fields(raw_l3, management_address)
-        devices[device_id]["interfaces"] = interface_fields
-        l3_enriched_device_count += 1
-        l3_interface_count += sum(1 for value in interface_fields.values() if value is not None)
+    if include_l3:
+        for device_id, info in collected.items():
+            management_address = all_targets[device_id].get("address")
+            try:
+                if device_id in iosxr_targets:
+                    raw_l3 = parse_ipv4_interface_brief(info.get("show_ipv4_interface_brief", ""))
+                else:
+                    ip_brief = parse_ip_interface_brief(info.get("show_ip_interface_brief", ""))
+                    vrf_by_interface = parse_show_vrf(info.get("show_vrf", ""))
+                    raw_l3 = _combine_ios_style_l3(ip_brief, vrf_by_interface)
+            except L3ParseError as exc:
+                raise DiscoveryError(f"Device '{device_id}': L3 interface collection failed: {exc}") from exc
+            interface_fields = _build_device_interface_fields(raw_l3, management_address)
+            devices[device_id]["interfaces"] = interface_fields
+            l3_enriched_device_count += 1
+            l3_interface_count += sum(1 for value in interface_fields.values() if value is not None)
 
     return DiscoveryResult(
         access_info_name=access_info_name,
@@ -1363,14 +1381,105 @@ def discover_topology(lab_root=None) -> DiscoveryResult:
         ios_target_count=len(ios_targets),
         l3_enriched_device_count=l3_enriched_device_count,
         l3_interface_count=l3_interface_count,
-        l3_warnings=l3_warnings,
         devices=devices,
         managed_links=links,
         unresolved=unresolved,
         conflicts=conflicts,
         identity_map=identity_map,
         protocol_warnings=protocol_warnings,
+        protocol_status=protocol_status,
+        include_l3=include_l3,
     )
+
+
+# The one measured "CDP not supported" case (live read-only capture, IOS XR
+# 26.2.2 LNT / NCS540L): the device's `show version` banner identifies an IOS XR
+# LNT image and `show cdp neighbors` answers with nothing but this error
+# (plus the caret marker line). Deliberately narrow: `% Invalid input` is NOT
+# treated as "unsupported" for any other OS, image or command.
+_IOSXR_LNT_VERSION_RE = re.compile(r"^Cisco IOS XR Software, Version \S+ LNT\s*$", re.MULTILINE)
+_INVALID_INPUT_LINE = "% Invalid input detected at '^' marker."
+_CARET_ONLY_RE = re.compile(r"^\s*\^\s*$")
+
+
+def _iosxr_lnt_cdp_unsupported(show_version: str, cdp_text: str) -> bool:
+    """True only for a device whose own `show version` is an IOS XR LNT
+    image AND whose `show cdp neighbors` output is exactly the invalid-input
+    error (ignoring blank lines, the CLI timestamp, the prompt/command echo
+    and the caret marker line). Caller restricts this to `type: iosxr`."""
+    if not _IOSXR_LNT_VERSION_RE.search(show_version or ""):
+        return False
+    meaningful = [
+        line
+        for line in (raw.strip() for raw in cdp_text.splitlines())
+        if line
+        and not _CLI_TIMESTAMP_RE.match(line)
+        and not _IOSXR_PROMPT_OR_ECHO_RE.match(line)
+        and not _CARET_ONLY_RE.match(line)
+    ]
+    return meaningful == [_INVALID_INPUT_LINE]
+
+
+def _cdp_table_has_body(raw_text: str) -> bool:
+    """True if the recognized CDP table is followed by at least one
+    non-blank, non-prompt line before the table ends -- used to tell a
+    valid empty table from a broken one whose rows all failed to parse."""
+    in_table = False
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if not in_table:
+            if line.startswith("Device ID") and _CDP_HEADER_MARKER in line and raw_line.find("Port ID") != -1:
+                in_table = True
+            continue
+        if not line:
+            return False
+        if _IOSXR_PROMPT_RE.search(line):
+            return False
+        return True
+    return False
+
+
+def _cdp_table_recognized(raw_text: str) -> bool:
+    """True if `show cdp neighbors` output carries the CDP table header
+    (the same header parse_cdp_neighbors() requires), i.e. the command ran
+    and produced a CDP table -- possibly with zero rows."""
+    for raw_line in raw_text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("Device ID") and _CDP_HEADER_MARKER in line and raw_line.find("Port ID") != -1:
+            return True
+    return False
+
+
+def _fail_on_link_ambiguity(
+    links: list[ManagedLink], conflicts: list[LinkConflict], unresolved: list[UnresolvedNeighbor]
+) -> None:
+    """Fail Discovery (DiscoveryError) instead of producing a candidate when
+    the reconciled evidence is ambiguous: a reconciliation conflict, a
+    managed physical interface claimed by more than one link, or a managed
+    link endpoint that another observation says faces an unmanaged
+    neighbor. Messages name only logical devices and interface names."""
+    problems: list[str] = []
+    for conflict in conflicts:
+        a_dev, a_intf = conflict.endpoint_a
+        b_dev, b_intf = conflict.endpoint_b
+        if conflict.endpoint_a == conflict.endpoint_b:
+            problems.append(f"{a_dev} {a_intf}: conflicting neighbor observations")
+        else:
+            problems.append(f"{a_dev} {a_intf} <-> {b_dev} {b_intf}: inconsistent reciprocal observation")
+    owners: dict[tuple[str, str], list[ManagedLink]] = {}
+    for link in links:
+        for endpoint in ((link.a_device, link.a_interface), (link.b_device, link.b_interface)):
+            owners.setdefault(endpoint, []).append(link)
+    for endpoint in sorted(owners):
+        if len(owners[endpoint]) > 1:
+            problems.append(f"{endpoint[0]} {endpoint[1]}: interface appears in more than one link")
+    for neighbor in unresolved:
+        endpoint = (neighbor.local_device_id, neighbor.local_interface)
+        if endpoint in owners:
+            problems.append(f"{endpoint[0]} {endpoint[1]}: observed with both a managed and an unmanaged neighbor")
+    if problems:
+        unique = list(dict.fromkeys(sorted(problems)))
+        raise DiscoveryError("Neighbor reconciliation conflict: " + "; ".join(unique) + ".")
 
 
 def resolve_default_topology_name(lab_root=None) -> str:
@@ -1389,62 +1498,55 @@ def resolve_default_topology_name(lab_root=None) -> str:
 
 
 def _topology_link_key(link: dict) -> tuple:
-    endpoint_a = (link.get("a"), link.get("a_interface"))
-    endpoint_b = (link.get("b"), link.get("b_interface"))
+    endpoint_a = (link.get("a"), link.get("a_interface") or "")
+    endpoint_b = (link.get("b"), link.get("b_interface") or "")
     return tuple(sorted((endpoint_a, endpoint_b)))
 
 
-def build_topology_devices_and_links(result: DiscoveryResult, existing_candidate: dict) -> tuple[dict, list]:
-    """Merge a DiscoveryResult's managed devices/links into whatever
-    devices/links already exist in `existing_candidate` (a brand-new empty
-    topology or an already-committed/candidate one). Conservative: never
-    removes an existing device or link, and never duplicates a link that's
-    already present (compared by its unordered (device, interface)
-    endpoint pair).
-    Pure/no I/O: the caller (cli/config.py) is responsible for actually
-    writing the result into `session.definition_candidate`.
+# Topology device fields Discovery owns and rebuilds from scratch on every
+# run; any other field of a still-managed device is left as it was.
+_DISCOVERY_OWNED_DEVICE_FIELDS = ("type", "interfaces")
 
-    `fields["interfaces"]` (L3 enrichment), when present, is
-    merged *per interface*, never with a blanket top-level dict.update()
-    like every other field: a plain update() would silently replace the
-    entire existing interfaces mapping, discarding L3 data for any
-    interface not re-observed this run -- absence/failure must
-    never erase previous data. Each interface's own value is either a
-    dict to set/overwrite, or `None` -- an explicit removal signal (from
-    an interface explicitly re-observed as `unassigned` or
-    excluded as a management address) that safely drops just that one
-    interface's stale entry. A device with no L3 result at all this run
-    (enrichment skipped/failed) simply has no "interfaces" key in
-    `fields`, so its existing interfaces are left completely untouched."""
-    devices = dict(existing_candidate.get("devices") or {})
-    for device_id, fields in result.devices.items():
-        merged = dict(devices.get(device_id) or {})
-        new_interfaces = fields.get("interfaces")
-        other_fields = {key: value for key, value in fields.items() if key != "interfaces"}
-        merged.update(other_fields)
-        if new_interfaces is not None:
-            merged_interfaces = dict(merged.get("interfaces") or {})
-            for interface_name, interface_value in new_interfaces.items():
-                if interface_value is None:
-                    merged_interfaces.pop(interface_name, None)
-                else:
-                    merged_interfaces[interface_name] = interface_value
-            merged["interfaces"] = merged_interfaces
-        devices[device_id] = merged
 
-    links = list(existing_candidate.get("links") or [])
-    seen_keys = {_topology_link_key(link) for link in links}
-    for managed_link in result.managed_links:
-        link_dict = {
-            "a": managed_link.a_device,
-            "a_interface": managed_link.a_interface,
-            "b": managed_link.b_device,
-            "b_interface": managed_link.b_interface,
+def build_discovery_candidate(result: DiscoveryResult, base: dict) -> dict:
+    """Rebuild a topology candidate from this run's DiscoveryResult only.
+
+    `base` is the existing topology data (or a new empty topology); it
+    contributes only what Discovery does not own: the top-level `name`,
+    `description` and any unknown top-level keys, plus unrelated extra
+    fields of a device that is still managed. Devices and links are NEVER
+    carried over from `base` -- a device absent from the active
+    access-info, an earlier link, and earlier L3 `interfaces` all vanish
+    unless this run observed them again (L2 runs therefore never carry L3
+    data). Output is deterministic: devices sorted by ID, each link's
+    endpoints in canonical (device, interface) order, links sorted. Pure,
+    no I/O, never mutates `base`."""
+    candidate = {key: copy.deepcopy(value) for key, value in base.items() if key not in ("devices", "links")}
+    base_devices = base.get("devices") or {}
+    devices: dict[str, dict] = {}
+    for device_id in sorted(result.devices):
+        fields = result.devices[device_id]
+        device = {
+            key: copy.deepcopy(value)
+            for key, value in (base_devices.get(device_id) or {}).items()
+            if key not in _DISCOVERY_OWNED_DEVICE_FIELDS
         }
-        key = _topology_link_key(link_dict)
-        if key in seen_keys:
-            continue
-        links.append(link_dict)
-        seen_keys.add(key)
+        device["type"] = fields["type"]
+        interfaces = fields.get("interfaces")
+        if interfaces is not None:
+            device["interfaces"] = {name: dict(value) for name, value in sorted(interfaces.items()) if value is not None}
+        devices[device_id] = device
 
-    return devices, links
+    links: list[dict] = []
+    for managed_link in result.managed_links:
+        first, second = sorted(
+            (
+                (managed_link.a_device, managed_link.a_interface),
+                (managed_link.b_device, managed_link.b_interface),
+            )
+        )
+        links.append({"a": first[0], "a_interface": first[1], "b": second[0], "b_interface": second[1]})
+    links.sort(key=_topology_link_key)
+    candidate["devices"] = devices
+    candidate["links"] = links
+    return candidate

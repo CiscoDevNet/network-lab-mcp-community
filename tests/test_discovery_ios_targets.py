@@ -50,7 +50,7 @@ _IP_BRIEF_HEADER = "Interface              IP-Address      OK? Method Status    
 _VRF_HEADER = "  Name                             Default RD            Protocols   Interfaces"
 
 
-def _fake_ios_collect_pagent(device_id, cfg):
+def _fake_ios_collect_pagent(device_id, cfg, include_l3=False):
     row_r1 = f"{'ASR9001-R1':<17}{'Gig0/0':<18}{'137':<11}{'R':<12}{'ASR9K Ser':<12}Gi0/0/0/10"
     return {
         "hostname": "PAGENT",
@@ -96,13 +96,13 @@ def test_ios_l3_enrichment_excludes_management_address_and_keeps_data_plane(lab_
     _write_access_info(lab_root, {"PAGENT": {"type": "ios", "address": "192.0.2.30", "transport": "telnet"}})
     monkeypatch.setattr(discovery, "_bootstrap_collect_ios", _fake_ios_collect_pagent)
 
-    result = discovery.discover_topology(lab_root)
+    result = discovery.discover_topology(lab_root, include_l3=True)
 
     interfaces = result.devices["PAGENT"]["interfaces"]
     # FastEthernet0/0's address matches the access-info connection address
     # for PAGENT -- must never be copied into topology L3 data. At the raw
     # DiscoveryResult level this is an explicit `None` removal signal (see
-    # _build_device_interface_fields()); build_topology_devices_and_links()
+    # _build_device_interface_fields()); build_discovery_candidate()
     # is what actually drops it from the merged candidate (covered by
     # tests/test_discovery_l3_candidate_merge.py).
     assert interfaces["FastEthernet0/0"] is None
@@ -110,7 +110,7 @@ def test_ios_l3_enrichment_excludes_management_address_and_keeps_data_plane(lab_
     assert result.l3_enriched_device_count == 1
     assert result.l3_interface_count == 1
 
-    devices, _links = discovery.build_topology_devices_and_links(result, {})
+    devices = discovery.build_discovery_candidate(result, {})["devices"]
     assert "FastEthernet0/0" not in devices["PAGENT"]["interfaces"]
     assert devices["PAGENT"]["interfaces"]["GigabitEthernet0/0.2000"]["ipv4_address"] == "10.20.0.10"
 

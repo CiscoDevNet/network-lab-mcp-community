@@ -507,7 +507,8 @@ access-info) — it does not change what MCP tools, logs, or errors expose.
 | Command | Effect |
 |---------|--------|
 | `running-config` | Enter running-config selection mode (`network-lab(config-running)#`). |
-| `discover topology` | Run IOS XR/IOS XE/IOS LLDP+CDP discovery (plus optional L3 interface enrichment) against the committed `active_access_info` and apply the result as a topology candidate (new or merged into an existing one) — see [architecture.md](architecture.md#topology-discovery). Enters topology definition mode on success. Never commits, never selects `active_topology`. Blocked (like opening any other definition) if a *different* definition is currently open and dirty. |
+| `discover topology` | Run IOS XR/IOS XE/IOS LLDP+CDP discovery (L2 only; no L3 command is sent) against the committed `active_access_info` and **rebuild** the same-named topology candidate from this run alone (no merge with existing links; earlier L3 data is not carried over) — see [architecture.md](architecture.md#topology-discovery). Enters topology definition mode on success. Never commits, never selects `active_topology`. Rejected if a *different* definition is open and dirty, or if the target topology has manual edits since the last discovery (use `clear`). Devices/links removed by the rebuild are listed before the candidate is replaced. On any failure the candidate is left unchanged (`% Topology candidate not updated.`). |
+| `discover topology l3` | Same, plus per-device L3 interface enrichment (IPv4 + VRF). Any L3 collection/parse failure fails the whole run. |
 | `access-info <name>` | Create or edit an access-info definition; `<name>` existing loads it, otherwise starts a new one. Enters access-info definition mode. |
 | `topology <name>` | Create or edit a topology definition (see "Case-only topology-name collision safeguard" below). Enters topology definition mode. |
 | `scenario <name>` | Create or edit a scenario definition. Enters scenario definition mode. |
@@ -1651,7 +1652,7 @@ password entry on that one controlled path.
   command lines (see "Topology device mode commands" above). Any other
   field the CLI does not directly edit is likewise preserved untouched
   through a commit.
-- `discover topology` supports IOS XR/IOS XE (LLDP + CDP) and classic IOS
+- `discover topology [l3]` supports IOS XR/IOS XE (LLDP + CDP) and classic IOS
   (CDP only) — see README.md's ["Supported device types & Discovery
   scope"](../README.md#supported-device-types--discovery-scope) for the
   full scope and limitations; no NX-OS discovery, no automatic commit or

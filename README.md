@@ -170,7 +170,7 @@ See [docs/architecture.md](docs/architecture.md) for the complete model.
 - **Real, human-observable terminals.** Sessions run in a dedicated tmux environment.
 - **Credentials never cross the MCP boundary.** The AI opens a terminal by logical device name; private access information is resolved internally.
 - **Candidate / commit configuration.** Human CLI changes remain candidate state until an explicit `commit`.
-- **Discovery is candidate-first.** `discover topology` never auto-commits and never auto-selects the discovered topology.
+- **Discovery is candidate-first.** `discover topology` never auto-commits and never auto-selects the discovered topology. It rebuilds the candidate from the current LLDP/CDP results only (no merge with older links), is L2-only by default (`discover topology l3` adds L3 interface data), and refuses to run over uncommitted manual edits.
 - **Fail closed instead of guessing.** Missing access information, ambiguous resolution, type mismatches, and invalid state produce explicit errors.
 - **Human judgment stays authoritative.** AI can investigate and report, but the engineer remains responsible for the final technical decision.
 
@@ -367,6 +367,8 @@ Discovery complete.
   CDP observations:     0
   Managed links:        2
   Unresolved neighbors: 0
+  L3 enrichment:        Disabled
+  Previous L3 data:     Not carried over
   Topology candidate:   my_lab
 
 network-lab(config-topology-my_lab)# show configuration
@@ -380,6 +382,29 @@ network-lab(config-running)# topology my_lab
 network-lab(config-running)# commit
 Commit complete.
 ```
+
+Discovery behavior in brief:
+
+- `discover topology` collects LLDP/CDP only; `discover topology l3` also
+  collects IPv4/VRF interface data. L2 runs never send L3-only commands and
+  never carry earlier L3 data into the new candidate.
+- The candidate is **rebuilt** from this run alone: devices and links not
+  observed (or no longer in the active access-info) are dropped from the
+  candidate, and the removed devices/links are listed before the candidate is
+  replaced. The committed definition is untouched until `commit`; `clear`
+  restores it. Topology name, description and unknown top-level metadata are
+  kept.
+- Discovery fails closed (the candidate is left exactly as it was): login,
+  command or timeout failure, unrecognized LLDP/CDP output, a device with no
+  usable neighbor protocol (e.g. LLDP and CDP both disabled), conflicting
+  neighbor evidence (including one physical interface in two links), and, for
+  `l3`, any L3 collection or parse failure. A disabled or unsupported protocol
+  beside a working one is just listed under `Neighbor discovery protocol
+  status:` (not a warning).
+- It refuses to run when the target topology (or another definition) has
+  uncommitted manual edits; `clear` first. Re-running over a candidate that
+  only Discovery produced is allowed.
+
 
 Discovery commits only the topology **definition**. Selecting that topology as active remains a separate explicit running-config operation.
 

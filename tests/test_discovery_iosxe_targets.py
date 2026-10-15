@@ -69,8 +69,8 @@ def _fake_iosxr_collect(device_id, cfg):
 
 def _fake_iosxe_collect_pagent(device_id, cfg):
     cdp_header = "Device ID        Local Intrfce     Holdtme    Capability  Platform    Port ID"
-    row_r1 = f"{'ASR9001-R1':<17}{'Gig0/0':<18}{'137':<11}{'R':<12}{'ASR9K Ser':<12}Gi0/0/0/10"
-    row_r2 = f"{'ASR9001-R2':<17}{'Gig0/1':<18}{'137':<11}{'R':<12}{'ASR9K Ser':<12}Gi0/0/0/10"
+    row_r1 = f"{'HOST-R1':<17}{'Gig0/0':<18}{'137':<11}{'R':<12}{'ASR9K Ser':<12}Gi0/0/0/10"
+    row_r2 = f"{'HOST-R2':<17}{'Gig0/1':<18}{'137':<11}{'R':<12}{'ASR9K Ser':<12}Gi0/0/0/10"
     return {
         "hostname": "PAGENT",
         "show_version": "x",
@@ -92,11 +92,11 @@ def test_iosxe_only_definition_discovers_via_cdp(lab_root, monkeypatch):
     assert result.iosxe_target_count == 1
     assert result.connected_count == 1
     assert result.devices == {"PAGENT": {"type": "iosxe"}}
-    # PAGENT's own CDP neighbors (ASR9001-R1/-R2) are not managed devices
+    # PAGENT's own CDP neighbors (HOST-R1/-R2) are not managed devices
     # here (only PAGENT itself is in this definition), so they stay
     # unresolved -- never auto-created as topology devices.
     assert result.managed_links == []
-    assert {u.remote_device_id_raw for u in result.unresolved} == {"ASR9001-R1", "ASR9001-R2"}
+    assert {u.remote_device_id_raw for u in result.unresolved} == {"HOST-R1", "HOST-R2"}
 
 
 def test_mixed_iosxr_and_iosxe_definition_produces_expected_managed_links(lab_root, monkeypatch):

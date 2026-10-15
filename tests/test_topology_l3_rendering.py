@@ -223,7 +223,7 @@ def test_discovery_l3_data_survives_candidate_review_commit_and_active_selection
         conflicts=[],
         identity_map={"R1": "HOST-R1"},
     )
-    monkeypatch.setattr(discovery, "discover_topology", lambda lab_root=None: result)
+    monkeypatch.setattr(discovery, "discover_topology", lambda lab_root=None, include_l3=False: result)
 
     session = cfgmod.CliSession(lab_root)
     session.enter_configure()

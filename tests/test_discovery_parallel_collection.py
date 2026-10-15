@@ -47,6 +47,9 @@ def _fake_collect_result(device_id: str) -> dict:
         "show_version": "Cisco IOS XR Software",
         "show_running_config": f"hostname HOST-{device_id}",
         "show_lldp_neighbors": _clean_lldp(device_id),
+        # A recognized, empty CDP table: "ran, zero neighbors" (an absent or
+        # unrecognized CDP output is now a fatal parser failure).
+        "show_cdp_neighbors": "Device ID        Local Intrfce     Holdtme    Capability  Platform    Port ID\n",
     }
 
 

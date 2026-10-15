@@ -29,8 +29,8 @@ _LLDP_HEADER = "Device ID       Local Intf                      Hold-time  Capab
 _L3_HEADER = "Interface                     IP-Address   Status Protocol Vrf-Name"
 
 
-def test_l3_parser_failure_on_one_device_preserves_its_link_and_warns(lab_root, monkeypatch):
-    def fake_collect(device_id, cfg):
+def test_l3_parser_failure_on_one_device_fails_the_whole_l3_discovery(lab_root, monkeypatch):
+    def fake_collect(device_id, cfg, include_l3=False):
         other = "R2" if device_id == "R1" else "R1"
         return {
             "hostname": f"HOST-{device_id}",
@@ -56,46 +56,40 @@ def test_l3_parser_failure_on_one_device_preserves_its_link_and_warns(lab_root, 
         },
     )
 
+    # IC-7: an explicit `discover topology l3` fails closed on any device's
+    # L3 failure (previously: skipped with a warning, links kept) ...
+    with pytest.raises(discovery.DiscoveryError, match=r"Device 'R1': L3 interface collection failed"):
+        discovery.discover_topology(lab_root, include_l3=True)
+
+    # ... while the default L2-only run never looks at L3 output at all:
+    # the same collected data yields the link and no interface data.
     result = discovery.discover_topology(lab_root)
-
-    # The reciprocal LLDP link is intact regardless of R1's L3 failure.
     assert len(result.managed_links) == 1
-    assert result.conflicts == []
-
-    # R1's L3 enrichment was skipped, with a warning naming it.
-    assert "interfaces" not in result.devices["R1"]
-    assert any("R1" in warning for warning in result.l3_warnings)
-
-    # R2's L3 enrichment succeeded and is completely unaffected.
-    assert result.devices["R2"]["interfaces"]["GigabitEthernet0/0/0/2"] == {
-        "ipv4_address": "10.0.12.2",
-        "vrf": "default",
-    }
-    assert result.l3_enriched_device_count == 1
+    assert "interfaces" not in result.devices["R1"] and "interfaces" not in result.devices["R2"]
+    assert result.l3_enriched_device_count == 0 and not result.include_l3
 
 
-def test_l3_transport_failure_is_tolerated_and_treated_like_a_parse_failure(lab_root, monkeypatch):
-    """A transport-level failure on the *optional* L3 command (the prompt
-    never returns) must not fail the whole device -- _run_command_
-    tolerant() converts it to "" upstream, which the L3 parser then
-    treats as an unrecognized header, i.e. a warning, not a
-    DiscoveryError."""
+def test_l3_empty_output_is_fatal_in_l3_mode_and_ignored_in_l2_mode(lab_root, monkeypatch):
+    """An empty/unrecognized L3 output (no table header) is a parser
+    failure: fatal for an explicit L3 request, never even read in L2."""
 
-    def fake_collect(device_id, cfg):
+    def fake_collect(device_id, cfg, include_l3=False):
         return {
             "hostname": "HOST-R1",
             "show_version": "x",
             "show_running_config": "x",
             "show_lldp_neighbors": f"{_LLDP_HEADER}\nTotal entries displayed: 0\n",
             "show_cdp_neighbors": "% CDP is not enabled\n",
-            "show_ipv4_interface_brief": "",  # what _run_command_tolerant() returns on TerminalError
+            "show_ipv4_interface_brief": "",
         }
 
     monkeypatch.setattr(discovery, "_bootstrap_collect", fake_collect)
     _write_access_info(lab_root, {"R1": {"type": "iosxr", "address": "192.0.2.11", "transport": "ssh"}})
 
-    result = discovery.discover_topology(lab_root)
+    with pytest.raises(discovery.DiscoveryError, match="L3 interface collection failed"):
+        discovery.discover_topology(lab_root, include_l3=True)
 
+    result = discovery.discover_topology(lab_root)
     assert result.connected_count == 1  # the device itself succeeded
     assert "interfaces" not in result.devices["R1"]
-    assert result.l3_warnings  # a warning was recorded, not a DiscoveryError
+    assert result.l3_warnings == []

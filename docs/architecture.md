@@ -688,13 +688,9 @@ it, which is what lets `_bootstrap_collect_iosxe()`/`_bootstrap_collect_
 ios()` reuse the exact same send/wait/slice runner with the shared
 classic-IOS-style prompt shape (`_IOS_STYLE_PROMPT_RE`, matching a
 `hostname#`/`hostname>` line in full) instead of writing a second command
-runner. `_run_command_tolerant()` wraps this the same way for the
-*optional* L3 enrichment commands only: it catches `TerminalError` and
-returns `""` instead of raising, so a transport-level hang on one of
-those specific commands degrades to "L3 unavailable for this device"
-rather than failing the whole device -- every other command (login, LLDP,
-CDP, `terminal length 0`) is untouched and still fails the whole device
-closed exactly as before.
+runner. The L3 enrichment commands are sent only when the collector is
+called with `include_l3=True` (`discover topology l3`) and then use the same
+strict runner: any transport failure is fatal like every other command.
 
 Classic-IOS-style login (`_login_ios_style()`) is a separate, small
 function from `_login()` -- not a generalized/parameterized version of it
@@ -907,7 +903,8 @@ committed active_access_info
     -> cli/config.py CliSession.apply_discovery_result()  (opens/creates
        the topology candidate via the *same* plan_topology_definition()/
        apply_topology_definition_plan() as a manually typed `topology
-       <name>`, then merges in discovery.build_topology_devices_and_links())
+       <name>`, then replaces its candidate with
+       discovery.build_discovery_candidate() -- a rebuild, never a merge)
 ```
 
 `discover topology` (global configuration mode only): reads *committed*
@@ -916,9 +913,9 @@ its `type: iosxr`, `type: iosxe`, and `type: ios` devices (`type: host` is
 skipped, not an error; `nxos` is unsupported and skipped; zero supported
 targets of any kind is a hard failure), and requires **all** of them to
 succeed for neighbor discovery -- any login/command/timeout failure fails
-the whole operation before the prior candidate is touched. L3 enrichment is
-the one exception: it is additive/best-effort per device (see below), never
-a reason to fail the whole operation. On success it prints a Discovery
+the whole operation before the prior candidate is touched. L3 enrichment
+runs only for `discover topology l3` and then fails closed too (see below).
+On success it prints a Discovery
 summary and, if any neighbor could not be resolved to a managed device, an
 explicit "Unresolved neighbors" section (raw Device ID, observing
 device/interface, remote port, capability) — then enters topology
@@ -1120,41 +1117,76 @@ interface is `default` VRF. Either way this is captured as an
 `L3ParseError`, caught only in `discover_topology()`'s own per-device L3
 loop -- it never escalates to a `DiscoveryError` (which would fail the
 *whole* run) and never touches that device's already-collected LLDP/CDP
-links. A transport-level failure specifically on one of the *optional* L3
-commands (the prompt never returns) is tolerated the same way via
-`_run_command_tolerant()` (returns `""`, which then naturally fails L3
-parsing, not the whole device) -- contrast with LLDP/CDP/login/`terminal
-length 0`, which remain whole-device-fatal on a transport failure.
+links. For `discover topology l3` an `L3ParseError` (or a transport failure
+on an L3 command) is converted to a `DiscoveryError` ("L3 interface
+collection failed") and fails the whole run; a recognized table with zero
+rows is a valid success. In the default L2 run none of this executes.
 
-**Per-interface candidate merge, not a wholesale replace**: this is the one
-field `build_topology_devices_and_links()` treats specially. Every other
-device field uses a plain `dict.update()` (last value wins) when merging a
-`DiscoveryResult` into an existing candidate -- but doing that to
-`interfaces` would silently discard L3 data for any interface not
-re-observed this particular run (e.g. one whose device failed L3
-enrichment just this once). Instead, `fields["interfaces"]` (when present
-at all -- a device with no L3 result this run has no such key, so its
-existing candidate interfaces are left completely untouched) is merged
-interface-by-interface: a dict value sets/overwrites that one interface,
-and a `None` value is an explicit removal signal (used only when an
-interface was *positively* re-observed as `unassigned`, or newly excluded
-as a management address) that drops just that one interface's stale entry
--- `dict.pop(name, None)`, safe even if it was never present.
+**L3 is rebuilt, never merged**: `fields["interfaces"]` is present only for
+an `l3` run. `build_discovery_candidate()` writes exactly the observed
+interfaces (an interface observed as `unassigned`, or excluded as a
+management address, is represented by a `None` sentinel in the
+`DiscoveryResult` and is simply absent from the candidate). An L2 run writes
+no `interfaces` at all: previous L3 data is never carried over (the CLI always
+prints `L3 enrichment: Disabled` / `Previous L3 data: Not carried over`).
 
-### Topology candidate merge is conservative
+### Topology candidate rebuild (no link merge)
 
-`build_topology_devices_and_links()` only ever *adds* to whatever
-devices/links already exist in the target topology's candidate (new or
-already-committed): existing devices/fields/links are never removed, and
-a discovered link already present (compared by its endpoint-pair key,
-independent of field order) is never duplicated. This is why Discovery
-never needs a special "diff" of its own beyond the ordinary candidate
-system already documented above (candidate/original/dirty tracking,
-`show`/`show configuration`/`show running-config`/`commit`/`clear`/
-`root`/`exit`/`end`) -- `discover topology` is, structurally, just another
-way to populate a topology candidate, the same way the external YAML
-editor is. The one field with special merge semantics (`interfaces`) is
-described above.
+`build_discovery_candidate(result, base)` builds the candidate from the
+`DiscoveryResult` alone. Only what Discovery does not own is taken from
+`base` (the open candidate, else the committed definition, else a new empty
+one): `name`, `description`, unknown top-level keys and unrelated extra fields
+of a still-managed device. Devices (every managed device of the active
+access-info, links or not) and links are never carried over -- a device not in
+the access-info, and any earlier link, disappear unless observed again. Output is
+deterministic: devices sorted by ID, link endpoints in canonical
+`(device, interface)` order, links sorted. `CliSession.discovery_removals()`
+lists the committed devices/links that will be dropped; the CLI prints them
+before `apply_discovery_result()` builds and validates the new candidate
+(`lab.validate_topology_data`) and only then installs it in one assignment --
+any earlier failure leaves candidate, mode and tracking untouched. Nothing is
+persisted before `commit`; `clear` restores the committed definition.
+
+**Strict collection rules** (`discover_topology()`): per device, LLDP and CDP
+are each success (an empty recognized table counts), disabled (IOS XR: exact
+`% LLDP/CDP is not enabled`; IOS XE LLDP: `LLDP is not enabled`; IOS/IOS XE
+CDP: the same exact text as IOS XR), or unavailable (classic IOS has no LLDP).
+CDP is additionally "unsupported" (a non-fatal capability state, no warning)
+in exactly one measured case: a `type: iosxr` device whose `show version`
+banner is an IOS XR **LNT** image (`Cisco IOS XR Software, Version <v> LNT`)
+and whose `show cdp neighbors` output is only `% Invalid input detected at
+'^' marker.` (the NCS540L has no CDP command). `% Invalid input` is never
+treated as unsupported for any other OS, image or command (LLDP included).
+A CDP table whose rows all fail to parse is a parser failure.
+Disabled/unsupported protocols beside a working one are reported as a
+`Neighbor discovery protocol status:` block (`CDP disabled: 2 devices (R1, R2)`,
+`CDP unsupported: ...`), not as warnings; the "Neighbor discovery warnings"
+section is reserved for real warnings, and a run without any ends with
+`Topology discovery completed successfully.`
+Command errors, timeouts and unrecognized output are fatal; at least one
+protocol must be a success, otherwise Discovery fails ("no usable neighbor
+discovery protocol"); one disabled protocol beside a success is a warning.
+After reconciliation, any conflict, any managed interface in more than one
+link, or a managed link endpoint also seen facing an unmanaged neighbor is
+fatal. Failures stay fail-fast (first device in target order); there is no
+all-failures listing.
+
+### Dirty-candidate protection
+
+`CliSession` keeps `_mutation_rev`, incremented by every manual candidate
+mutation that actually changes something (device/jump-host field set/clear,
+device add/remove, description, external edit, definition delete), and
+`_discovery_baseline_rev`, set to it after Discovery rebuilds the candidate.
+`check_discovery_allowed()` refuses to run when the target candidate is dirty
+and the two differ -- even if the edit was reverted by hand -- and otherwise
+defers to `can_switch_definition()` (a different dirty definition blocks it).
+Re-running Discovery over a Discovery-only candidate is allowed. `clear`,
+`commit`, a fresh load and leaving configure mode reset both counters. The
+counters never affect `definition_dirty()`, which stays a pure value
+comparison (net-zero semantics unchanged). The candidate lives only in the
+CLI process, so the tracking state does too; the REPL is single-threaded and
+Discovery's worker threads never touch the candidate, so no compare-and-swap
+is needed.
 
 Topology's own schema validation (`lab.validate_topology_interfaces()`)
 keeps this bounded: only `ipv4_address` + `vrf`, both required non-empty
@@ -1613,7 +1645,7 @@ deliberately excludes:
 - NX-OS discovery, SNMP/NETCONF/RESTCONF discovery, and a generic
   discovery/plugin framework — Discovery implements only IOS XR/IOS XE
   (LLDP + CDP) and classic IOS (CDP only).
-- Automatic stale topology-link pruning, `discover topology` automatically
+- `discover topology` automatically
   committing or selecting `active_topology`, and a discovery-history
   subsystem (`show discover`/a discovery database).
 - An HTTP MCP server, containerization, or an MCP-owned runtime/session

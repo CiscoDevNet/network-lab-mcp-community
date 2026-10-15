@@ -39,7 +39,7 @@ def _fake_result(
 
 
 def _run_discover(session, monkeypatch, result):
-    monkeypatch.setattr(discovery, "discover_topology", lambda lab_root=None: result)
+    monkeypatch.setattr(discovery, "discover_topology", lambda lab_root=None, include_l3=False: result)
     climain.execute_command_line(session, "discover topology")
 
 
@@ -123,7 +123,7 @@ def test_mcp_visibility_unchanged_until_explicit_running_config_selection(lab_ro
 # ---- existing topology merge (target name already committed) ----
 
 
-def test_existing_topology_merge_preserves_description_and_unrelated_devices(lab_root, monkeypatch):
+def test_existing_topology_rebuild_preserves_description_but_drops_unmanaged_devices(lab_root, monkeypatch, capsys):
     lab.write_topology(
         "sample_lab",
         {
@@ -147,14 +147,18 @@ def test_existing_topology_merge_preserves_description_and_unrelated_devices(lab
 
     candidate = session.definition_candidate
     assert candidate["description"] == "hand-authored description"
-    assert candidate["devices"]["PC1"]["type"] == "host"  # unrelated existing device preserved
-    # The hand-authored link (no interface info) and the newly discovered
-    # one (with interface info) are different keys, so both remain --
-    # nothing is silently deleted.
-    assert {"a": "R1", "b": "R2"} in candidate["links"]
-    assert any(
-        link.get("a") == "R1" and link.get("a_interface") == "GigabitEthernet0/0/0/2" for link in candidate["links"]
-    )
+    # Rebuilt from this Discovery run alone (IC-1): a device that is not in
+    # the active access-info and the hand-authored link are NOT carried
+    # over; the removal is announced before the candidate is replaced.
+    assert "PC1" not in candidate["devices"]
+    assert candidate["links"] == [
+        {"a": "R1", "a_interface": "GigabitEthernet0/0/0/2", "b": "R2", "b_interface": "GigabitEthernet0/0/0/2"}
+    ]
+    out = capsys.readouterr().out
+    assert "device PC1" in out
+    assert "link   R1 <-> R2" in out
+    # Nothing is persisted before commit.
+    assert lab.load_topology("sample_lab", lab_root)["devices"]["PC1"]["type"] == "host"
 
 
 def test_existing_topology_merge_does_not_duplicate_an_already_present_discovered_link(lab_root, monkeypatch):
@@ -183,7 +187,7 @@ def test_existing_topology_merge_does_not_duplicate_an_already_present_discovere
     assert len(session.definition_candidate["links"]) == 1  # same link, unordered endpoints -- not duplicated
 
 
-def test_existing_topology_merge_does_not_delete_a_link_not_observed_this_run(lab_root, monkeypatch):
+def test_existing_topology_rebuild_drops_a_link_not_observed_this_run(lab_root, monkeypatch):
     lab.write_topology(
         "sample_lab",
         {
@@ -197,7 +201,9 @@ def test_existing_topology_merge_does_not_delete_a_link_not_observed_this_run(la
     session = cfgmod.CliSession(lab_root)
     session.enter_configure()
     _run_discover(session, monkeypatch, _fake_result(default_topology_name="sample_lab", managed_links=[]))
-    assert {"a": "R1", "b": "R2"} in session.definition_candidate["links"]
+    assert session.definition_candidate["links"] == []
+    # The committed definition is untouched until commit.
+    assert lab.load_topology("sample_lab", lab_root)["links"] == [{"a": "R1", "b": "R2"}]
 
 
 # ---- no partial candidate mutation on Discovery failure ----
@@ -215,7 +221,7 @@ def test_failed_discovery_leaves_prior_state_untouched(lab_root, monkeypatch):
     kind_before = session.definition_kind
     name_before = session.definition_name
 
-    def _raise(lab_root=None):
+    def _raise(lab_root=None, include_l3=False):
         raise discovery.DiscoveryError("simulated device login failure")
 
     monkeypatch.setattr(discovery, "discover_topology", _raise)
@@ -237,7 +243,7 @@ def test_discover_topology_blocked_while_a_different_dirty_definition_is_open(la
     session.definition_candidate["description"] = "dirty, uncommitted"
     session.go_to_global()  # `root`'s own effect: back to global, candidate preserved
 
-    monkeypatch.setattr(discovery, "discover_topology", lambda lab_root=None: _fake_result())
+    monkeypatch.setattr(discovery, "discover_topology", lambda lab_root=None, include_l3=False: _fake_result())
     climain.execute_command_line(session, "discover topology")
 
     out = capsys.readouterr().out

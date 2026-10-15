@@ -178,6 +178,14 @@ _DEFINITION_KIND_LABELS: dict[str, str] = {
 }
 
 
+def _format_link(link: dict) -> str:
+    def endpoint(side: str) -> str:
+        interface = link.get(f"{side}_interface")
+        return f"{link.get(side)} {interface}" if interface else str(link.get(side))
+
+    return f"{endpoint('a')} <-> {endpoint('b')}"
+
+
 def load_committed_definition(kind: str, name: str, lab_root: Path) -> Optional[dict]:
     """Return the current committed-on-disk data for a definition of the
     given kind/name, or None if it does not exist yet.
@@ -258,6 +266,19 @@ class CliSession:
         self.current_device_name: Optional[str] = None
         self.current_jump_host_name: Optional[str] = None
         self.last_commit_report: Optional[CommitReport] = None
+        # Discovery dirty tracking (in-process only, same lifetime as the
+        # candidate itself): `_mutation_rev` counts manual candidate
+        # mutations that actually changed something since the candidate
+        # was last (re)loaded/cleared/committed; `_discovery_baseline_rev`
+        # is its value right after the last Discovery rebuilt the
+        # candidate. A re-Discovery is allowed only while the two match --
+        # even if a manual edit was reverted to the same value.
+        self._mutation_rev = 0
+        self._discovery_baseline_rev = 0
+
+    def _reset_mutation_tracking(self) -> None:
+        self._mutation_rev = 0
+        self._discovery_baseline_rev = 0
 
     # ---- scoped dirty state ----
 
@@ -297,6 +318,7 @@ class CliSession:
         self.current_device_name = None
         self.current_jump_host_name = None
         self.current_running_entry_name = None
+        self._reset_mutation_tracking()
         self.mode = "global"
 
     def reset_to_exec(self) -> None:
@@ -312,6 +334,7 @@ class CliSession:
         self.current_device_name = None
         self.current_jump_host_name = None
         self.current_running_entry_name = None
+        self._reset_mutation_tracking()
 
     def clear(self) -> None:
         """Discard every uncommitted change in the current configure
@@ -321,6 +344,7 @@ class CliSession:
         is discarded entirely, not "reset to empty"."""
         if self.committed_settings is not None:
             self.settings_candidate = copy.deepcopy(self.committed_settings)
+        self._reset_mutation_tracking()
         if self.definition_kind is not None:
             if self.definition_original is None:
                 self.definition_kind = None
@@ -398,6 +422,7 @@ class CliSession:
                 self.definition_candidate = new_data_fn(name)
             self.definition_kind = kind
             self.definition_name = name
+            self._reset_mutation_tracking()
         self.current_device_name = None
         self.mode = mode
 
@@ -454,6 +479,7 @@ class CliSession:
         outright, exactly like `clear()` already treats that case, since
         there is nothing real to mark as prospectively absent."""
         if self.definition_kind == kind and self.definition_name == name:
+            self._mutation_rev += 1
             if self.definition_original is None:
                 self.definition_kind = None
                 self.definition_name = None
@@ -473,6 +499,8 @@ class CliSession:
         _, load_fn, _ = _DEFINITION_LOADERS[kind]
         self.definition_original = load_fn(name, self.lab_root)
         self.definition_candidate = None
+        self._reset_mutation_tracking()
+        self._mutation_rev += 1
         self.definition_kind = kind
         self.definition_name = name
         self.current_device_name = None
@@ -484,19 +512,66 @@ class CliSession:
         existing tests/callers already use this exact name."""
         self.remove_definition("topology", name)
 
+    def check_discovery_allowed(self, target_name: str) -> tuple[bool, Optional[str]]:
+        """Dirty-candidate preflight for `discover topology`. A different
+        dirty definition blocks it (single dirty definition slot). The
+        target topology itself blocks it when it carries manual edits --
+        any manual mutation since the candidate was loaded or last
+        rebuilt by Discovery, even one later reverted by hand. A
+        candidate that only Discovery produced may be rebuilt again."""
+        ok, message = self.can_switch_definition("topology", target_name)
+        if not ok:
+            return False, message
+        if (self.definition_kind, self.definition_name) == ("topology", target_name):
+            if self.definition_dirty() and self._mutation_rev != self._discovery_baseline_rev:
+                return False, (
+                    "Topology discovery rejected.\n"
+                    "% Manual edits were made since the last discovery.\n"
+                    "% Use 'clear' to reset the candidate before retrying."
+                )
+        return True, None
+
+    def discovery_removals(self, result: "discovery.DiscoveryResult") -> tuple[list[str], list[str]]:
+        """Committed devices and links of the target topology that the
+        rebuilt candidate will not contain (sorted, for display before the
+        candidate is replaced). Read-only; empty for a new topology."""
+        committed = load_committed_definition("topology", result.default_topology_name, self.lab_root)
+        if committed is None:
+            return [], []
+        new = discovery.build_discovery_candidate(result, {})
+        removed_devices = sorted(set(committed.get("devices") or {}) - set(new["devices"]))
+        new_keys = {discovery._topology_link_key(link) for link in new["links"]}
+        removed_links = sorted(
+            _format_link(link)
+            for link in committed.get("links") or []
+            if discovery._topology_link_key(link) not in new_keys
+        )
+        return removed_devices, removed_links
+
     def apply_discovery_result(self, result: "discovery.DiscoveryResult") -> None:
-        """Turn a completed Discovery run into a topology candidate, using
-        exactly the same open/create/merge machinery as a manually typed
-        `topology <name>`: an existing committed topology's candidate base
-        (description, unrelated devices/links) is preserved, and only the
-        newly discovered managed devices/links are added -- never applied
-        partially, and never itself committed or selected as
-        active_topology (that stays the operator's explicit next step)."""
+        """Replace the target topology's candidate with one rebuilt from
+        this Discovery run alone (see discovery.build_discovery_candidate()):
+        no existing device or link is merged in; only the name,
+        description and unknown top-level metadata survive. The new
+        candidate is built and validated *before* any session state is
+        touched, so a failure leaves the previous candidate, mode and
+        tracking untouched. Never committed and never selected as
+        active_topology."""
         plan = self.plan_topology_definition(result.default_topology_name)
+        if plan.kind == "case_collision":
+            raise ConfigError("A case-only topology collision must be confirmed before it can be applied.")
+        if self.definition_kind == "topology" and self.definition_name == plan.name and self.definition_candidate is not None:
+            base = self.definition_candidate
+        else:
+            base = load_committed_definition("topology", plan.name, self.lab_root) or new_topology_data(plan.name)
+        candidate = discovery.build_discovery_candidate(result, base)
+        try:
+            lab.validate_topology_data(plan.name, candidate)
+        except lab.LabConfigError as exc:
+            raise discovery.DiscoveryError(f"Discovered topology candidate is invalid: {exc}") from exc
         self.apply_topology_definition_plan(plan)
-        devices, links = discovery.build_topology_devices_and_links(result, self.definition_candidate)
-        self.definition_candidate["devices"] = devices
-        self.definition_candidate["links"] = links
+        self.definition_candidate = candidate
+        self._discovery_baseline_rev = self._mutation_rev
 
     def enter_access_info_definition(self, name: str) -> None:
         self._enter_definition("access_info", name, "access_info")
@@ -513,11 +588,15 @@ class CliSession:
         same SSOT validator commit() will use -- an invalid edit never
         reaches the candidate."""
         _DEFINITION_VALIDATORS[self.definition_kind](self.definition_name, data)
+        if data != self.definition_candidate:
+            self._mutation_rev += 1
         self.definition_candidate = data
 
     # ---- topology-mode mutation ----
 
     def set_topology_description(self, text: str) -> None:
+        if self.definition_candidate.get("description") != text or "description" not in self.definition_candidate:
+            self._mutation_rev += 1
         self.definition_candidate["description"] = text
 
     # ---- navigation: `root` jumps straight to global config, preserving
@@ -536,6 +615,7 @@ class CliSession:
         devices = self.definition_candidate.setdefault("devices", {})
         if name not in devices:
             devices[name] = {}
+            self._mutation_rev += 1
         self.current_device_name = name
         self.mode = "device"
 
@@ -543,6 +623,7 @@ class CliSession:
         devices = self.definition_candidate.setdefault("devices", {})
         if name not in devices:
             devices[name] = {}
+            self._mutation_rev += 1
         self.current_device_name = name
         self.mode = "access_device"
 
@@ -550,9 +631,14 @@ class CliSession:
         return self.definition_candidate["devices"][self.current_device_name]
 
     def set_device_field(self, field_name: str, value) -> None:
-        self._device()[field_name] = value
+        device = self._device()
+        if field_name not in device or device[field_name] != value:
+            self._mutation_rev += 1
+        device[field_name] = value
 
     def clear_device_field(self, field_name: str) -> None:
+        if field_name in self._device():
+            self._mutation_rev += 1
         self._device().pop(field_name, None)
 
     def remove_device(self, name: str) -> None:
@@ -563,6 +649,7 @@ class CliSession:
         if name not in devices:
             raise ConfigError(f"Device '{name}' does not exist.")
         del devices[name]
+        self._mutation_rev += 1
 
     # ---- jump-host sub-editing (access-info only: a reusable single-hop
     # OpenSSH ProxyJump endpoint, referenced by name from a device's own
@@ -572,6 +659,7 @@ class CliSession:
         jump_hosts = self.definition_candidate.setdefault("jump_hosts", {})
         if name not in jump_hosts:
             jump_hosts[name] = {}
+            self._mutation_rev += 1
         self.current_jump_host_name = name
         self.mode = "access_jump_host"
 
@@ -579,9 +667,14 @@ class CliSession:
         return self.definition_candidate["jump_hosts"][self.current_jump_host_name]
 
     def set_jump_host_field(self, field_name: str, value) -> None:
-        self._jump_host()[field_name] = value
+        jump_host = self._jump_host()
+        if field_name not in jump_host or jump_host[field_name] != value:
+            self._mutation_rev += 1
+        jump_host[field_name] = value
 
     def clear_jump_host_field(self, field_name: str) -> None:
+        if field_name in self._jump_host():
+            self._mutation_rev += 1
         self._jump_host().pop(field_name, None)
 
     def remove_jump_host(self, name: str) -> None:
@@ -595,6 +688,7 @@ class CliSession:
         if name not in jump_hosts:
             raise ConfigError(f"Jump host '{name}' does not exist.")
         del jump_hosts[name]
+        self._mutation_rev += 1
 
     # ---- running-config selection (topology/scenario/references MCP uses) ----
 
@@ -784,6 +878,7 @@ class CliSession:
                 self.definition_original = copy.deepcopy(self.definition_candidate)
         else:
             written_target = None
+        self._reset_mutation_tracking()
 
         settings_written = False
         if self.settings_dirty():

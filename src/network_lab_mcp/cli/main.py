@@ -1773,10 +1773,22 @@ def render_discovery_summary(result: "discovery.DiscoveryResult") -> str:
         f"  CDP observations:     {result.cdp_observation_count}",
         f"  Managed links:        {len(result.managed_links)}",
         f"  Unresolved neighbors: {len(grouped_unresolved)}",
-        f"  L3 enrichment:        {result.l3_enriched_device_count}/{result.connected_count} devices, "
-        f"{result.l3_interface_count} interfaces",
-        f"  Topology candidate:   {result.default_topology_name}",
     ]
+    if result.include_l3:
+        lines.append(
+            f"  L3 enrichment:        {result.l3_enriched_device_count}/{result.connected_count} devices, "
+            f"{result.l3_interface_count} interfaces"
+        )
+    else:
+        lines.append("  L3 enrichment:        Disabled")
+        lines.append("  Previous L3 data:     Not carried over")
+    lines.append(f"  Topology candidate:   {result.default_topology_name}")
+    if result.protocol_status:
+        lines.append("")
+        lines.append("Neighbor discovery protocol status:")
+        for label, devices in result.protocol_status.items():
+            count = f"{len(devices)} device" + ("" if len(devices) == 1 else "s")
+            lines.append(f"  {label + ':':<22}{count} ({', '.join(devices)})")
     if result.protocol_warnings:
         lines.append("")
         lines.append(f"Neighbor discovery warnings ({len(result.protocol_warnings)}):")
@@ -1811,22 +1823,44 @@ def render_discovery_summary(result: "discovery.DiscoveryResult") -> str:
                 lines.append(
                     f"    {obs.local_device_id} {obs.local_interface} -> {obs.remote_port_id} ({capability})"
                 )
-    if result.protocol_warnings:
-        lines.append("")
+    lines.append("")
+    if result.protocol_warnings or result.l3_warnings:
         lines.append("Topology discovery completed with warnings.")
+    else:
+        lines.append("Topology discovery completed successfully.")
     return "\n".join(lines)
 
 
-def h_global_discover_topology(session: cfgmod.CliSession, args: dict) -> None:
+def _run_discover_topology(session: cfgmod.CliSession, include_l3: bool) -> None:
     target_name = discovery.resolve_default_topology_name(session.lab_root)
-    ok, message = session.can_switch_definition("topology", target_name)
+    ok, message = session.check_discovery_allowed(target_name)
     if not ok:
         print(f"% {message}")
         return
     print(f"Discovering topology from access-info '{target_name}'...")
-    result = discovery.discover_topology(session.lab_root)
-    session.apply_discovery_result(result)
+    try:
+        result = discovery.discover_topology(session.lab_root, include_l3=include_l3)
+        removed_devices, removed_links = session.discovery_removals(result)
+        # Everything that can fail has run; only now is the candidate
+        # replaced (apply validates before it touches any session state).
+        if removed_devices or removed_links:
+            print(f"Discovery will remove from candidate '{target_name}' (committed definition is unchanged):")
+            for device in removed_devices:
+                print(f"  device {device}")
+            for link in removed_links:
+                print(f"  link   {link}")
+        session.apply_discovery_result(result)
+    except (discovery.DiscoveryError, lab.LabConfigError) as exc:
+        raise discovery.DiscoveryError(f"{exc}\n% Topology candidate not updated.") from exc
     print(render_discovery_summary(result))
+
+
+def h_global_discover_topology(session: cfgmod.CliSession, args: dict) -> None:
+    _run_discover_topology(session, include_l3=False)
+
+
+def h_global_discover_topology_l3(session: cfgmod.CliSession, args: dict) -> None:
+    _run_discover_topology(session, include_l3=True)
 
 
 def h_global_access_info(session: cfgmod.CliSession, args: dict) -> None:
@@ -2108,6 +2142,7 @@ HANDLERS: dict[str, Callable[[cfgmod.CliSession, dict], None]] = {
     "exec.quit": h_exec_exit,
     "global.running_config": h_global_running_config,
     "global.discover_topology": h_global_discover_topology,
+    "global.discover_topology_l3": h_global_discover_topology_l3,
     "global.access_info": h_global_access_info,
     "global.topology": h_global_topology,
     "global.no_topology": h_global_no_topology,

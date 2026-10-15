@@ -128,7 +128,7 @@ def test_iosxe_lldp_and_cdp_disagree_on_same_local_interface_is_a_conflict(lab_r
             "hostname": device_id,
             "show_version": "x",
             "show_lldp_neighbors": "% LLDP is not enabled\n",
-            "show_cdp_neighbors": "% CDP is not enabled\n",
+            "show_cdp_neighbors": f"{_CDP_HEADER}\n",  # recognized empty CDP table
         }
 
     def dispatch(device_id, cfg):
@@ -144,11 +144,7 @@ def test_iosxe_lldp_and_cdp_disagree_on_same_local_interface_is_a_conflict(lab_r
         },
     )
 
-    result = discovery.discover_topology(lab_root)
-
-    assert len(result.conflicts) == 1
-    conflict = result.conflicts[0]
-    assert conflict.endpoint_a == ("SW1", "Et0/0")
-    assert {conflict.observation_a.source, conflict.observation_b.source} == {"lldp", "cdp"}
-    # No link at all for the conflicting endpoint -- fail closed, not a guess.
-    assert result.managed_links == []
+    # IC-6: the LLDP/CDP disagreement is fatal (previously: reported, the
+    # endpoint skipped, Discovery continued) -- no candidate is produced.
+    with pytest.raises(discovery.DiscoveryError, match=r"reconciliation conflict: SW1 Et0/0: conflicting"):
+        discovery.discover_topology(lab_root)

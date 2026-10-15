@@ -200,7 +200,7 @@ def test_bootstrap_collect_ios_uses_the_same_shared_login(tmp_path, monkeypatch)
     rather than just by code inspection."""
     _monkeypatch_transport(monkeypatch, _script_full_session(tmp_path, hostname="PAGENT"))
 
-    info = discovery._bootstrap_collect_ios("PAGENT", _DIRECT_CONFIG)
+    info = discovery._bootstrap_collect_ios("PAGENT", _DIRECT_CONFIG, include_l3=True)
 
     assert info["hostname"] == "PAGENT"
     assert "show_cdp_neighbors" in info
