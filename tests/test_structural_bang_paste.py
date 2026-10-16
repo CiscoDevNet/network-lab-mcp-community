@@ -10,20 +10,24 @@ still inside R1's own submode when the next "device R2" line arrived, and
 "device" is not a valid command there.
 
 _apply_structural_bang() (cli/main.py) gives a pasted standalone "!" a
-narrow, explicit meaning bounded to exactly three modes:
+narrow, explicit meaning bounded to exactly five definition modes (plus the
+conditional `running` section modes):
 
     access_device      -> exactly one level up, to access_info
     access_jump_host    -> exactly one level up, to access_info
     access_info          -> exactly one level up, to global
+    device (topology)    -> exactly one level up, to topology
+    topology             -> exactly one level up, to global
 
 Everywhere else -- including global configuration mode and EXEC -- it is
 an explicit, deliberate no-op: never exit/end/quit, never a candidate
 change, never a CLI termination. This is bounded to multi-line paste only
 (execute_input_block()'s per-physical-line loop); a single manually typed
 "!" is untouched (still reaches execute_command_line()/grammar.parse()
-exactly as before). Topology/scenario/reference paste behavior is
-unchanged -- see test_standalone_bang_in_topology_paste_remains_a_noop in
-test_paste.py.
+exactly as before). Scenario/reference modes are unaffected; topology
+now closes with "!" like access-info -- see
+test_standalone_bang_in_topology_paste_closes_device_then_topology in
+test_paste.py and the stray-"!" tests in test_show_configuration_replay.py.
 
 All tests here use the isolated `lab_root` fixture; nothing touches the
 real repository's lab/ directory."""

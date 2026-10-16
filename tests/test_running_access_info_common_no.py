@@ -121,7 +121,7 @@ def test_no_selected_name_unselects_stays_and_keeps_files(root, capsys):
     assert ok and out == ""
     assert _sel(s) is None and s.mode == COMMON and s.settings_dirty()
     assert _defs(root) == defs
-    assert climain.render_configuration_candidate(s) == "no access-info"
+    assert climain.render_configuration_candidate(s) == "no sample_lab"  # kind-scoped Common form
 
 
 def test_same_candidate_update_as_parent_no_access_info(root, capsys):
@@ -131,7 +131,8 @@ def test_same_candidate_update_as_parent_no_access_info(root, capsys):
     _run(b, "no access-info", capsys)
     assert a.settings_candidate == b.settings_candidate
     assert a.settings_dirty() == b.settings_dirty() is True
-    assert climain.render_configuration_candidate(a) == climain.render_configuration_candidate(b)
+    assert climain.render_configuration_candidate(a) == "no sample_lab"  # Common is kind-scoped
+    assert climain.render_configuration_candidate(b) == "no access-info"  # parent running form
 
 
 @pytest.mark.parametrize("bad", ["ai_b", "sample", "unknown", "SAMPLE_LAB", "sample_lab_x"])
@@ -266,7 +267,7 @@ def test_commit_persists_unselected_state_and_leaves_definitions_and_description
 def test_show_views_after_no(root, capsys):
     s = _session(root, "access-info")
     _run(s, "no sample_lab", capsys)
-    assert _run(s, "show configuration", capsys)[1].strip() == "no access-info"
+    assert _run(s, "show configuration", capsys)[1].strip() == "no sample_lab"
     assert "sample_lab" in _run(s, "show running-config", capsys)[1]  # committed view unaffected
     assert not (s.settings_candidate.get("running_descriptions") or {}).get("access_info")  # not shown/changed as a description
 

@@ -560,11 +560,11 @@ All four kinds share one design (written below for access-info; the same rules a
 - There is no `description` here: `description foo` is rejected with `% Invalid input ...` plus `% Use the named mode: access-info <name>`. Edit descriptions in the named submode (`access-info <name>` → `description <text>` / `no description`). **`no description` in this submode is never a description removal**: it is `no <name>` with the name `description` — it unselects only if the selected access-info is literally named `description`, otherwise it is rejected as not selected (also when nothing is selected). The submode keeps no hidden "last selected" target.
 - `?` lists the keywords valid here (`show`, `no`, `clear`, `commit`, `root`, `end`, `exit`, `help`) plus the selectable names.
 - **Keyword collisions**: keywords win and match case-insensitively and by unique prefix, so a definition named `show`, `Show`, `sh…`, `c` (ambiguous: clear/commit) or `e` (end/exit) cannot be selected by typing it here. Select it from the parent with `access-info <name>` (always works; that enters its named submode). A definition literally named `description` or `no` is selectable here as a plain name.
-- `exit` returns to `config-running` keeping the candidate (never refused for a dirty running candidate); `root`/`end` follow the usual rules (`end` is refused while dirty); `commit`/`clear` stay in this submode, and a failed commit keeps it too. `show` / `show configuration` show the running-config selection / candidate delta, like the other running modes.
+- `exit` returns to `config-running` keeping the candidate (never refused for a dirty running candidate); `root`/`end` follow the usual rules (`end` is refused while dirty); `commit`/`clear` stay in this submode, and a failed commit keeps it too. `show` / `show configuration` here show **only this kind's** selection delta (`<name>` / `no <name>` lines), not the whole running-config delta.
 
-**Per-kind differences.** *Topology / Scenario*: `no <name>` may leave the **candidate** unselected (`show configuration` prints `no topology` / `no scenario`; that line has no `config-running` grammar, so replaying it stops with an error rather than guessing), but `commit` is rejected with the existing validation (`% Running configuration is missing a valid active topology.` / `... active scenario.`) — the candidate, the submode and the committed settings stay as they were, there is no auto-rollback, selecting a valid one again (in the same commit) makes `commit` succeed, and `clear` restores the committed selection. Scenario is required today because the existing commit validation already requires it; nothing new was added. *Reference*: `no <name>` removes one selected reference (`% Reference '<name>' is not currently selected.` otherwise) and `no ?` lists every candidate-selected reference; selecting a reference with a pending definition deletion is refused (D6), unselect→reselect restores the committed order and is net-zero (D7), and a `no <name>` plus a global `no reference <name>` in one commit keeps the settings-first persistence order (Case 12).
+**Per-kind differences.** *Topology / Scenario*: `no <name>` may leave the **candidate** unselected (`show configuration` prints a block naming the **committed** selection — `topology` / ` no <committed-name>` / `!` (likewise `scenario`) — because `no topology` / `no scenario` have no running grammar; the block replays from `config-running` or global, see "Replay guarantees" below), but `commit` is rejected with the existing validation (`% Running configuration is missing a valid active topology.` / `... active scenario.`) — the candidate, the submode and the committed settings stay as they were, there is no auto-rollback, selecting a valid one again (in the same commit) makes `commit` succeed, and `clear` restores the committed selection. Scenario is required today because the existing commit validation already requires it; nothing new was added. *Reference*: `no <name>` removes one selected reference (`% Reference '<name>' is not currently selected.` otherwise) and `no ?` lists every candidate-selected reference; selecting a reference with a pending definition deletion is refused (D6), unselect→reselect restores the committed order and is net-zero (D7), and a `no <name>` plus a global `no reference <name>` in one commit keeps the settings-first persistence order (Case 12).
 
-Paste: the mode is recognized by the distinct name `running_<kind>_common` (never a running-entry mode, so it never reaches the description handlers). A `!` closes this submode and `config-running` only when it follows a command executed *inside* that section (a leading `!`, a `!` right after entering a mode, or right after `exit` is a no-op), so `show configuration` output replays from either `config-running` or global configuration mode. **Behavior change**: a bare `access-info` line used to be an incomplete-command error that stopped a paste; it is now valid, and later lines up to the next `!` are read as definition names. `show running-config` output (bare `topology`/`scenario`/`reference` headings) remains non-replayable and stops at the first such heading; because the `!` closes the submode, a heading is never mistaken for an access-info named `topology`.
+Paste: the mode is recognized by the distinct name `running_<kind>_common` (never a running-entry mode, so it never reaches the description handlers). A `!` closes this submode and `config-running` only when it follows a command executed *inside* that section (a leading `!`, a `!` right after entering a mode, or right after `exit` is a no-op), so a Common submode's own `show configuration` output (kind-scoped, no `!`) replays into that submode, and the running-scope output replays from `config-running` or global configuration mode. **Behavior change**: a bare `access-info` line used to be an incomplete-command error that stopped a paste; it is now valid, and later lines up to the next `!` are read as definition names. `show running-config` output (bare `topology`/`scenario`/`reference` headings) remains non-replayable and stops at the first such heading; because the `!` closes the submode, a heading is never mistaken for an access-info named `topology`.
 
 ### Running-entry submodes (`config-running-<kind>-<name>`)
 
@@ -924,7 +924,8 @@ dirty definition candidate, and vice versa.
 <kind> <name>` / `no ...` command, which selects/deactivates a
 *running-config selection* instead (and, for topology, there is no
 running-config `no topology` at all: `active_topology` is mandatory,
-so there is no safe "unset" to fall back to).
+so there is no safe "unset" to fall back to; an unselected candidate is only
+reachable as `no <name>` in `config-running-topology`).
 
 ```
 network-lab(config)# no scenario maintenance_test
@@ -1191,25 +1192,33 @@ network-lab(config-access-device-R2)#
 - Blank lines are ignored.
 - A standalone `!` line (a visual block-closing separator in
   `show`/`show running-config` output) has a narrow, explicit meaning
-  **only** inside a multi-line paste, and **only** in access-info's own
-  three modes:
+  **only** inside a multi-line paste, and **only** in these five modes
+  (access-info's three modes plus topology's two):
 
   | Current mode when the `!` line is reached | Effect |
   |---|---|
   | `config-access-device-<name>` | Exactly one level up, to `config-access-info-<definition>`. |
   | `config-access-jump-host-<name>` | Exactly one level up, to `config-access-info-<definition>`. |
   | `config-access-info-<definition>` | Exactly one level up, to `config` (global configuration). |
-  | anywhere else (`config`, EXEC, topology/scenario/reference modes, ...) | No-op: never `exit`/`end`/`quit`, never changes candidate state, never ends the paste, never terminates the CLI. |
+  | `config-device-<name>` (topology) | Exactly one level up, to `config-topology-<definition>`. |
+  | `config-topology-<definition>` | Exactly one level up, to `config` (global configuration). |
+  | `config-running` and the name-less `config-running-<kind>` submodes | Exactly one level up, but **only** if at least one command was executed inside that section (one that did not itself change mode); a leading `!`, a `!` right after entering the mode or right after `exit` never climbs another level. |
+  | anywhere else (`config`, EXEC, scenario/reference modes, named running submodes, ...) | No-op: never `exit`/`end`/`quit`, never changes candidate state, never ends the paste, never terminates the CLI. |
 
-  This is what makes a rendered access-info block (device/jump-host
-  blocks each closed by their own `!`, and the whole block closed by a
-  final `!`) pasteable back without manually inserting `exit` between
+  This is what makes a rendered access-info or topology block (device/
+  jump-host blocks each closed by their own `!`, and the whole block closed
+  by a final `!`) pasteable back without manually inserting `exit` between
   every sibling block. It is deliberately **not** a generic `!` = `exit`
-  alias: topology/scenario/reference paste behavior is unchanged, and an
-  extra stray trailing `!` (an imperfect copy/paste) is always safe —
+  alias. Note that in topology a stray `!` right after `topology <name>` or
+  `device <name>` now leaves that mode (it used to be a no-op), so the next
+  mode-specific line (`type`, `description`, ...) fails with `% Unknown
+  command` and the paste stops there (see the non-atomic paste rule below);
+  a following global command would run at global level. An extra stray
+  trailing `!` (an imperfect copy/paste) is always safe —
   once the paste reaches global configuration mode or EXEC, further `!`
   lines simply do nothing. A single manually typed `!` (not part of a
-  multi-line paste) is unaffected by any of this.
+  multi-line paste) is unaffected by any of this, and so are scenario and
+  reference modes (no CLI body grammar there, so `!` stays a no-op).
 - Processing stops at the first invalid or failing line — commands from
   earlier lines remain in the candidate (no automatic rollback); use
   `clear` to discard them if the paste didn't go as intended.
@@ -1534,12 +1543,61 @@ mathematically minimal generic recursive diff:
   field you set on it shows up — entering a new, still-empty object alone
   produces no output at all (nothing has actually changed yet).
 
-- In **global** `show configuration`, running-config selection removals are
-  grouped under a `running-config` section (` no reference <name>`, closed by
-  `!`) so they cannot be mistaken for the top-level `no reference <name>`
-  stored-definition deletion; inside `config-running` the same removal is
-  shown as the plain `no reference <name>`. A pasted `!` closes the
-  `running-config` section like the access-info blocks.
+- In **global** `show configuration`, the whole running-config selection
+  delta (switches, selections, removals) is grouped under a `running-config`
+  section so a removal cannot be mistaken for the top-level `no reference
+  <name>` stored-definition deletion and a `topology`/`scenario` block is never
+  read at global level; inside `config-running` the same delta is shown
+  ungrouped. The section is closed by `!` when its last item is a command line
+  (` no reference <name>`), or by `exit` when it ends with a block (a `!`
+  right after a block's own closing `!` is a no-op in the structural-`!`
+  model), so a following global line such as the definition-deleting `no
+  reference <name>` always runs at global level:
+
+  ```
+  network-lab(config)# show configuration
+  running-config
+   topology
+    no sample_lab
+   !
+   no reference sample
+  !
+  no reference sample
+  ```
+
+  In `config-running` a block's leading `!` is omitted when it follows a
+  command line (e.g. `no access-info`), since that `!` would otherwise close
+  `config-running` on paste.
+
+### Replay guarantees (`show configuration` output pasted back)
+
+Replay means: paste the output into a Fresh Session on the same committed
+baseline, in the context it was taken from; candidate, dirty state, reference
+order and the final mode then match the source session, and the committed
+state is untouched. Net-zero changes print nothing and replay as clean.
+
+| Context | Replay | Notes |
+|---|---|---|
+| Global | Guaranteed | Running-selection delta in a `running-config` section (see above), followed by any open definition's delta. |
+| `config-running` | Guaranteed | The selection delta, e.g. `!`/` topology`/`  no <name>`/`!`. |
+| `config-running-<kind>` (name-less Common) | Guaranteed (kind-scoped) | Shows **only that kind's** selection delta in the submode's own grammar: `<name>` (select/switch) and `no <name>` (unset, using the committed name); a reference shows `no <name>` lines then added names in candidate order. No `!`, no `description`, no other kind, no definition body. Replays into the same Common submode of a Fresh Session and stays there. A definition named like a submode keyword (e.g. `show`) cannot be typed as `<name>` there, so it is rendered as a `% ... collides with a submode keyword` line that stops a paste (`no show` is always safe). |
+| `config-running-<kind>-<name>` (named) | Existing scope | Unchanged: shows the whole running delta, as before. |
+| Description edits (Global / `config-running`) | Guaranteed | Rendered through the named submode: `<kind> <name>` / ` description <text>` (or ` no description`) / ` exit`. The entry command selects it, so it also carries a selection change; plain selections without a description keep the `!`/`<kind>`/`<name>`/`!` block. Not shown in Common submodes. |
+| Definition sections (Global) | access-info, topology: Guaranteed | `!` closes `device`/`jump-host` blocks and the definition (topology's `device` and `topology` modes now close with `!` like access-info's), so the replay returns to global and a following global command (e.g. `no reference <name>`) is not read inside the definition mode. |
+| scenario / reference definition body | Display-only | These modes have no CLI body grammar (only external `edit`); their delta is YAML review text. A paste stops at the first unsupported line (`% Unknown command: "name:"`) and later lines are not processed. Candidate changes applied by earlier lines of the same paste (e.g. the `running-config` section of a Global output) are **kept**; the committed state is never changed. |
+| topology `links` / device `interface` body | Display-only | `interface <name>` blocks (inside `device`) and the `links` block are review text: a paste stops at `interface` (device mode) or `links` (topology mode) with `% Unknown command`, the mode stays open, and earlier lines of the same paste stay applied in the candidate. Device `type`/`description` edits replay. |
+
+**Pastes are not atomic.** Processing stops at the first failing line; earlier
+lines stay applied to the candidate and later lines are never run. There is no
+automatic rollback: use `clear` to discard the candidate. The committed state
+is never touched by a paste. A Common-submode description-only change shows no
+output there (descriptions are not shown in Common submodes) although the
+session is dirty.
+
+Commit validation is unchanged: an unselected topology/scenario still fails
+`commit`. Running-selection removal (`no <name>` in a Common submode, or the
+`running-config` section in Global) is distinct from the definition deletion
+`no <kind> <name>` at global level, which Global output prints after the section.
 
 - **Structured additions/removals** use the same set/`no` rendering, e.g.
   a newly-added `reference` shows as an addition, `no access-info` shows as

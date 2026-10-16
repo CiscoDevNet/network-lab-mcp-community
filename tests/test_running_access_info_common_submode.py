@@ -192,7 +192,8 @@ def test_common_selection_matches_old_path_state_and_stays(root, capsys):
     assert _run(new, "ai_b", capsys)[0] and new.mode == COMMON
     assert new.settings_candidate == old.settings_candidate
     assert new.settings_dirty() == old.settings_dirty() is True
-    assert climain.render_configuration_candidate(new) == climain.render_configuration_candidate(old)
+    assert climain.render_configuration_candidate(new) == "ai_b"  # kind-scoped Common form
+    assert climain.render_configuration_candidate(old) == "!\n access-info\n  ai_b\n!"
     # replace by another name; single selection
     assert _run(new, "sample_lab", capsys)[0]
     assert _selected(new) == "sample_lab" and not new.settings_dirty()
@@ -307,7 +308,7 @@ def test_commit_failure_keeps_common_mode_and_candidate(root, capsys, monkeypatc
 
 def test_show_and_show_configuration_in_common_mode(root, capsys):
     s = _session(root, "access-info", "ai_b")
-    assert _run(s, "show configuration", capsys)[1].strip() == "!\n access-info\n  ai_b\n!"
+    assert _run(s, "show configuration", capsys)[1].strip() == "ai_b"
     out = _run(s, "show running-config", capsys)[1]
     assert " access-info\n  sample_lab\n" in out and "ai_b" not in out  # committed selection
 
@@ -332,14 +333,22 @@ def test_new_common_block_replays_and_bang_closes_it(root, capsys):
 def test_show_configuration_output_replays_from_running_and_global(root, capsys):
     src = _session(root, "access-info", "ai_b")
     text = climain.render_configuration_candidate(src)
+    assert text == "ai_b"
+    # Common output replays into the same Common submode ...
+    s = _session(root, "access-info")
+    assert _paste(s, text, capsys).strip() == "" and s.mode == COMMON
+    assert _selected(s) == "ai_b" and s.settings_dirty()
+    # ... while the running-scope output (taken in config-running) replays from running/global
+    run_src = _session(root)
+    _run(run_src, "access-info ai_b", capsys)
+    _run(run_src, "exit", capsys)
+    rtext = climain.render_configuration_candidate(run_src)
     for start in ("running", "global"):
         s = cfgmod.CliSession(root)
         s.enter_configure()
         if start == "running":
             climain.execute_command_line(s, "running-config")
-        else:
-            text_in = "running-config\n" + text
-        out = _paste(s, text if start == "running" else text_in, capsys)
+        out = _paste(s, rtext if start == "running" else "running-config\n" + rtext, capsys)
         assert _selected(s) == "ai_b", (start, out)
         assert s.settings_dirty()
 

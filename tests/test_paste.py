@@ -281,10 +281,10 @@ def test_topology_device_paste(lab_root):
 
 # ---- standalone "!" separators (as produced by show-configuration output) ----
 #
-# access-info's own three modes (access_info/access_device/
-# access_jump_host) give a pasted standalone "!" a narrow, explicit meaning
-# (exactly one level up, mirroring render_access_info_block()'s own
-# block-closing convention -- see _apply_structural_bang() in main.py).
+# access-info's three modes (access_info/access_device/access_jump_host) and
+# topology's two (device/topology) give a pasted standalone "!" a narrow,
+# explicit meaning (exactly one level up, mirroring the rendered blocks' own
+# closing convention -- see _apply_structural_bang() in main.py).
 # This test previously asserted the OLD, now-fixed behavior ("!" always
 # ignored, which meant a rendered access-info block
 # could not be pasted back). It has been rewritten to assert the new,
@@ -312,17 +312,21 @@ def test_bang_inside_a_password_value_is_not_treated_as_a_separator(lab_root):
     assert session.definition_candidate["devices"]["R9"]["password"] == "Example!Password123"
 
 
-def test_standalone_bang_in_topology_paste_remains_a_noop(lab_root):
-    """The structural "!" meaning is deliberately
-    bounded to access-info's own three modes -- topology paste behavior
-    is unchanged (a standalone "!" is still just dropped/ignored there)."""
+def test_standalone_bang_in_topology_paste_closes_device_then_topology(lab_root):
+    """The structural "!" meaning covers access-info's three modes and the
+    topology definition's two (device -> topology -> global); scenario and
+    reference have no CLI body grammar and are unchanged."""
     session = cfgmod.CliSession(lab_root)
     session.enter_configure()
     session.apply_topology_definition_plan(session.plan_topology_definition("sample_lab"))
     session.enter_topology_device("R9")
     block = "type iosxr\n!\n"
     climain.execute_input_block(session, block)
-    assert session.mode == "device"  # unchanged: "!" did not exit the device submode
+    # topology device/definition modes close with "!" like access-info (so a rendered
+    # topology delta returns to global); a "!" after content climbs one level
+    assert session.mode == "topology"
+    climain.execute_input_block(session, "!\n!")
+    assert session.mode == "global"
     assert session.definition_candidate["devices"]["R9"]["type"] == "iosxr"
 
 

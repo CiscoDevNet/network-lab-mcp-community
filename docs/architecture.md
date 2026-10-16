@@ -1452,7 +1452,12 @@ definition's name) -- the only real references anywhere are
 running-config's own four selection fields, handled above. `config-running`
 mode has no `no topology` command at all (only `no access-info` and `no
 reference <name>`), since `active_topology` (like `active_scenario`) is a
-mandatory field with no safe "unset" value.
+mandatory field with no safe "unset" value. An unselected *candidate* is still
+reachable (`no <name>` in the Common submode; `commit` rejects it), and
+`show configuration` renders it as a `topology`/`scenario` block that names the
+committed selection -- the renderer emits text in the grammar of the context it
+is taken from (Global wraps the whole running delta in `running-config`), so
+Global/Running output replays into a Fresh Session. The name-less Common submodes render a kind-scoped delta in their own `<name>`/`no <name>` grammar (replay stays in the submode); description edits render through the named submode (`<kind> <name>`/`description`/`exit`); topology's definition modes close with the structural `!` like access-info's. Scenario/reference definition bodies have no CLI grammar and stay display-only (see "Replay guarantees" in cli_reference.md).
 
 ### Command grammar as the single source of truth
 

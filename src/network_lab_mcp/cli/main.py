@@ -116,14 +116,19 @@ def _split_pasted_command_lines(text: str) -> list[str]:
 # fails as an unknown command. This is deliberately NOT a generic "!" ==
 # "exit" alias: it only applies inside a multi-line paste (never to a
 # single manually-typed line, see execute_command_line()/run()), and only
-# in these three access-info modes and `running` (so the `running-config`
-# section that global `show configuration` emits for selection removals
-# closes before a following global-level line) -- topology/scenario/
-# reference paste behavior is unchanged, and a stray "!" at global configuration or EXEC
+# in the five modes of _STRUCTURAL_BANG_EXIT_MODES -- access-info's three
+# modes (access_device/access_jump_host/access_info) and the topology
+# definition's two (`device` -> topology -> global), so a rendered topology
+# delta returns to global like an access-info block -- plus the `running`
+# section modes (conditional, see below; the `running-config` section that
+# global `show configuration` emits closes before a following global-level
+# line). Scenario/reference modes are unaffected (no CLI body grammar, so
+# their show configuration output is display-only YAML, never replayable).
+# A stray "!" at global configuration or EXEC
 # is an explicit, deliberate no-op (never exit/end/quit, never terminates
 # the CLI), so an imperfect copy/paste with one extra trailing "!" cannot
 # silently leave configuration mode.
-_STRUCTURAL_BANG_EXIT_MODES = ("access_device", "access_jump_host", "access_info")
+_STRUCTURAL_BANG_EXIT_MODES = ("access_device", "access_jump_host", "access_info", "device", "topology")
 
 # Modes whose `show`/`show configuration` mean the running-config selection
 # (candidate delta / committed selection), as opposed to a definition.
@@ -732,12 +737,19 @@ def _render_configuration_delta(kind: Optional[str], name: Optional[str], origin
     return render_generic_configuration_delta(name, original, candidate)
 
 
-def _running_config_delta_lines(original: dict, candidate: dict) -> list[str]:
-    """Field-level delta for the running-config selection: only the
-    selection(s) that actually changed, using the existing set/`no`
-    rendering conventions -- unrelated unchanged selections are never
-    repeated. Running-entry descriptions are compared on the normalized
-    (active-entries-only) view, so a stale description never shows up."""
+def _running_config_delta_chunks(original: dict, candidate: dict) -> list[list[str]]:
+    """Field-level delta for the running-config selection, as self-contained
+    chunks: only the selection(s) that actually changed, using the existing
+    set/`no` rendering conventions -- unrelated unchanged selections are
+    never repeated. A chunk is either one running-level command line
+    (`no access-info`, `no reference <name>`) or a `!`-delimited block that
+    enters a name-less selection submode.
+
+    Topology and scenario have no running-level `no`: clearing one is the
+    submode's `no <name>`, so it renders as a block naming the COMMITTED
+    selection (the only place the removed name still exists). Running-entry
+    descriptions are compared on the normalized (active-entries-only) view,
+    so a stale description never shows up."""
     original = cfgmod.normalized_settings(original)
     candidate = cfgmod.normalized_settings(candidate)
     old_desc = original.get(cfgmod.RUNNING_DESCRIPTIONS_KEY) or {}
@@ -747,16 +759,15 @@ def _running_config_delta_lines(original: dict, candidate: dict) -> list[str]:
         return (source.get(kind) or {}).get(name)
 
     def entry_block(label: str, kind: str, names: list[str]) -> list[str]:
-        block = ["!", f" {label}"]
-        for name in names:
-            block.append(f"  {name}")
-            description = description_of(new_desc, kind, name)
-            if description:
-                block.append(f"   description {description}")
-        block.append("!")
-        return block
+        return ["!", f" {label}", *(f"  {name}" for name in names), "!"]
 
-    lines: list[str] = []
+    def named_entry(label: str, name: str, text: Optional[str]) -> list[str]:
+        """Description edits are valid only in the named submode
+        (`<kind> <name>` selects/enters it; `exit` returns to running, since a
+        `!` there is a no-op)."""
+        return [f"{label} {name}", f" description {text}" if text else " no description", " exit"]
+
+    chunks: list[list[str]] = []
     for key, kind, label in (
         ("active_access_info", "access_info", "access-info"),
         ("active_topology", "topology", "topology"),
@@ -766,14 +777,14 @@ def _running_config_delta_lines(original: dict, candidate: dict) -> list[str]:
         new_value = candidate.get(key)
         if old_value != new_value:
             if new_value:
-                lines.extend(entry_block(label, kind, [new_value]))
+                text = description_of(new_desc, kind, new_value)
+                chunks.append(named_entry(label, new_value, text) if text else entry_block(label, kind, [new_value]))
+            elif kind == "access_info":
+                chunks.append([f"no {label}"])
             else:
-                lines.append(f"no {label}")
+                chunks.append(["!", f" {label}", f"  no {old_value}", "!"])
         elif new_value and description_of(old_desc, kind, new_value) != description_of(new_desc, kind, new_value):
-            if description_of(new_desc, kind, new_value):
-                lines.extend(entry_block(label, kind, [new_value]))
-            else:
-                lines.append(f"no {label} {new_value} description")
+            chunks.append(named_entry(label, new_value, description_of(new_desc, kind, new_value)))
 
     old_refs = original.get("active_references") or []
     new_refs = candidate.get("active_references") or []
@@ -782,29 +793,98 @@ def _running_config_delta_lines(original: dict, candidate: dict) -> list[str]:
     changed_refs = [
         r for r in new_refs if r in old_refs and description_of(old_desc, "reference", r) != description_of(new_desc, "reference", r)
     ]
-    with_text = added_refs + [r for r in changed_refs if description_of(new_desc, "reference", r)]
-    if with_text:
-        lines.extend(entry_block("reference", "reference", with_text))
+    plain: list[str] = []
+    for reference in added_refs:
+        text = description_of(new_desc, "reference", reference)
+        if text:
+            if plain:
+                chunks.append(entry_block("reference", "reference", plain))
+                plain = []
+            chunks.append(named_entry("reference", reference, text))
+        else:
+            plain.append(reference)
+    if plain:
+        chunks.append(entry_block("reference", "reference", plain))
     for reference in changed_refs:
-        if not description_of(new_desc, "reference", reference):
-            lines.append(f"no reference {reference} description")
+        chunks.append(named_entry("reference", reference, description_of(new_desc, "reference", reference)))
     for reference in removed_refs:
-        lines.append(f"no reference {reference}")
+        chunks.append([f"no reference {reference}"])
+    return chunks
+
+
+def _running_config_delta_lines(original: dict, candidate: dict) -> list[str]:
+    lines: list[str] = []
+    previous: Optional[list[str]] = None
+    for chunk in _running_config_delta_chunks(original, candidate):
+        if previous is not None and previous[0] != "!" and chunk[0] == "!":
+            # After a running-level command line the running section HAS
+            # content, so a block's leading "!" separator would climb out of
+            # running when pasted; it is purely visual, so omit it here.
+            chunk = chunk[1:]
+        lines.extend(chunk)
+        previous = chunk
     return lines
 
 
-def _scope_running_removals(lines: list[str]) -> list[str]:
+def _common_selection_lines(mode: str, kind: str, original: dict, candidate: dict) -> list[str]:
+    """`show configuration` in a name-less Common submode: ONLY this kind's
+    selection delta, in the submode's own grammar (`<name>` selects, `no
+    <name>` unselects; no `!`, no description, no other kind, no definition
+    body), so it replays into a Fresh Session's same submode. Unset names
+    come from the committed selection. A name that the submode's grammar
+    reads as a keyword (e.g. a definition called `show`) cannot be typed as
+    `<name>` here; it is rendered as a `%` line, which stops a paste instead
+    of silently running that keyword."""
+    original = cfgmod.normalized_settings(original)
+    candidate = cfgmod.normalized_settings(candidate)
+
+    def select_line(name: str) -> str:
+        parsed = grammar.parse(mode, name)
+        if parsed.ok and parsed.action == f"{mode}.select":
+            return name
+        return f"% {kind.replace('_', '-')} '{name}' collides with a submode keyword; select it from config-running"
+
+    if kind == "reference":
+        old_refs = original.get("active_references") or []
+        new_refs = candidate.get("active_references") or []
+        return [f"no {r}" for r in old_refs if r not in new_refs] + [
+            select_line(r) for r in new_refs if r not in old_refs
+        ]
+    old_value = original.get(f"active_{kind}")
+    new_value = candidate.get(f"active_{kind}")
+    if old_value == new_value:
+        return []
+    return [select_line(new_value)] if new_value else [f"no {old_value}"]
+
+
+def _global_running_section(original: dict, candidate: dict) -> list[str]:
     """Global-mode `show configuration` aggregates two independent candidate
     scopes. A top-level `no reference A` there means "delete the stored
-    definition" (the global command), so a running-config *selection* removal
-    is grouped under an explicit `running-config` section instead -- the same
-    text would otherwise be ambiguous. Running-mode output is untouched (there
-    `no reference A` is exactly the selection removal)."""
-    removals = [line for line in lines if line.startswith("no ")]
-    if not removals:
-        return lines
-    kept = [line for line in lines if not line.startswith("no ")]
-    return kept + ["running-config", *(f" {line}" for line in removals), "!"]
+    definition" (the global command), and `topology`/`scenario` blocks mean
+    nothing at global level, so the WHOLE running-config selection delta is
+    grouped under an explicit `running-config` section: pasted back at global
+    it enters running mode, replays each chunk with running grammar, and
+    returns to global before any following global-level line.
+
+    The section is closed by `!` when the last chunk is a running-level
+    command, but a `!` that follows a block's own closing `!` (or a named
+    entry's `exit`) is a no-op in the structural-bang model (the section has
+    no content of its own since), so a trailing block is followed by an explicit `exit` instead -- never
+    leaving a later global line (e.g. a definition-deleting `no reference`)
+    to run in running mode. Running-mode output is untouched."""
+    chunks = _running_config_delta_chunks(original, candidate)
+    if not chunks:
+        return []
+    body: list[str] = []
+    for chunk in chunks:
+        if chunk[0] == "!":
+            # A block already carries its own nesting; its leading "!" is only
+            # a visual separator (dropped), its closing "!" is nested one level.
+            body.extend([*chunk[1:-1], " !"])
+        else:
+            body.extend(f" {line}" for line in chunk)
+    last = chunks[-1][-1]
+    return ["running-config", *body, "!" if last.startswith("no ") else "exit"]
 
 
 def render_configuration_candidate(session: cfgmod.CliSession) -> str:
@@ -817,14 +897,22 @@ def render_configuration_candidate(session: cfgmod.CliSession) -> str:
     definition mode (or its device/jump-host submode) shows only that
     object's delta, scoped to the current sub-object where applicable.
     Entering a new, still-empty object produces no output at all."""
+    if session.mode in cfgmod.RUNNING_COMMON_MODES:
+        return "\n".join(
+            _common_selection_lines(
+                session.mode,
+                cfgmod.RUNNING_COMMON_MODES[session.mode],
+                session.committed_settings or {},
+                session.settings_candidate or {},
+            )
+        )
+
     if session.mode in _RUNNING_SCOPE_MODES:
         return "\n".join(_running_config_delta_lines(session.committed_settings or {}, session.settings_candidate or {}))
 
     if session.mode == "global":
         parts = []
-        settings_lines = _scope_running_removals(
-            _running_config_delta_lines(session.committed_settings or {}, session.settings_candidate or {})
-        )
+        settings_lines = _global_running_section(session.committed_settings or {}, session.settings_candidate or {})
         if settings_lines:
             parts.append("\n".join(settings_lines))
         if session.definition_kind is not None:

@@ -158,7 +158,8 @@ def test_selection_matches_parent_path_and_stays_and_replaces(root, capsys, kind
     new = _session(root, kw)
     assert _run(new, b, capsys)[0] and new.mode == mode
     assert new.settings_candidate == old.settings_candidate and new.settings_dirty() and old.settings_dirty()
-    assert climain.render_configuration_candidate(new) == climain.render_configuration_candidate(old)
+    assert climain.render_configuration_candidate(new) == b  # kind-scoped Common form
+    assert climain.render_configuration_candidate(old) == f"!\n {kw}\n  {b}\n!"  # running-scope form
     _run(new, a, capsys)  # A -> B -> A: net zero, same as the named path
     assert not new.settings_dirty()
     ok, out = _run(new, "nope", capsys)
@@ -201,7 +202,7 @@ def test_topology_unselected_candidate_commit_fails_keeps_candidate_then_reselec
     s = _session(root, "topology")
     committed = (root / "settings.yaml").read_bytes()
     _run(s, "no sample_lab", capsys)
-    assert climain.render_configuration_candidate(s) == "no topology"
+    assert climain.render_configuration_candidate(s) == "no sample_lab"  # kind-scoped Common form
     ok, out = _run(s, "commit", capsys)
     assert not ok and "missing a valid active topology" in out
     assert (root / "settings.yaml").read_bytes() == committed and lab.topology_exists("sample_lab", root)
@@ -272,7 +273,8 @@ def test_reference_selection_equals_parent_path(root, capsys):
     old = _session(root, "reference ref_b")
     new = _session(root, "reference", "ref_b")
     assert new.settings_candidate == old.settings_candidate
-    assert climain.render_configuration_candidate(new) == climain.render_configuration_candidate(old)
+    assert climain.render_configuration_candidate(new) == "ref_b"  # kind-scoped Common form
+    assert climain.render_configuration_candidate(old) == "!\n reference\n  ref_b\n!"
 
 
 def test_d3_help_tab_follow_candidate_in_common_mode(root, capsys):
@@ -445,7 +447,7 @@ def test_root_end_commit_clear_modes(root, capsys):
 
 def test_show_views_in_common_modes(root, capsys):
     s = _session(root, "reference", "no sample")
-    assert _run(s, "show configuration", capsys)[1].strip() == "no reference sample"
+    assert _run(s, "show configuration", capsys)[1].strip() == "no sample"
     assert " reference\n  sample\n" in _run(s, "show running-config", capsys)[1]  # committed view
 
 
@@ -468,6 +470,11 @@ def test_paste_topology_unselect_then_reselect_in_one_block(root, capsys):
 
 def test_paste_show_configuration_output_replays(root, capsys):
     src = _session(root, "topology", "topo_b")
+    assert climain.render_configuration_candidate(src) == "topo_b"  # Common output replays in Common
+    c = _session(root, "topology")
+    assert _paste(c, "topo_b", capsys).strip() == "" and c.settings_candidate["active_topology"] == "topo_b"
+    src = _session(root, "topology topo_b")
+    _run(src, "exit", capsys)
     text = climain.render_configuration_candidate(src)
     for start in ("running", "global"):
         s = cfgmod.CliSession(root)

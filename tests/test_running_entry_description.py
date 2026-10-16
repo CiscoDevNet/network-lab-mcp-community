@@ -420,17 +420,17 @@ def test_show_configuration_delta_cases(root):
     session = _running(root)
     _run(session, "topology sample_lab")
     _run(session, "description T")
-    assert climain.render_configuration_candidate(session) == "!\n topology\n  sample_lab\n   description T\n!"
+    assert climain.render_configuration_candidate(session) == "topology sample_lab\n description T\n exit"
     _run(session, "commit")
     _run(session, "no description")
-    assert climain.render_configuration_candidate(session) == "no topology sample_lab description"
+    assert climain.render_configuration_candidate(session) == "topology sample_lab\n no description\n exit"
     _run(session, "clear")
     assert session.mode == "running_topology"  # sample_lab still active
     _run(session, "exit")
     # newly selected entry + description
     _run(session, "access-info other_ai")
     _run(session, "description New access")
-    assert climain.render_configuration_candidate(session) == "!\n access-info\n  other_ai\n   description New access\n!"
+    assert climain.render_configuration_candidate(session) == "access-info other_ai\n description New access\n exit"
     _run(session, "clear")
     assert session.mode == "running"  # other_ai no longer active: stale submode dropped
     # selection-only: no description lines
@@ -444,10 +444,10 @@ def test_show_configuration_delta_cases(root):
     _run(session, "commit")
     _run(session, "reference ref_b")
     _run(session, "description B")
-    assert climain.render_configuration_candidate(session) == "!\n reference\n  ref_b\n   description B\n!"
+    assert climain.render_configuration_candidate(session) == "reference ref_b\n description B\n exit"
     _run(session, "commit")
     _run(session, "description B2")
-    assert climain.render_configuration_candidate(session) == "!\n reference\n  ref_b\n   description B2\n!"
+    assert climain.render_configuration_candidate(session) == "reference ref_b\n description B2\n exit"
 
 
 # ==========================================================================
