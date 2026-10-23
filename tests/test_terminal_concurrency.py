@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Per-device terminal concurrency.
 
 Core invariant under test: different devices execute concurrently; the

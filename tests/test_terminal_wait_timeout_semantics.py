@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Characterize `terminal._wait_for_pattern()`'s
 current timeout semantics, with
 deterministic tests (an injectable fake clock -- never a real 25-second

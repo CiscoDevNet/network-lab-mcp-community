@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Active running-config entry submodes and their `description` metadata.
 
 `config-running# <kind> <name>` selects/activates the entry (existing

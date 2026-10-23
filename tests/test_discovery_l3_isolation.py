@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """L3 enrichment is additive, never a Discovery blocker. A genuine L3
 *parser* failure for one device (unrecognized output,
 not just a missing/absent command) must skip only that device's L3

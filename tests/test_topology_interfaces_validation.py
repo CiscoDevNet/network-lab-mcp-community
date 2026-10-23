@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Topology `interfaces` validation (lab.validate_topology_interfaces(),
 called from lab.validate_topology_data()) -- L3 enrichment: a stable,
 directly observed IPv4 address + VRF per interface. Like `links`,

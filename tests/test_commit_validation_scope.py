@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Commit validation scope: strict validation of the changed definition
 plus baseline/candidate comparison of running-config findings.
 

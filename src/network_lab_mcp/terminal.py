@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """tmux-based terminal session management for Network Lab MCP.
 
 All terminal state lives in a dedicated tmux server (a separate named socket),

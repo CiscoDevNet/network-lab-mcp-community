@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Persistent terminal transcript logging (logs/terminal/<device-id>/*.log).
 
 Uses real tmux sessions (in the isolated network-lab-mcp tmux server, via

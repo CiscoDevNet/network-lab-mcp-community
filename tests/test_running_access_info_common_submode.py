@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Name-less Running access-info submode (`config-running-access-info`).
 
 `config-running# access-info` (bare) enters a shared submode where typing a

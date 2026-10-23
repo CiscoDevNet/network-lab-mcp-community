@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Regression: the live 6-router IOS XR SR core (sanitized read-only
 captures in tests/fixtures/live_sr_core/). R1/R2 answer `show cdp neighbors`
 with `% CDP is not enabled` (CDP disabled); R3-R6 are IOS XR LNT images that

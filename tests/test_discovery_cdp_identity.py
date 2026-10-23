@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """CDP identity resolution reuses resolve_remote_identity() as-is
 (it is protocol-agnostic pure string matching -- it never inspects
 `obs.source`), including the FQDN -> short-name path a CDP Device ID

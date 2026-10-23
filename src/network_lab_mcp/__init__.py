@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Network Lab MCP: an AI Network Engineer Workspace for real network labs."""
 
 from importlib.metadata import PackageNotFoundError
@@ -26,7 +27,10 @@ except PackageNotFoundError:
     __version__ = "unavailable"
 
 __author__ = _metadata_field("Author")
-__license__ = _metadata_field("License")
+# PEP 639 packages publish `License-Expression`; older metadata uses `License`.
+__license__ = _metadata_field("License-Expression")
+if __license__ == "unavailable":
+    __license__ = _metadata_field("License")
 
 # Not a standard packaging metadata field, so pyproject.toml has nowhere to
 # put it; this constant is the single source of truth for it instead of a

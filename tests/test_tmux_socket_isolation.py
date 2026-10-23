@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Test isolation: ordinary pytest must never be able to list,
 read, send to, or close a real production managed session -- only the
 disposable, per-run tmux socket the `_isolated_tmux_socket` autouse

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for cli/editor.py: $VISUAL/$EDITOR/vim resolution order, the
 candidate <-> temp-file <-> editor round trip, and error handling. A fake
 editor script (see conftest.fake_editor) stands in for a real interactive

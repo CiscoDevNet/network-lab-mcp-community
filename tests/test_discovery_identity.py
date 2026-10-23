@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Identity resolution: mapping an LLDP remote Device ID to a logical
 managed device ID (resolve_remote_identity()). Deliberately bounded --
 exact/case-normalized/short-name-alias matching only, fails closed

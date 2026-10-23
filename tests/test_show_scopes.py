@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for context-aware `show running-config` / `show configuration`
 scoping, and the EXEC-only restriction on `show version`.
 

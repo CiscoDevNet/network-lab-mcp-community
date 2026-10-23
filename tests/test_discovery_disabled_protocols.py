@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """IOS XR LLDP/CDP "not enabled" handling during Discovery.
 
 Only the two confirmed responses ("% LLDP is not enabled" /

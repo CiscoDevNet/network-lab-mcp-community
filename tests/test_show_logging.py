@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`show logging` / `show logging <device-id>` / `show logging <device-id>
 <log-file>`: EXEC-only, read-only viewing of persistent terminal
 transcripts (logs/terminal/<device-id>/<session-start>.log), integrated

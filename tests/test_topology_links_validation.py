@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Topology `links` validation (lab.validate_topology_links(), called from
 lab.validate_topology_data()) -- the same SSOT used by load_topology(),
 write_topology() (and therefore the CLI's commit path), and get_device().

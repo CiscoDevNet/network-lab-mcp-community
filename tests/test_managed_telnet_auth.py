@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Private Telnet login for managed terminal sessions
 (`terminal_open()`).
 

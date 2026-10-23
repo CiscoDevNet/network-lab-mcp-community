@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`show configuration` -> paste replay consistency for the running-config
 selection delta.
 

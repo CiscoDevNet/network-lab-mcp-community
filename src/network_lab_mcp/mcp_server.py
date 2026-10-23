@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Network Lab MCP stdio server.
 
 Exposes exactly seven tools to Claude Code:

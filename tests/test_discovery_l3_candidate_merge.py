@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """build_discovery_candidate()'s rebuild semantics (replaces the former
 per-interface merge, which no longer exists): the candidate is built from
 this run's DiscoveryResult alone, so an interface not re-observed is NOT

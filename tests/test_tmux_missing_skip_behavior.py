@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """When `tmux` genuinely is not installed, most of this suite fails at the
 same single, well-defined boundary: `terminal._tmux_base()` raising
 TerminalError("The 'tmux' binary is not available on this system."). This

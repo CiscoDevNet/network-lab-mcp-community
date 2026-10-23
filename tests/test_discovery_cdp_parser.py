@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`parse_cdp_neighbors()` -- the CDP counterpart of
 parse_lldp_neighbors(). Handles both real-world row shapes: an IOS XR-style
 one-line row, and an IOS/IOS XE-style row where a long/FQDN Device ID wraps

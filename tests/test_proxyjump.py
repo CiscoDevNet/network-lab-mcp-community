@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for single-hop OpenSSH ProxyJump support: the access-info
 jump_hosts schema/validation (lab.py), device.get_device() resolution
 attaching the right jump host, and terminal.py's argv construction. No real

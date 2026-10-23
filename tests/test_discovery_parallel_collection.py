@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Parallel per-device Discovery collection.
 
 `discovery.discover_topology()`'s per-device bootstrap collection

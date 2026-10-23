@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`discover topology` candidate workflow: reuses the existing candidate/
 commit/clear system exactly like a manually typed `topology <name>` --
 never a separate Discovery datastore. `discovery.discover_topology()`

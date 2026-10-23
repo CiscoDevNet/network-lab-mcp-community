@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for lab.py's listing/existence helpers and
 atomic YAML persistence."""
 

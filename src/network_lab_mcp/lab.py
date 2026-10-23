@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Loading of Network Lab MCP lab data: running-config selection, topology,
 access-info, principles, scenarios, and references.
 

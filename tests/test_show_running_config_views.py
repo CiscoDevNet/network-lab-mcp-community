@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`show running-config <definition-type>` (EXEC only): a read-only
 committed-only dereference of one active-definition selection.
 

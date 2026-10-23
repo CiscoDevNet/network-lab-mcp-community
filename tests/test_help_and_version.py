@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for cli/main.py's Quick Start help, help topics, and `show
 version` rendering. Grammar-level parsing/completion/help for these
 commands is covered in test_grammar.py; this file covers the rendered
@@ -124,7 +125,7 @@ def test_version_matches_expected_release_metadata():
     assert network_lab_mcp.__version__ == "0.2.0"
     assert network_lab_mcp.__release_date__ == "2026-10-03"
     assert network_lab_mcp.__author__ == "Eitaro Uemura"
-    assert network_lab_mcp.__license__ == "GNU General Public License v3.0"
+    assert network_lab_mcp.__license__ == "Apache-2.0"
 
 
 def test_python_version_is_dynamic_not_hardcoded():
@@ -276,17 +277,45 @@ def test_pyproject_declares_expected_version_author_license():
         text = handle.read()
     assert 'version = "0.2.0"' in text
     assert 'name = "Eitaro Uemura"' in text
-    assert 'text = "GNU General Public License v3.0"' in text
+    assert 'license = "Apache-2.0"' in text
+    assert 'license-files = ["LICENSE"]' in text
+    assert "License ::" not in text
 
 
-def test_license_file_exists_and_is_gpl_v3():
+def test_license_file_exists_and_is_apache_2():
     with open("LICENSE", encoding="utf-8") as handle:
         text = handle.read()
-    assert "GNU GENERAL PUBLIC LICENSE" in text
-    assert "Version 3, 29 June 2007" in text
+    assert "Apache License" in text
+    assert "Version 2.0, January 2004" in text
+    assert "GNU GENERAL PUBLIC LICENSE" not in text
 
 
 def test_readme_documents_license():
     with open("README.md", encoding="utf-8") as handle:
         readme = handle.read()
-    assert "GNU General Public License v3.0" in readme
+    assert "Apache License, Version 2.0" in readme
+
+
+def test_license_prefers_license_expression_then_legacy_license(monkeypatch):
+    import importlib
+    import importlib.metadata
+
+    import network_lab_mcp
+
+    def fake_metadata(fields):
+        class _Meta:
+            def get(self, name):
+                return fields.get(name)
+
+        return lambda _name: _Meta()
+
+    try:
+        monkeypatch.setattr(importlib.metadata, "metadata", fake_metadata({"License-Expression": "Apache-2.0", "License": "legacy"}))
+        assert importlib.reload(network_lab_mcp).__license__ == "Apache-2.0"
+        monkeypatch.setattr(importlib.metadata, "metadata", fake_metadata({"License": "Legacy-License"}))
+        assert importlib.reload(network_lab_mcp).__license__ == "Legacy-License"
+        monkeypatch.setattr(importlib.metadata, "metadata", fake_metadata({}))
+        assert importlib.reload(network_lab_mcp).__license__ == "unavailable"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(network_lab_mcp)

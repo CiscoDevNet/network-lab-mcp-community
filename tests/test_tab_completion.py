@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tab/`?` completion regression tests for the `tab` key binding's
 multiple-candidate branch (`_make_key_bindings()` in cli/main.py).
 

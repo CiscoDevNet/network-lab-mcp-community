@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Human-facing interactive Network Lab CLI.
 
 Launched via ./run_cli.sh (`python3 -m network_lab_mcp.cli.main`). This is

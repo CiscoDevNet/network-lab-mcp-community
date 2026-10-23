@@ -132,7 +132,7 @@ Network Lab MCP
   Git commit:    abc1234
   Git branch:    main
   Author:        Eitaro Uemura
-  License:       GNU General Public License v3.0
+  License:       Apache-2.0
   Python:        3.12.3
   Platform:      Linux
   MCP SDK:       2.2.0

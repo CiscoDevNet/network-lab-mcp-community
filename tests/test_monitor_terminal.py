@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`terminal monitor <device-id>` -- read-only
 observation backend, incremental streaming, and monitor UI lifecycle.
 

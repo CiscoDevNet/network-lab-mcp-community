@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Classic IOS (`type: ios`) target selection and end-to-end
 `discover topology` participation via CDP -- mirrors
 tests/test_discovery_iosxe_targets.py's conventions, but for the

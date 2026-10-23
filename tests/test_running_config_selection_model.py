@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Running-config selection model clarifications.
 
 Two independent, additive changes to `config-running`'s already-existing

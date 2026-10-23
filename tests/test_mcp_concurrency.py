@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Concurrency proven at the actual MCP tool boundary, not merely inside
 terminal.py's private helpers.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """access-info configuration render/paste round-trip.
 
 Rendered access-info configuration (render_access_info_block()) closes

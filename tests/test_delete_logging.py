@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`delete logging all` / `delete logging <device> all` / `delete logging
 <device> <log-file>` / `delete logging <device> directory` / `delete
 logging all directory`: EXEC-only, destructive terminal-log deletion.

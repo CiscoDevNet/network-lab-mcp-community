@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """terminal_send(text=...) / `_send_literal_text()`: byte-fidelity
 characterization, argv/error-message safety, and ordering.
 

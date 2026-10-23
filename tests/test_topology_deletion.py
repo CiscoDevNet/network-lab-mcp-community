@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`no topology <name>`: candidate-based deletion of a STORED
 topology definition, from global configuration mode.
 

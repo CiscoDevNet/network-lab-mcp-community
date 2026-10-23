@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Multi-line configuration paste.
 
 Pasting a multi-line configuration block (e.g. copied from a `show`

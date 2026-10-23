@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """IOS XR `show lldp neighbors` parser (parse_lldp_neighbors).
 
 Uses the sanitized real-lab-derived fixtures under tests/fixtures/lldp/ --

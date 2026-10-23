@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Managed-session / active-topology boundary.
 
 Investigation found a real inconsistency: `terminal_open()` already

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Candidate configuration session for the Network Lab CLI.
 
 Two independent candidate scopes exist, and `clear`/`commit` always act on

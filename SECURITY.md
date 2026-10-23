@@ -282,16 +282,34 @@ require human confirmation.
 
 ## 17. Reporting a vulnerability
 
-No private vulnerability-reporting channel is documented by this project at
-this time, and this repository does not publish a security contact. Please do
-not rely on one existing.
+Network Lab MCP is maintained in the CiscoDevNet organization
+(<https://github.com/CiscoDevNet/network-lab-mcp-community>). The project team
+and community take security bugs seriously, and responsible disclosure is
+appreciated.
 
+Report security bugs by emailing `oss-security@cisco.com`.
+
+- Do **not** report a security bug through a public GitHub issue or pull
+  request.
 - Do **not** post credentials, exploit details, private device data, logs, or
-  other sensitive material in a public GitHub issue.
-- If you believe you have found a vulnerability, you may open a public GitHub
-  issue that only says you have a security concern, without technical details,
-  and ask the maintainer for a private way to share them.
-- Use a private mechanism only if the project explicitly publishes one.
+  other sensitive material in any public place.
+- Include the affected version or commit and, where possible, steps to
+  reproduce that do not require real credentials or real device data.
 
-This project does not currently offer a response-time commitment, bounty, or
-formal disclosure process.
+### Disclosure policy
+
+When a security bug report is received, a primary handler coordinates the fix
+and release process:
+
+- Confirm the problem and determine the affected versions.
+- Audit the code for similar problems.
+- Prepare fixes for the releases that are still maintained.
+
+This project does not currently offer a bounty. It makes no guaranteed
+response-time commitment: this is a lab-oriented project, and responses are
+handled on a best-effort basis.
+
+### Comments on this policy
+
+If you have suggestions on how this process could be improved, please submit a
+pull request.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`terminal monitor <device-id>` grammar/CLI-dispatch tests.
 
 Covers only the grammar SSOT (parsing, abbreviation, `?`, Tab, `<cr>`,

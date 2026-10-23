@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Knowledge-sharing foundation: getting_started / cisco_platform_guidance defaults.
 
 Reads the real tracked files under lab/ (read-only) and copies them into an
@@ -100,8 +101,10 @@ def test_network_lab_basics_is_removed_from_tracked_state():
     assert "lab/references/network_lab_basics.yaml" not in tracked
     for rel in tracked:
         path = REPO_LAB.parent / rel
-        if path.is_file() and path.suffix not in {".png", ".jpg", ".jpeg", ".gif", ".svg"}:
-            assert "network_lab_basics" not in path.read_text(encoding="utf-8"), rel
+        if path.is_file():
+            # Compare raw bytes: tracked files include binary images (e.g. .webp)
+            # that are not valid UTF-8 text.
+            assert b"network_lab_basics" not in path.read_bytes(), rel
     assert "network_lab_basics" not in _load(REPO_LAB / "settings.example.yaml")["active_references"]
 
 

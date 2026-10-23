@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Human-facing Network Lab CLI package.
 
 See cli/main.py for the interactive REPL, cli/config.py for candidate

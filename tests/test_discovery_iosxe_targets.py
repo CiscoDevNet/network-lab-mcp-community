@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """IOS XE target selection and end-to-end mixed IOS XR + IOS XE
 `discover_topology()` behavior (device collection itself is monkeypatched,
 same convention as tests/test_discovery_parallel_collection.py and

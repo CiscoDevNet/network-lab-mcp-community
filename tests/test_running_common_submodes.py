@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Name-less Running selection submodes for topology / scenario / reference
 (`config-running-<kind>`), modeled on the access-info one (see
 test_running_access_info_common_submode.py / _no.py, which stay the

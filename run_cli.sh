@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 # Human-facing entry point for the Network Lab CLI.
 #
 # This launches the IOS XR-compatible Network Lab CLI: a human configuration

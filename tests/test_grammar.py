@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for the command grammar single source of truth: parsing, unique
 abbreviation, ambiguity/incomplete/invalid-input detection, fixed-keyword
 case-insensitivity, object-identifier case-sensitivity, "select or create"

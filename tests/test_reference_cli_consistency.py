@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Reference CLI consistency and commit safety:
 
 D3 running `no reference ?` enumerates the candidate-active references

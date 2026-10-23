@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`discovery._login_ios_style()` -- the shared classic-IOS-style login
 used by *both* IOS XE and classic IOS (named generically rather than
 `_login_iosxe()`, since the same login sequence genuinely applies to

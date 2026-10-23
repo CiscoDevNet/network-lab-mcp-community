@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Canonical public sample definitions consistency.
 
 Unlike the other test modules, this one intentionally reads the real

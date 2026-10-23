@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Command grammar single source of truth for the Network Lab CLI.
 
 For each CLI mode (EXEC, global configuration, running-config selection,

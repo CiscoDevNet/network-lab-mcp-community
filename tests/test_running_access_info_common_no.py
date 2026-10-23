@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`no <name>` in the name-less `config-running-access-info` submode:
 unselect the access-info currently selected in the Running *candidate*
 (exact name only), through the same Candidate update as

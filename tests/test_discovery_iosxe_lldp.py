@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """IOS XE LLDP collection (on top of IOS XE's existing CDP support) --
 `% LLDP is not enabled` must mean zero LLDP observations, never a device
 failure, with CDP staying fully usable either way; an enabled IOS XE LLDP

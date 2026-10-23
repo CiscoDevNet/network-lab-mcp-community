@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """lab.py regression tests: topology/access-info/scenario/reference loading
 and validation, the device.type enum SSOT, and MCP-facing device access
 resolution (including the temporary global-uniqueness limitation and the

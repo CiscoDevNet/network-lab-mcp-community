@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Test fixture helper: puts stdin into raw tty mode (disabling ICRNL/
 ICANON/etc. line-discipline translation) and writes every byte it reads
 to a binary file, so a test can observe the exact bytes a tmux pane's

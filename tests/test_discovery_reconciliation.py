@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Link reconciliation (reconcile_links()) and unresolved-neighbor
 evidence retention -- reciprocal LLDP observations collapse into one
 physical link, parallel links between the same router pair stay distinct,

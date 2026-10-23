@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Tests for cli/config.py: the running-config candidate (independent from
 any definition candidate), topology/access-info/scenario/reference
 definition editing (create-or-select, never a "set active selection"

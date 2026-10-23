@@ -120,7 +120,7 @@ macOS may work but is not formally validated. Native Windows is not supported; W
 ### 1. Install from a local checkout
 
 ```bash
-git clone https://github.com/eiuemura/network-lab-mcp.git
+git clone https://github.com/CiscoDevNet/network-lab-mcp-community.git
 cd network-lab-mcp
 python3 -m venv .venv
 source .venv/bin/activate
@@ -311,6 +311,9 @@ See [SECURITY.md](SECURITY.md) for the complete trust model and vulnerability re
 network-lab-mcp/
 ├── README.md
 ├── SECURITY.md
+├── CONTRIBUTING.md
+├── CODE_OF_CONDUCT.md
+├── AGENTS.md
 ├── LICENSE
 ├── pyproject.toml
 ├── run_cli.sh
@@ -354,8 +357,10 @@ Avoid `--showlocals` when tests could access real credentials.
 
 ## Contributing, feedback, and license
 
-Issues, bug reports, and suggestions are welcome through [GitHub Issues](https://github.com/eiuemura/network-lab-mcp/issues).
+Issues, bug reports, and suggestions are welcome through [GitHub Issues](https://github.com/CiscoDevNet/network-lab-mcp-community/issues). See [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community standards. Report security issues as described in [SECURITY.md](SECURITY.md), not through public issues. Guidance for AI coding agents working on this repository is in [AGENTS.md](AGENTS.md).
 
 Run `show version` in the human CLI to inspect the local version, release date, Git revision, platform, MCP SDK version, and license information.
 
-Licensed under the **GNU General Public License v3.0**. See [LICENSE](LICENSE).
+Licensed under the **Apache License, Version 2.0** (SPDX: `Apache-2.0`). See [LICENSE](LICENSE).
+
+License history: earlier revisions of this repository's history were published under the GNU General Public License v3.0. Those revisions are not relicensed retroactively by this change; the Apache License, Version 2.0 applies to the project going forward.

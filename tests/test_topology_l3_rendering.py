@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """L3 interface data (ipv4_address/vrf) must be visible in every
 CLI topology rendering path, not silently omitted.
 

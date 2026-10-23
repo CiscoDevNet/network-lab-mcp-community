@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Fault injection across the commit's write boundaries.
 
 Commit writes the definition file first, then settings.yaml; each file is

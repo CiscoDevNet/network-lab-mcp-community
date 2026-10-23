@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Symmetric candidate-based deletion for all four stored
 definition kinds (`no access-info <name>`, `no topology <name>`, `no
 scenario <name>`, `no reference <name>`), from global configuration mode.

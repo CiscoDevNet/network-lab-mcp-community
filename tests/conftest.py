@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Shared pytest fixtures: an isolated lab/ directory tree per test, and an
 isolated tmux socket for the whole test session.
 

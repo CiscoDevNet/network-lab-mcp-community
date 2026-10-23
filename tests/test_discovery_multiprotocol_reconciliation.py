@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """reconcile_links() with mixed LLDP + CDP observations.
 
 The same physical link observed via both protocols (or reciprocally from

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`<cr>` inline-help regression tests for the `creatable`-argument gap
 fixed in grammar.help() (cli/grammar.py).
 

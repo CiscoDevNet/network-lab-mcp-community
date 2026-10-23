@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """`discover topology` / `discover topology l3`: candidate rebuild (no link
 merge), optional L3, strict protocol/conflict fatality, dirty-candidate
 protection and atomicity. Collection is faked at the `_run_command` /

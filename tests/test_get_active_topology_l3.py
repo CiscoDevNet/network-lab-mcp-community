@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Committed L3 topology enrichment (ipv4_address
 + vrf) must naturally appear through the existing get_active_topology()
 MCP-facing read -- no new MCP tool, no filtering change needed, since

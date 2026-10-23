@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Discovery's command-completion wait must not be satisfied by a prompt
 already sitting in the pane from a *previous* command (a stale-prompt
 race) -- terminal._wait_for_pattern()'s `baseline_text` parameter, and

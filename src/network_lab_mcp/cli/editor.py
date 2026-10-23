@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """External YAML editor support for topology/scenario/reference definitions.
 
 Resolution order: $VISUAL, then $EDITOR, then a `vim` fallback. Network Lab
