@@ -1,0 +1,166 @@
+# Reference: guidance for deciding whether Cisco platform-specific
+# engineering knowledge applies to a target device. It is applicability
+# guidance, not a Cisco configuration encyclopedia, and it performs no
+# lookups by itself. See docs/scenario_format.md.
+
+name: cisco_platform_guidance
+
+description: |
+  Guidance for determining whether Cisco platform-specific engineering
+  knowledge applies to a target device before using that knowledge for
+  investigation, validation, configuration, or reusable engineering
+  knowledge.
+
+routing_flow:
+  - user intent
+  - target device
+  - device type / operating system
+  - product family when known
+  - software release when relevant
+  - feature domain
+  - question type
+  - applicable knowledge or source class
+  - lab validation when appropriate
+
+routing_inputs:
+  device_type: Available from the topology; an initial platform signal, not a conclusion.
+  operating_system: May be inferred from the device type only where that mapping is unambiguous; otherwise confirm from the device.
+  product_family: Not always known. May need topology metadata, device output, or further investigation.
+  software_release: May need device evidence such as version output.
+  feature_domain: Derived from the user's intent, the scenario, and the investigation context.
+  question_type: Derived from the actual technical question (see source_selection).
+
+# Cisco device types registered in Network Lab MCP's device.type enum. Each
+# key must be a registered device type.
+cisco_device_types:
+  iosxr: Cisco IOS XR
+  iosxe: Cisco IOS XE
+  ios: Cisco IOS (classic IOS; a distinct type, not a label under iosxe)
+  nxos: Cisco NX-OS
+
+applicability_principles:
+  - Use the target device type as an initial platform signal.
+  - Confirm the operating system when implementation-specific behavior matters.
+  - Confirm the software release when behavior may vary by release.
+  - Consider the product or platform family when hardware or feature support depends on it.
+  - Do not treat Cisco operating systems as interchangeable.
+  - Do not infer platform-specific behavior from semantic similarity alone.
+  - If applicability cannot be established, keep the conclusion uncertain instead of presenting it as universal.
+
+protocol_vs_implementation:
+  broadly_reusable_concepts:
+    - routing protocol concepts such as BGP
+    - EVPN route-type concepts
+    - MPLS concepts
+    - PTP concepts
+    - NETCONF and YANG concepts
+  verify_for_the_target_platform:
+    - CLI syntax
+    - operational commands
+    - configuration hierarchy
+    - default behavior
+    - feature support and limitations
+    - release-specific behavior
+    - YANG module availability
+    - telemetry sensor paths
+
+cross_platform_safety:
+  - Do not use the configuration syntax of one Cisco operating system on another (for example IOS XE syntax on IOS XR).
+  - Do not use the implementation behavior of one operating system as evidence for another.
+  - Do not generalize a limitation from one Cisco operating system to another.
+  - Do not assume identical command syntax across Cisco operating systems.
+  - Do not assume identical YANG support across operating systems or releases.
+  - If the target operating system cannot be established, avoid platform-specific conclusions.
+
+# Cisco documentation classes as named on Cisco's product support pages.
+# The names may differ slightly between products; confirm on the page for
+# the target product.
+documentation_classes:
+  - Configuration Guides
+  - Command References
+  - Release Notes
+
+source_selection:
+  configuration:
+    prefer:
+      - Configuration Guides
+      - Command References
+      - Release Notes when release-specific behavior matters
+  command_syntax:
+    prefer:
+      - Command References
+      - Configuration Guides
+  feature_support:
+    prefer:
+      - Release Notes
+      - Configuration Guides
+  data_model:
+    prefer:
+      - the Cisco YANG source below
+      - platform-specific programmability documentation
+      - release-specific supported-model information
+  hardware:
+    prefer:
+      - product documentation
+      - hardware installation documentation
+      - data sheets
+
+lookup_principles:
+  - A documentation class alone is not enough; combine operating system, platform family when known, software release when relevant, feature domain, and documentation class.
+  - "Example: IOS XR + Cisco 8000 + target release + EVPN + Configuration Guides, rather than just an EVPN configuration guide."
+  - This is reasoning guidance. No search or retrieval is performed automatically.
+
+yang:
+  source:
+    name: YangModels Cisco YANG repository
+    url: https://github.com/YangModels/yang/tree/main/vendor/cisco
+    note: >
+      Public repository of Cisco YANG models that Cisco documentation refers
+      users to. The Cisco subtree is organized per operating system. Cisco
+      documentation also cautions that the models there might not be up to
+      date, so treat it as a lookup aid, not as proof of device support.
+  role: >
+    Configuration Guides and Command References explain usage. YANG models
+    define the structured data model used by model-driven interfaces. For
+    data-model questions the applicable YANG model is the authoritative
+    reference for schema hierarchy, but it does not replace other sources
+    for other question types.
+  lookup_guidance:
+    - Identify the target operating system before selecting a YANG model.
+    - Navigate to the repository subtree for that operating system.
+    - Prefer a release-specific directory when one is available.
+    - Inspect the actual YANG module instead of inferring paths from names.
+    - Account for platform capability differences.
+    - Prefer device-reported supported-model information when available.
+    - Repository presence and actual device support are related but distinct; the running device remains authoritative for what it supports.
+
+telemetry:
+  principles:
+    - Treat model-driven telemetry sensor paths as YANG-derived paths.
+    - Do not invent a sensor path from CLI names or field names alone.
+    - Inspect the applicable YANG model hierarchy before proposing a sensor path.
+    - Confirm the target operating system and software release before selecting the model.
+    - Confirm device-supported models when practical.
+    - Validate candidate paths against device behavior when practical.
+  flow:
+    - telemetry request
+    - target device
+    - operating system
+    - software release
+    - applicable YANG models
+    - relevant module
+    - container / list / leaf hierarchy
+    - candidate sensor path
+    - device validation when practical
+
+lab_evidence:
+  - Validate against the actual lab when appropriate (command behavior, feature availability, telemetry path acceptance, operational state).
+  - Documentation is not absolute truth where device evidence can verify applicability; likewise, interpret device behavior with the documentation's applicability in mind.
+
+reusable_knowledge:
+  - Do not preserve platform-specific conclusions as reusable knowledge until applicability is established.
+  - Protocol-level knowledge may be broadly reusable.
+  - Implementation-specific knowledge should carry its platform context.
+  - Release-sensitive knowledge should carry its release context.
+  - Keep uncertain applicability explicitly uncertain.
+  - Reusable knowledge is proposed, not persisted; a human reviews and commits it through the CLI.

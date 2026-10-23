@@ -1,0 +1,35 @@
+# Public sample topology (`sample_lab`): the structure of the fictional sample
+# lab whose connection information is the access-info definition of the same name.
+#
+# Topology holds only safe logical data (devices, device type, links) --
+# this file is exposed to Claude via get_active_topology(). Private device
+# connection data (address/transport/port/username/password) lives in a
+# separate access-info definition instead; see lab/access-info/sample_lab.yaml.
+# The two are independent definitions -- filenames never associate a
+# topology with an access-info definition (see "Documentation" in
+# README.md).
+#
+# A small, coherent fictional lab: two routers, R1 and R2, directly
+# connected. This file exists to validate YAML loading, MCP structured
+# output, and device-name/session-name mapping -- not to be a real lab.
+
+name: sample_lab
+
+description: >
+  Sample topology used to validate Network Lab MCP: two directly connected
+  routers, R1 and R2. Safe logical data only; see
+  lab/access-info/sample_lab.yaml for the matching (independent) sample access
+  information.
+
+devices:
+  R1:
+    type: iosxr
+
+  R2:
+    type: iosxr
+
+links:
+  - a: R1
+    a_interface: GigabitEthernet0/0/0/0
+    b: R2
+    b_interface: GigabitEthernet0/0/0/0

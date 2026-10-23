@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "network-lab-mcp"
+version = "0.2.0"
+description = "An AI Network Engineer Workspace that gives MCP-capable AI clients structured lab context and controlled, observable terminal access to real network labs."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Eitaro Uemura" }]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = [
+    "mcp>=2.2,<3",
+    "pyyaml>=6,<7",
+    "prompt_toolkit>=3.0,<4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7,<9"]
+
+[project.urls]
+Repository = "https://github.com/CiscoDevNet/network-lab-mcp-community"
+Issues = "https://github.com/CiscoDevNet/network-lab-mcp-community/issues"
+
+[project.scripts]
+network-lab-mcp = "network_lab_mcp.mcp_server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+    "real_lab: requires real lab hardware (IOS XR/IOS XE/classic IOS); opt-in via NETWORK_LAB_REAL_TESTS=1 (skipped by default).",
+]

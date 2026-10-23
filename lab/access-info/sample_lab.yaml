@@ -1,0 +1,50 @@
+# Public sample access-info definition (`sample_lab`): how to connect to the
+# fictional sample lab described by the topology of the same name.
+#
+# access-info holds private device connection data. It is never exposed by
+# any MCP tool -- only get_active_topology()'s safe logical topology is.
+# This is the only access-info YAML tracked in Git; every other file under
+# lab/access-info/ is a user's own private local data and stays gitignored
+# (see .gitignore). Its name is independent of any topology name -- the two
+# are never associated by filename (see "Documentation" in README.md).
+# terminal_open() resolves a device's access information from the
+# access-info definition *selected* in running-config's `active_access_info`
+# only -- never by searching other access-info files.
+#
+# R1 also demonstrates a single-hop OpenSSH ProxyJump: it connects via the
+# jump1 endpoint below, instead of directly.
+#
+# IMPORTANT: the addresses below use the RFC 5737 documentation-only range
+# (192.0.2.0/24, "TEST-NET-1"). They are not reachable and must not be
+# treated as connectivity targets. The password below (example-password)
+# is not a real credential -- create your own private access-info file
+# for a real lab; only this one fictional sample is tracked in git.
+
+name: sample_lab
+
+jump_hosts:
+  jump1:
+    type: host
+    address: 192.0.2.10
+    transport: ssh
+    port: 22
+    username: example-user
+    password: example-password
+
+devices:
+  R1:
+    type: iosxr
+    address: 192.0.2.11
+    transport: ssh
+    port: 22
+    username: example-user
+    password: example-password
+    jump_host: jump1
+
+  R2:
+    type: iosxr
+    address: 192.0.2.12
+    transport: ssh
+    port: 22
+    username: example-user
+    password: example-password

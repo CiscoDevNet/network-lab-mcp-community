@@ -1,0 +1,32 @@
+# Local runtime running-config template for Network Lab MCP.
+#
+# Copy this file to settings.yaml (which is gitignored) before first use:
+#   cp lab/settings.example.yaml lab/settings.yaml
+#
+# Edit settings.yaml directly, or use the human CLI's (./run_cli.sh)
+# `running-config` configuration mode, to change the active
+# access-info/topology/scenario/references selection.
+#
+# `active_access_info` is optional: a settings.yaml written before this
+# field existed (or with it removed via `no access-info`) is still valid --
+# it simply means no access-info is selected, and terminal_open() fails
+# closed until one is.
+
+active_access_info: sample_lab
+active_topology: sample_lab
+active_scenario: getting_started
+
+active_references:
+  - cisco_platform_guidance
+
+# Descriptions are running-entry metadata (shown by `show running-config`),
+# never part of a definition file.
+running_descriptions:
+  access_info:
+    sample_lab: Placeholder access information for the initial sample configuration
+  topology:
+    sample_lab: Placeholder topology; it can also be generated automatically from access-info and LLDP neighbor information using the discovery command
+  scenario:
+    getting_started: Default onboarding scenario for Network Lab MCP
+  reference:
+    cisco_platform_guidance: Guidance for determining whether Cisco platform-specific engineering knowledge applies to a target device

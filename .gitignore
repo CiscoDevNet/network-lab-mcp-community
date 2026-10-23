@@ -1,0 +1,48 @@
+# Python / packaging
+.venv/
+__pycache__/
+*.pyc
+build/
+dist/
+*.egg-info/
+
+# Test/coverage artifacts (pytest already ships its own nested
+# .pytest_cache/.gitignore, but an explicit top-level rule doesn't depend
+# on that generated file existing).
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor/OS artifacts.
+.DS_Store
+
+# Local runtime lab selection (private, machine-specific).
+lab/settings.yaml
+
+# Real topology data is private lab information by default.
+# Only the fictional sample topology is tracked.
+lab/topologies/*.yaml
+!lab/topologies/sample_lab.yaml
+
+# access-info holds private device connection data (address/username/
+# password) and is never exposed by MCP. Only the fictional sample is
+# tracked; every other access-info file (including any real lab data a
+# user creates locally, e.g. via the CLI) stays untracked and ignored.
+lab/access-info/*.yaml
+!lab/access-info/sample_lab.yaml
+
+# Scenario/reference content can describe private task or customer
+# context. Only explicitly approved public definitions are tracked.
+lab/scenarios/*.yaml
+!lab/scenarios/getting_started.yaml
+lab/references/*.yaml
+!lab/references/cisco_platform_guidance.yaml
+
+# Persistent terminal session transcripts (logs/terminal/<device-id>/*.log)
+# are runtime artifacts, potentially containing full device output --
+# never committed.
+logs/
+
+# Local-only development history: detailed engineering notes that are not
+# meant for the public repository.
+docs/development_history.md

@@ -1,0 +1,130 @@
+# Scenario: default onboarding for Network Lab MCP.
+#
+# `message` is the short, intent-first starting message. The structured
+# fields below carry the detailed guidance for the AI. See
+# docs/scenario_format.md.
+
+name: getting_started
+
+description: |
+  Default onboarding scenario for Network Lab MCP.
+
+  This scenario helps the AI start from the user's intent and organize
+  investigation and validation work into reusable scenarios and references.
+
+message: |
+  Tell me what you want to build, investigate, or validate.
+  You do not need to know the YAML format.
+
+workflow:
+  - understand_user_intent
+  - inspect_current_context
+  - discover_and_inspect_existing_knowledge
+  - determine_required_actions
+  - perform_investigation_or_validation
+  - evaluate_results
+  - propose_reusable_knowledge
+
+scenario_guidance:
+  purpose: |
+    A scenario describes what the user wants to accomplish.
+
+    It should capture the objective, relevant context, expected outcome,
+    and task-level workflow without duplicating reusable engineering
+    knowledge that belongs in references.
+
+  create_when:  # i.e. propose a new scenario
+    - The user's goal represents a repeatable investigation or validation.
+    - The task has a clear objective or expected outcome.
+    - The workflow may be useful again in the future.
+    - No existing scenario adequately represents the user's intent.
+
+  refine_when:
+    - An existing scenario already represents the same objective.
+    - The current work reveals missing context, steps, constraints, or success criteria.
+    - The scenario can be made more reusable without becoming tool- or device-specific.
+
+  include:
+    - objective
+    - relevant context
+    - required investigation or validation flow
+    - expected outcome
+    - success criteria when applicable
+    - safety constraints when applicable
+    - references required to perform the work when applicable
+
+  avoid:
+    - device-specific reusable knowledge that belongs in a reference
+    - protocol-specific operational knowledge that belongs in a reference
+    - detailed measurement formulas that belong in a reference
+    - reusable interpretation rules that belong in a reference
+    - unnecessary implementation details
+    - information unrelated to the task objective
+
+reference_guidance:
+  purpose: |
+    A reference contains reusable engineering knowledge that can support
+    multiple scenarios.
+
+    It should describe how to operate, measure, interpret, troubleshoot,
+    or reason about a device, protocol, platform, tool, or engineering method.
+
+  create_when:
+    - Engineering knowledge discovered during the work may be useful again.
+    - Device, protocol, tool, measurement, or troubleshooting knowledge should
+      be preserved independently from a specific task.
+    - No existing reference adequately contains the reusable knowledge.
+
+  refine_when:
+    - An existing reference covers the same engineering topic.
+    - New evidence improves an existing procedure, measurement method,
+      interpretation rule, or troubleshooting guideline.
+    - Existing knowledge is incomplete, ambiguous, or outdated.
+
+  include:
+    - operational knowledge
+    - measurement methods
+    - interpretation rules
+    - troubleshooting guidance
+    - tool or platform usage knowledge
+    - protocol or device behavior
+    - reusable safety considerations
+    - known limitations when applicable
+
+  avoid:
+    - task-specific objectives
+    - one-time instructions
+    - scenario-specific success criteria
+    - temporary observations that have not been validated
+    - conclusions that cannot be supported by available evidence
+
+decision_rules:
+  - Start from the user's intent, not from the YAML structure.
+  - Do not require the user to understand or edit YAML.
+  - Reuse existing scenarios and references before proposing new ones.
+  - Prefer proposing a refinement of existing knowledge over proposing duplicates.
+  - Propose new knowledge only when no suitable existing knowledge exists.
+  - The AI proposes scenario and reference content; it does not persist it. Definition changes are reviewed and committed by the human through the Network Lab MCP CLI.
+  - Keep task-specific intent, context, and expected outcome in the scenario.
+  - Keep reusable engineering knowledge in references.
+  - Keep "what and why" primarily in scenarios.
+  - Keep "how to operate, measure, interpret, or troubleshoot" primarily in references.
+  - A scenario may reference reusable knowledge but should not duplicate it.
+  - Evidence should be collected before making strong conclusions.
+  - Distinguish observed facts from interpretation and inference.
+  - Do not preserve unverified assumptions as reusable knowledge.
+
+knowledge_lifecycle:
+  - Start from the user's intent.
+  - Inspect the active topology, scenario, and references returned by the execution instructions.
+  - Discover stored scenarios and references from the available catalogs, and inspect relevant candidates, including non-active ones, read-only.
+  - Reuse existing scenarios and references whenever they are sufficient.
+  - Propose a refinement when existing knowledge is incomplete or can be made more reusable.
+  - Propose a new scenario when a repeatable task cannot be represented by an existing one.
+  - Propose a new reference when reusable engineering knowledge cannot be represented by an existing one.
+  - Perform the investigation or validation using the best available knowledge and evidence gathered from the lab terminals.
+  - Evaluate the result against the objective and the evidence gathered.
+  - Propose validated reusable knowledge discovered during the work.
+  - A human reviews proposed definitions and commits them through the CLI.
+  - Keep scenario and reference responsibilities separate.
+  - Avoid duplicate or overlapping knowledge.

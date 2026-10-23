@@ -1,0 +1,3 @@
+Thu Oct 15 12:02:30.506 JST
+Cisco IOS XR Software, Version 26.2.2 LNT
+cisco NCS540L

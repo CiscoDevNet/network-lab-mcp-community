@@ -1,0 +1,16 @@
+RP/0/RP0/CPU0:LAB_DC_R2#show lldp neighbors
+Sun Sep 20 19:07:26.806 JST
+Capability codes:
+        (R) Router, (B) Bridge, (T) Telephone, (C) DOCSIS Cable Device
+        (W) WLAN Access Point, (P) Repeater, (S) Station, (O) Other
+
+Device ID       Local Intf                      Hold-time  Capability      Port ID
+LAB_DC_R1.example GigabitEthernet0/0/0/2          120        R               GigabitEthernet0/0/0/2
+LAB_DC_R1.example GigabitEthernet0/0/0/3          120        R               GigabitEthernet0/0/0/3
+LAB_DC_R4.example GigabitEthernet0/0/0/6          120        R               GigabitEthernet0/0/0/6
+LAB_DC_R4.example GigabitEthernet0/0/0/7          120        R               GigabitEthernet0/0/0/7
+ASR9001_R1.example.com GigabitEthernet0/0/0/10         120        R               GigabitEthernet0/0/0/1
+
+Total entries displayed: 5
+
+RP/0/RP0/CPU0:LAB_DC_R2#
