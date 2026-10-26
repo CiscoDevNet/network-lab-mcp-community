@@ -1870,7 +1870,9 @@ def h_exit(session: cfgmod.CliSession, args: dict) -> None:
 
 def h_edit(session: cfgmod.CliSession, args: dict) -> None:
     try:
-        result = editor.edit_yaml_candidate(session.definition_candidate)
+        result = editor.edit_yaml_candidate(
+            session.definition_candidate, topology=session.definition_kind == "topology"
+        )
     except editor.EditorError as exc:
         print(f"% {exc}")
         return

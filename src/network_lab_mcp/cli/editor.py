@@ -110,7 +110,71 @@ def resolve_editor_command() -> list[str]:
     return _with_vim_paste_mode(["vim", "-c", "syntax on", "-c", "set filetype=yaml"])
 
 
-def edit_yaml_candidate(data: Any) -> dict:
+# PyYAML only wraps a flow mapping/plain scalar at this column; anything this
+# large keeps a normal link on one physical line without any text rewriting.
+_NO_WRAP_WIDTH = 1 << 30
+
+
+class _FlowDict(dict):
+    """Display-only marker: dumped as a one-line flow mapping. Never stored
+    in a candidate -- it is built from copies inside `dump_topology_for_edit`."""
+
+
+class _QuotedStr(str):
+    """Display-only marker for a string containing a newline: dumped
+    double-quoted (`\\n` escape) so a flow mapping stays on one line."""
+
+
+class _TopologyEditDumper(yaml.SafeDumper):
+    def increase_indent(self, flow: bool = False, indentless: bool = False):
+        return super().increase_indent(flow, False)  # indent sequence items under their key
+
+
+_TopologyEditDumper.add_representer(
+    _FlowDict, lambda d, v: d.represent_mapping("tag:yaml.org,2002:map", v, flow_style=True)
+)
+_TopologyEditDumper.add_representer(
+    _QuotedStr, lambda d, v: d.represent_scalar("tag:yaml.org,2002:str", str(v), style='"')
+)
+
+
+def _display_copy(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _display_copy(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_display_copy(v) for v in value]
+    if isinstance(value, str) and "\n" in value:
+        return _QuotedStr(value)
+    return value
+
+
+def dump_topology_for_edit(data: Any) -> str:
+    """Topology `edit` text: each top-level section is dumped on its own and
+    joined by one blank line; every `links` entry is a one-line flow mapping.
+    Presentation only -- `data` is not modified and the committed-file
+    serializer (lab._atomic_write_yaml) is not involved."""
+    if not isinstance(data, dict) or not data:
+        return yaml.safe_dump(data, sort_keys=False, default_flow_style=False, allow_unicode=True)
+    sections = []
+    for key, value in data.items():
+        width = None
+        if key == "links" and isinstance(value, list):
+            value = [_FlowDict(_display_copy(link)) if isinstance(link, dict) else link for link in value]
+            width = _NO_WRAP_WIDTH
+        sections.append(
+            yaml.dump(
+                {key: value},
+                Dumper=_TopologyEditDumper,
+                sort_keys=False,
+                default_flow_style=False,
+                allow_unicode=True,
+                width=width if width is not None else 80,
+            )
+        )
+    return "\n".join(sections)
+
+
+def edit_yaml_candidate(data: Any, topology: bool = False) -> dict:
     """Open `data` in the resolved external editor via a secure temp file,
     then parse and minimally validate the result (valid YAML, root is a
     mapping) and return it. Raises EditorError -- leaving the caller's
@@ -122,7 +186,10 @@ def edit_yaml_candidate(data: Any) -> dict:
     path = Path(path_str)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            yaml.safe_dump(data, handle, sort_keys=False, default_flow_style=False, allow_unicode=True)
+            if topology:
+                handle.write(dump_topology_for_edit(data))
+            else:
+                yaml.safe_dump(data, handle, sort_keys=False, default_flow_style=False, allow_unicode=True)
 
         try:
             result = subprocess.run([*command, str(path)])

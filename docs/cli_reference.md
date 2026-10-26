@@ -1690,6 +1690,12 @@ committed definition -> candidate data -> secure temp .yaml file
     -> candidate updated
 ```
 
+- **Topology display**: in topology mode the temp file shows each `links`
+  entry as a one-line flow mapping (`- {a: R1, a_interface: Gi0/0, b: R2,
+  b_interface: Gi0/1}`) with a blank line between top-level sections. This
+  is presentation only: the schema is unchanged, block-style or mixed `links`
+  entries are still accepted, normal validation applies on save, and `commit`
+  still writes the usual block-style file. Scenario/reference show plain YAML.
 - **Resolution order**: `$VISUAL`, then `$EDITOR` (each split with
   `shlex.split()` since it may embed arguments; `shell=True` is never
   used), then a `vim` fallback. Network Lab MCP only adds the decorative

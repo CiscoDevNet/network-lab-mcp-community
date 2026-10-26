@@ -1555,7 +1555,10 @@ installing it as the new candidate through the same
 uses. A non-zero editor exit, invalid YAML, or a non-mapping root leaves the
 candidate untouched and reports a safe error (no raw editor content, no
 credentials). The temporary file is always removed, on every path including
-exceptions. access-info does not offer `edit` — its private fields stay on
+exceptions. In topology mode only, the temp file is rendered by
+`editor.dump_topology_for_edit()` (one-line flow mapping per `links` entry,
+blank line between top-level sections); this is display-only and the
+committed-file serializer is unchanged. access-info does not offer `edit` — its private fields stay on
 the structured CLI path (see README.md's "Password display policy" for how
 those fields are rendered).
 
