@@ -1028,9 +1028,28 @@ def reconcile_links(
          (remote device, remote interface). Corroborating observations
          (same protocol or not, same remote endpoint) are not a conflict;
          they collapse into the same single candidate link."""
+    # Endpoint identity is (device, canonical interface name), so one port
+    # spelled "Gi0/0/0/10" (LLDP) and "Gig 0/0/0/10" (CDP) is one endpoint.
+    # Canonicalization is the existing known-abbreviation table only; an
+    # unrecognized spelling stays distinct (never guessed). Raw spellings
+    # are kept for display: a device's own spelling of its interface (as a
+    # local interface of one of its observations) beats a neighbor's
+    # spelling of it, then the lexicographically smallest raw name wins, so
+    # the result never depends on observation order.
+    def ident(device: str, interface: str) -> tuple[str, str]:
+        return (device, _canonicalize_interface_name(interface))
+
+    spellings: dict[tuple[str, str], set[tuple[int, str]]] = {}
+    for obs, remote_id in resolved_observations:
+        spellings.setdefault(ident(obs.local_device_id, obs.local_interface), set()).add((0, obs.local_interface))
+        spellings.setdefault(ident(remote_id, obs.remote_port_id), set()).add((1, obs.remote_port_id))
+
+    def shown(endpoint: tuple[str, str]) -> tuple[str, str]:
+        return (endpoint[0], min(spellings[endpoint])[1])
+
     by_local_endpoint: dict[tuple[str, str], list[tuple[NeighborObservation, str]]] = {}
     for obs, remote_id in resolved_observations:
-        by_local_endpoint.setdefault((obs.local_device_id, obs.local_interface), []).append((obs, remote_id))
+        by_local_endpoint.setdefault(ident(obs.local_device_id, obs.local_interface), []).append((obs, remote_id))
 
     links: list[ManagedLink] = []
     conflicts: list[LinkConflict] = []
@@ -1044,39 +1063,35 @@ def reconcile_links(
     resolved_by_endpoint: dict[tuple[str, str], tuple[NeighborObservation, str]] = {}
     for endpoint, obs_list in by_local_endpoint.items():
         first_obs, first_remote_id = obs_list[0]
-        agree = all(
-            remote_id == first_remote_id and obs.remote_port_id == first_obs.remote_port_id
-            for obs, remote_id in obs_list
-        )
+        first_remote = ident(first_remote_id, first_obs.remote_port_id)
+        agree = all(ident(remote_id, obs.remote_port_id) == first_remote for obs, remote_id in obs_list)
         if not agree:
             second_obs, _second_remote_id = next(
-                (o, r) for o, r in obs_list if r != first_remote_id or o.remote_port_id != first_obs.remote_port_id
+                (o, r) for o, r in obs_list if ident(r, o.remote_port_id) != first_remote
             )
-            conflicts.append(LinkConflict(endpoint, endpoint, first_obs, second_obs))
+            conflicts.append(LinkConflict(shown(endpoint), shown(endpoint), first_obs, second_obs))
             seen_endpoints.add(endpoint)
             continue
         resolved_by_endpoint[endpoint] = (first_obs, first_remote_id)
 
-    for (local_dev, local_intf), (obs, remote_id) in resolved_by_endpoint.items():
-        endpoint_a = (local_dev, local_intf)
+    for endpoint_a, (obs, remote_id) in resolved_by_endpoint.items():
         if endpoint_a in seen_endpoints:
             continue
 
-        remote_intf = obs.remote_port_id
-        endpoint_b = (remote_id, remote_intf)
+        endpoint_b = ident(remote_id, obs.remote_port_id)
 
         reverse = resolved_by_endpoint.get(endpoint_b)
         if reverse is None:
             # One-sided observation -- still a valid managed link.
-            links.append(ManagedLink(local_dev, local_intf, remote_id, remote_intf))
+            links.append(ManagedLink(*shown(endpoint_a), *shown(endpoint_b)))
             seen_endpoints.add(endpoint_a)
             continue
 
         reverse_obs, reverse_remote_id = reverse
-        if reverse_remote_id == local_dev and reverse_obs.remote_port_id == local_intf:
-            links.append(ManagedLink(local_dev, local_intf, remote_id, remote_intf))
+        if ident(reverse_remote_id, reverse_obs.remote_port_id) == endpoint_a:
+            links.append(ManagedLink(*shown(endpoint_a), *shown(endpoint_b)))
         else:
-            conflicts.append(LinkConflict(endpoint_a, endpoint_b, obs, reverse_obs))
+            conflicts.append(LinkConflict(shown(endpoint_a), shown(endpoint_b), obs, reverse_obs))
         seen_endpoints.add(endpoint_a)
         seen_endpoints.add(endpoint_b)
 
@@ -1468,16 +1483,21 @@ def _fail_on_link_ambiguity(
         else:
             problems.append(f"{a_dev} {a_intf} <-> {b_dev} {b_intf}: inconsistent reciprocal observation")
     owners: dict[tuple[str, str], list[ManagedLink]] = {}
+    raw_names: dict[tuple[str, str], str] = {}  # canonical identity -> a raw spelling for messages
     for link in links:
-        for endpoint in ((link.a_device, link.a_interface), (link.b_device, link.b_interface)):
-            owners.setdefault(endpoint, []).append(link)
+        for device, interface in ((link.a_device, link.a_interface), (link.b_device, link.b_interface)):
+            identity = (device, _canonicalize_interface_name(interface))
+            owners.setdefault(identity, []).append(link)
+            raw_names.setdefault(identity, interface)
     for endpoint in sorted(owners):
         if len(owners[endpoint]) > 1:
-            problems.append(f"{endpoint[0]} {endpoint[1]}: interface appears in more than one link")
+            problems.append(f"{endpoint[0]} {raw_names[endpoint]}: interface appears in more than one link")
     for neighbor in unresolved:
-        endpoint = (neighbor.local_device_id, neighbor.local_interface)
+        endpoint = (neighbor.local_device_id, _canonicalize_interface_name(neighbor.local_interface))
         if endpoint in owners:
-            problems.append(f"{endpoint[0]} {endpoint[1]}: observed with both a managed and an unmanaged neighbor")
+            problems.append(
+                f"{endpoint[0]} {neighbor.local_interface}: observed with both a managed and an unmanaged neighbor"
+            )
     if problems:
         unique = list(dict.fromkeys(sorted(problems)))
         raise DiscoveryError("Neighbor reconciliation conflict: " + "; ".join(unique) + ".")

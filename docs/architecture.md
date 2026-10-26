@@ -1048,6 +1048,13 @@ A link's identity is its unordered pair of `(device, interface)`
 endpoints, so two parallel links between the same router pair on
 different interfaces are never deduplicated together.
 
+Interface names are compared by their canonical identity (the known-abbreviation
+table also used for L3 enrichment, so `Gi0/0/0/10` and CDP's `Gig 0/0/0/10` are
+one port); an unrecognized spelling is never guessed and stays distinct. The
+candidate shows a device's own spelling of its interface when it observed it
+itself, otherwise the neighbor's, with the smallest raw name breaking ties, so
+the result does not depend on observation order.
+
 ### L3 interface enrichment
 
 Additive topology context -- IPv4 address + VRF per interface, so Claude
