@@ -22,6 +22,7 @@ never written to with world/group-readable permissions.
 
 from __future__ import annotations
 
+import errno
 import os
 import shlex
 import shutil
@@ -174,6 +175,21 @@ def dump_topology_for_edit(data: Any) -> str:
     return "\n".join(sections)
 
 
+def _launch_error(executable: str, exc: OSError) -> OSError:
+    """Map a failed editor launch to a user-facing EditorError, or return
+    the original OSError unchanged when it is not a launch-lookup failure.
+
+    ENOENT, and ENOTDIR from the executable lookup (a regular file sitting
+    in a PATH directory slot, or a non-directory path component, which can
+    be the last error execvp() reports on any OS), both mean the editor
+    could not be found. EACCES means it exists but cannot be executed."""
+    if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+        return EditorError(f"Editor '{executable}' was not found.")
+    if exc.errno == errno.EACCES:
+        return EditorError(f"Editor '{executable}' could not be executed: permission denied.")
+    return exc
+
+
 def edit_yaml_candidate(data: Any, topology: bool = False) -> dict:
     """Open `data` in the resolved external editor via a secure temp file,
     then parse and minimally validate the result (valid YAML, root is a
@@ -193,8 +209,11 @@ def edit_yaml_candidate(data: Any, topology: bool = False) -> dict:
 
         try:
             result = subprocess.run([*command, str(path)])
-        except FileNotFoundError as exc:
-            raise EditorError(f"Editor '{command[0]}' was not found.") from exc
+        except OSError as exc:
+            mapped = _launch_error(command[0], exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
 
         if result.returncode != 0:
             raise EditorError(

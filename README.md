@@ -302,7 +302,7 @@ See [SECURITY.md](SECURITY.md) for the complete trust model and vulnerability re
 - Editable checkout required; no standard non-editable/wheel installation.
 - `access-info` is edited through structured CLI commands, not the external YAML editor.
 - OpenSSH ProxyJump is limited to a single hop.
-- Scenario/Reference schemas are intentionally flexible; some identifier classes do not yet protect against case-only collisions.
+- Scenario/Reference schemas are intentionally flexible; only `topology <name>` asks for confirmation on a case-only near-duplicate; on case-insensitive filesystems (default macOS) a case-only alias of an existing definition is refused for every definition kind. macOS behavior is verified for the unit-test suite only, not for MCP connection, tmux device sessions or Discovery.
 - Full cross-vendor operation and all forms of autonomous deployment are not claimed or validated.
 
 ## Project structure

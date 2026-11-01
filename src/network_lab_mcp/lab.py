@@ -22,8 +22,10 @@ docs/architecture.md for the full model):
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import os
+import secrets
 from pathlib import Path
 from typing import Any, Optional
 
@@ -55,6 +57,113 @@ def find_lab_root() -> Path:
             "is not a supported configuration."
         )
     return lab_root
+
+
+# --------------------------------------------------------------------------
+# Definition file identity: names are case-sensitive and exact
+# --------------------------------------------------------------------------
+#
+# A definition's identity is its exact file stem. On a case-insensitive (or
+# Unicode-normalizing) filesystem such as default macOS APFS, Path.exists()
+# and open() also resolve *different spellings* ("SAMPLE_LAB" for
+# "sample_lab.yaml") to the same file. Every read/create/update/exists path
+# therefore compares the requested name against the real directory entry
+# names (os.scandir) instead of trusting the path lookup:
+#
+#   exact  -- a directory entry is named exactly "<name>.yaml"
+#   alias  -- no exact entry, but the path still resolves to another entry
+#             (case-only or normalization collision): never treated as the
+#             requested definition, never read, overwritten or deleted
+#   absent -- nothing at that path: a creation candidate
+#   invalid -- not a plain file stem (empty, path separator, NUL, "."/"..")
+#
+# No probe file is ever written to detect any of this.
+
+_DEFINITION_DIRECTORIES = {
+    "topology": "topologies",
+    "access_info": "access-info",
+    "scenario": "scenarios",
+    "reference": "references",
+}
+
+
+def _is_plain_stem(name: Any) -> bool:
+    return (
+        isinstance(name, str)
+        and bool(name)
+        and name not in (".", "..")
+        and "/" not in name
+        and "\0" not in name
+    )
+
+
+def _scan_entry_names(directory: Path) -> set[str]:
+    try:
+        with os.scandir(directory) as entries:
+            return {entry.name for entry in entries}
+    except (FileNotFoundError, NotADirectoryError):
+        return set()
+    except OSError as exc:
+        raise LabConfigError(f"Cannot read definition directory '{directory}': {exc.strerror or exc}.") from exc
+
+
+def _file_state(directory: Path, name: str) -> str:
+    """Classify `name` in `directory` as exact | alias | absent | invalid."""
+    if not _is_plain_stem(name):
+        return "invalid"
+    filename = f"{name}.yaml"
+    if filename in _scan_entry_names(directory):
+        return "exact"
+    if os.path.lexists(directory / filename):
+        return "alias"
+    return "absent"
+
+
+def _stored_alias_name(directory: Path, name: str) -> Optional[str]:
+    """The real stored stem that a non-exact `name` resolves to, or None."""
+    requested = directory / f"{name}.yaml"
+    for entry_name in sorted(_scan_entry_names(directory)):
+        if not entry_name.endswith(".yaml"):
+            continue
+        try:
+            if os.path.samefile(directory / entry_name, requested):
+                return entry_name[: -len(".yaml")]
+        except OSError:
+            continue
+    return None
+
+
+def _alias_error(kind_label: str, directory: Path, name: str, outcome: str = "does not exist") -> LabConfigError:
+    stored = _stored_alias_name(directory, name)
+    hint = f" It resolves to the stored definition '{stored}'." if stored else ""
+    return LabConfigError(
+        f"{kind_label} '{name}' {outcome}: definition names are case-sensitive and must match "
+        f"the stored name exactly.{hint}"
+    )
+
+
+def definition_file_state(kind: str, name: str, lab_root: Path | None = None) -> str:
+    """exact | alias | absent | invalid for definition `kind` (topology,
+    access_info, scenario, reference) -- see the block comment above."""
+    lab_root = lab_root or find_lab_root()
+    return _file_state(lab_root / _DEFINITION_DIRECTORIES[kind], name)
+
+
+def _definition_path(directory: Path, name: str, kind_label: str) -> Path:
+    """Path of the stored definition `name`, or a LabConfigError when `name`
+    is only a filesystem alias of a differently spelled definition or is not
+    a plain name. An absent definition returns its (nonexistent) path so the
+    caller reports its usual "not found"."""
+    state = _file_state(directory, name)
+    if state == "invalid":
+        raise LabConfigError(f"{kind_label} '{name}' does not exist.")
+    if state == "alias":
+        raise _alias_error(kind_label, directory, name)
+    return directory / f"{name}.yaml"
+
+
+def _definition_exists(directory: Path, name: str) -> bool:
+    return _file_state(directory, name) == "exact" and (directory / f"{name}.yaml").is_file()
 
 
 def _load_yaml(path: Path, what: str) -> Any:
@@ -364,13 +473,13 @@ def validate_topology_data(name: str, data: Any) -> None:
 
 def load_topology(name: str, lab_root: Path | None = None) -> dict:
     lab_root = lab_root or find_lab_root()
-    path = lab_root / "topologies" / f"{name}.yaml"
+    path = _definition_path(lab_root / "topologies", name, "Topology")
     topology = _load_yaml(path, f"Topology '{name}'")
     validate_topology_data(name, topology)
     return topology
 
 
-def write_topology(name: str, data: dict, lab_root: Path | None = None) -> None:
+def write_topology(name: str, data: dict, lab_root: Path | None = None, create_only: bool = False) -> None:
     """Persist a topology mapping to lab/topologies/<name>.yaml atomically.
 
     Validates with the same `validate_topology_data()` primitive used to load
@@ -379,7 +488,7 @@ def write_topology(name: str, data: dict, lab_root: Path | None = None) -> None:
     """
     lab_root = lab_root or find_lab_root()
     validate_topology_data(name, data)
-    _atomic_write_yaml(lab_root / "topologies" / f"{name}.yaml", data)
+    _write_definition(lab_root / "topologies", name, data, "Topology", create_only)
 
 
 def list_topology_names(lab_root: Path | None = None) -> list[str]:
@@ -390,7 +499,7 @@ def list_topology_names(lab_root: Path | None = None) -> list[str]:
 
 def topology_exists(name: str, lab_root: Path | None = None) -> bool:
     lab_root = lab_root or find_lab_root()
-    return (lab_root / "topologies" / f"{name}.yaml").is_file()
+    return _definition_exists(lab_root / "topologies", name)
 
 
 def _stored_definition_is_deletable(name: str, directory: Path, list_names: list[str]) -> bool:
@@ -519,17 +628,17 @@ def validate_access_info_data(name: str, data: Any) -> None:
 
 def load_access_info(name: str, lab_root: Path | None = None) -> dict:
     lab_root = lab_root or find_lab_root()
-    path = lab_root / "access-info" / f"{name}.yaml"
+    path = _definition_path(lab_root / "access-info", name, "Access information")
     data = _load_yaml(path, f"Access information '{name}'")
     validate_access_info_data(name, data)
     return data
 
 
-def write_access_info(name: str, data: dict, lab_root: Path | None = None) -> None:
+def write_access_info(name: str, data: dict, lab_root: Path | None = None, create_only: bool = False) -> None:
     """Persist an access-info mapping to lab/access-info/<name>.yaml atomically."""
     lab_root = lab_root or find_lab_root()
     validate_access_info_data(name, data)
-    _atomic_write_yaml(lab_root / "access-info" / f"{name}.yaml", data)
+    _write_definition(lab_root / "access-info", name, data, "Access information", create_only)
 
 
 def list_access_info_names(lab_root: Path | None = None) -> list[str]:
@@ -539,7 +648,7 @@ def list_access_info_names(lab_root: Path | None = None) -> list[str]:
 
 def access_info_exists(name: str, lab_root: Path | None = None) -> bool:
     lab_root = lab_root or find_lab_root()
-    return (lab_root / "access-info" / f"{name}.yaml").is_file()
+    return _definition_exists(lab_root / "access-info", name)
 
 
 def access_info_is_deletable(name: str, lab_root: Path | None = None) -> bool:
@@ -588,15 +697,15 @@ def load_principles(lab_root: Path | None = None) -> Any:
 
 def load_scenario(name: str, lab_root: Path | None = None) -> Any:
     lab_root = lab_root or find_lab_root()
-    data = _load_yaml(lab_root / "scenarios" / f"{name}.yaml", f"Scenario '{name}'")
+    data = _load_yaml(_definition_path(lab_root / "scenarios", name, "Scenario"), f"Scenario '{name}'")
     _validate_mapping("Scenario", name, data)
     return data
 
 
-def write_scenario(name: str, data: dict, lab_root: Path | None = None) -> None:
+def write_scenario(name: str, data: dict, lab_root: Path | None = None, create_only: bool = False) -> None:
     lab_root = lab_root or find_lab_root()
     validate_scenario_data(name, data)
-    _atomic_write_yaml(lab_root / "scenarios" / f"{name}.yaml", data)
+    _write_definition(lab_root / "scenarios", name, data, "Scenario", create_only)
 
 
 def list_scenario_names(lab_root: Path | None = None) -> list[str]:
@@ -606,7 +715,7 @@ def list_scenario_names(lab_root: Path | None = None) -> list[str]:
 
 def scenario_exists(name: str, lab_root: Path | None = None) -> bool:
     lab_root = lab_root or find_lab_root()
-    return (lab_root / "scenarios" / f"{name}.yaml").is_file()
+    return _definition_exists(lab_root / "scenarios", name)
 
 
 def scenario_is_deletable(name: str, lab_root: Path | None = None) -> bool:
@@ -624,7 +733,7 @@ def delete_scenario(name: str, lab_root: Path | None = None) -> None:
 
 def load_reference(name: str, lab_root: Path | None = None) -> Any:
     lab_root = lab_root or find_lab_root()
-    data = _load_yaml(lab_root / "references" / f"{name}.yaml", f"Reference '{name}'")
+    data = _load_yaml(_definition_path(lab_root / "references", name, "Reference"), f"Reference '{name}'")
     _validate_mapping("Reference", name, data)
     return data
 
@@ -634,10 +743,10 @@ def load_references(names: list[str], lab_root: Path | None = None) -> list[Any]
     return [load_reference(name, lab_root) for name in names]
 
 
-def write_reference(name: str, data: dict, lab_root: Path | None = None) -> None:
+def write_reference(name: str, data: dict, lab_root: Path | None = None, create_only: bool = False) -> None:
     lab_root = lab_root or find_lab_root()
     validate_reference_data(name, data)
-    _atomic_write_yaml(lab_root / "references" / f"{name}.yaml", data)
+    _write_definition(lab_root / "references", name, data, "Reference", create_only)
 
 
 def list_reference_names(lab_root: Path | None = None) -> list[str]:
@@ -647,7 +756,7 @@ def list_reference_names(lab_root: Path | None = None) -> list[str]:
 
 def reference_exists(name: str, lab_root: Path | None = None) -> bool:
     lab_root = lab_root or find_lab_root()
-    return (lab_root / "references" / f"{name}.yaml").is_file()
+    return _definition_exists(lab_root / "references", name)
 
 
 def reference_is_deletable(name: str, lab_root: Path | None = None) -> bool:
@@ -886,6 +995,70 @@ def _atomic_write_yaml(path: Path, data: Any) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp_path, path)
+
+
+def _write_definition(directory: Path, name: str, data: Any, kind_label: str, create_only: bool) -> None:
+    """Persist one definition with create and update kept distinct.
+
+    - alias / invalid name: refused, nothing touched.
+    - existing exact file: replaced atomically (unless `create_only`, which
+      refuses to overwrite). os.replace() cannot be made conditional, so a
+      change made by another process between this check and the replace is
+      not detected; the CLI is the single writer of lab definitions.
+    - absent: created exclusively -- the finished temp file is published
+      with os.link(), which fails instead of replacing if the target
+      appeared (or a case alias of it exists) in the meantime.
+    """
+    state = _file_state(directory, name)
+    if state == "invalid":
+        raise LabConfigError(f"{kind_label} '{name}' is not a valid definition name.")
+    if state == "alias":
+        raise _alias_error(kind_label, directory, name)
+    if state == "exact":
+        if create_only:
+            raise LabConfigError(f"{kind_label} '{name}' already exists; refusing to overwrite it.")
+        _atomic_write_yaml(directory / f"{name}.yaml", data)
+        return
+    _create_yaml_exclusive(directory / f"{name}.yaml", data, kind_label, name)
+
+
+def _create_yaml_exclusive(path: Path, data: Any, kind_label: str, name: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Unique, dot-prefixed temp name (never matched by the "*.yaml" listing).
+    # O_EXCL guarantees it is ours; a stale leftover from a crashed run can
+    # never block creation because every attempt draws a fresh random name.
+    # 0o666 is subject to the umask exactly like _atomic_write_yaml()'s
+    # open("w"), so permissions are identical to the update path.
+    for _ in range(10):
+        tmp_path = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+        try:
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+            break
+        except FileExistsError:
+            continue
+    else:
+        raise LabConfigError(f"Cannot create {kind_label.lower()} '{name}': no free temporary file name.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            yaml.safe_dump(data, handle, sort_keys=False, default_flow_style=False, allow_unicode=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(tmp_path, path)
+        except FileExistsError as exc:
+            raise LabConfigError(f"{kind_label} '{name}' already exists; refusing to overwrite it.") from exc
+        except OSError as exc:
+            if exc.errno in (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP):
+                raise LabConfigError(
+                    f"Cannot create {kind_label.lower()} '{name}': the filesystem does not support "
+                    "hard links, which are used for overwrite-safe creation."
+                ) from exc
+            raise
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def write_settings(settings: dict, lab_root: Path | None = None) -> None:

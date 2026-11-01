@@ -1514,6 +1514,19 @@ topology candidate is created. Declining is a true no-op; confirming
 preserves the exact entered case. This is a CLI-side creation-safety check,
 not a replacement for the schema validator below.
 
+Name identity is decided by `lab.py`, not by `Path.exists()`: the requested
+`<name>.yaml` is compared with the real directory entry names
+(`os.scandir`) and classified `exact`, `alias` (the filesystem resolves it
+to a differently spelled entry, e.g. case-insensitive APFS), `absent` or
+`invalid`. An alias is never read, overwritten or deleted, and a case-only
+creation that the filesystem cannot hold is refused before the confirmation
+prompt. Creation of a new definition publishes a finished temp file with
+`os.link()` (fails instead of replacing); updating an existing exact file
+uses the atomic replace. `os.replace()` cannot be made conditional, so
+concurrent modification by another process between check and replace is not
+detected; the CLI is the single writer. No probe file is written to detect
+filesystem behavior.
+
 ### Validator reuse
 
 `cli/config.py` does not maintain its own topology/access-info/device-type
