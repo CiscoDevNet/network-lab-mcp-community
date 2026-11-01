@@ -10,8 +10,12 @@ topologies/, scenarios/, references/).
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
+import stat
 import subprocess
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -56,6 +60,43 @@ def pytest_runtest_makereport(item, call):
         )
 
 
+def _wait_until_tmux_server_gone(socket_name: str, timeout: float = 10.0) -> bool:
+    """True once no tmux server answers on `socket_name` (polled, with a
+    timeout). `kill-server` returning only means the request was accepted:
+    server exit is observed separately, via a client connection failing."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        probe = subprocess.run(["tmux", "-L", socket_name, "list-sessions"], capture_output=True, text=True)
+        if probe.returncode != 0:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _remove_owned_tmux_tmpdir(tmpdir: str, created_real_path: str, created_inode: int) -> None:
+    """Remove the tmux directory this test session itself created, and only
+    that: the real path, owner, type and inode must still match what was
+    recorded at creation, and the tree must hold nothing but the tmux
+    socket directory and Unix sockets. Anything unexpected is left in place
+    rather than deleted. tmux never unlinks its socket file when a server
+    exits (stale socket files are normal tmux behavior on macOS and Linux),
+    so removing the whole private directory is the only complete cleanup."""
+    real = os.path.realpath(tmpdir)
+    if real != created_real_path or not os.path.isdir(real) or os.path.islink(tmpdir):
+        return
+    st = os.lstat(real)
+    if st.st_uid != os.getuid() or st.st_ino != created_inode:
+        return
+    if not shutil.rmtree.avoids_symlink_attacks:
+        return
+    for dirpath, dirnames, filenames in os.walk(real):
+        for name in dirnames + filenames:
+            mode = os.lstat(os.path.join(dirpath, name)).st_mode
+            if not (stat.S_ISDIR(mode) or stat.S_ISSOCK(mode)):
+                return
+    shutil.rmtree(real)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_tmux_socket():
     """Redirect every test in the suite onto its own, disposable tmux
@@ -64,29 +105,65 @@ def _isolated_tmux_socket():
     (or a Discovery/validation session) on `network-lab-mcp`, the socket
     real operation uses.
 
-    `terminal._tmux_base()` reads `terminal.TMUX_SOCKET_NAME` as a plain
-    module-global lookup at call time (not a frozen default parameter), so
-    reassigning the module attribute here is sufficient -- every existing
-    tmux invocation throughout terminal.py picks up the new socket name
-    with no further changes needed anywhere else.
+    Two independent layers:
+
+    * Socket name: `terminal._tmux_base()` reads `terminal.TMUX_SOCKET_NAME`
+      as a plain module-global lookup at call time, so reassigning it here
+      redirects every tmux invocation in terminal.py. The name carries a
+      random token, not just the PID, so it is never reused.
+    * Directory: `TMUX_TMPDIR` points at a private, freshly created
+      directory, so even a socket name that equals the production one
+      (test_tmux_socket_isolation.py) resolves *inside* that directory and
+      cannot reach the real `/tmp/tmux-<uid>/network-lab-mcp`. `TMUX` and
+      `TMUX_PANE` are removed so a developer running pytest from inside
+      their own tmux session cannot be addressed by any child process.
+      Because the directory is private, teardown can remove the leftover
+      socket file as well as the server.
 
     Session-scoped (one shared test socket for the whole run, not one per
-    test): tests already rely on per-file/per-test cleanup fixtures to
-    avoid session-name collisions *within* a socket, and spinning up a
-    fresh tmux server per test would add real overhead across a suite
-    this size for no isolation benefit (pytest-xdist is not in use, so
-    tests never actually run concurrently against each other).
+    test): see the per-file cleanup fixtures for in-socket isolation.
 
     Real-lab-gated tests (`NETWORK_LAB_REAL_TESTS=1`) are unaffected in
     substance: they still open real ssh/telnet sessions to real devices --
     only the *local* tmux socket multiplexing those sessions is
     redirected, which has no bearing on which remote device is reached."""
-    test_socket_name = f"network-lab-mcp-test-{os.getpid()}"
+    # /tmp (not the platform default under /var/folders on macOS): keeps
+    # the Unix socket path well under the ~104-byte sun_path limit.
+    tmpdir = tempfile.mkdtemp(prefix="nlm-", dir="/tmp")
+    os.chmod(tmpdir, 0o700)
+    created_real_path = os.path.realpath(tmpdir)
+    created_inode = os.lstat(created_real_path).st_ino
+    saved_env = {key: os.environ.get(key) for key in ("TMUX", "TMUX_PANE", "TMUX_TMPDIR")}
+    os.environ.pop("TMUX", None)
+    os.environ.pop("TMUX_PANE", None)
+    os.environ["TMUX_TMPDIR"] = created_real_path
+
+    test_socket_name = f"network-lab-mcp-test-{os.getpid()}-{secrets.token_hex(4)}"
     terminal.TMUX_SOCKET_NAME = test_socket_name
-    yield
-    terminal.TMUX_SOCKET_NAME = PRODUCTION_TMUX_SOCKET_NAME
-    if shutil.which("tmux") is not None:
-        subprocess.run(["tmux", "-L", test_socket_name, "kill-server"], capture_output=True)
+    try:
+        yield
+    finally:
+        terminal.TMUX_SOCKET_NAME = PRODUCTION_TMUX_SOCKET_NAME
+        server_gone = True
+        if shutil.which("tmux") is not None:
+            subprocess.run(["tmux", "-L", test_socket_name, "kill-server"], capture_output=True)
+            server_gone = _wait_until_tmux_server_gone(test_socket_name)
+        if server_gone:
+            _remove_owned_tmux_tmpdir(tmpdir, created_real_path, created_inode)
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+@pytest.fixture(autouse=True)
+def _isolated_terminal_logs_root(monkeypatch, tmp_path_factory):
+    """Point `terminal.LOGS_ROOT` at a per-test temporary directory so no
+    test can write session logs into the repository's own `logs/`. Tests
+    that need a specific location still monkeypatch it themselves (their
+    own setattr runs later and wins)."""
+    monkeypatch.setattr(terminal, "LOGS_ROOT", tmp_path_factory.mktemp("terminal-logs"))
 
 
 @pytest.fixture()
