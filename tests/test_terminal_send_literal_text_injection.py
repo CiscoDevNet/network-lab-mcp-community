@@ -51,26 +51,57 @@ def _cleanup_validation_sessions():
         terminal.close_validation_session(validation_id)
 
 
-def _send_and_capture_raw_bytes(validation_id: str, payload: str, tmp_path: Path) -> bytes:
+def _wait_for_file(path: Path, timeout: float, what: str) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.02)
+    pytest.fail(f"timed out after {timeout}s waiting for {what} ({path.name})")
+
+
+def _send_and_capture_raw_bytes(
+    validation_id: str,
+    payload: str,
+    tmp_path: Path,
+    *,
+    capture_args: tuple[str, ...] = (),
+    ready_timeout: float = 15.0,
+    done_timeout: float = 15.0,
+) -> bytes:
     """Open a validation session whose pane process puts its own stdin into
     raw tty mode and records every byte it receives, send `payload` via the
-    real `_send_literal_text()`, then read back exactly what arrived."""
+    real `_send_literal_text()`, then read back exactly what arrived.
+
+    Two explicit synchronization points, so neither input loss nor an early
+    read can masquerade as the other:
+
+    * Before sending, wait for the capture process's readiness file, which
+      it creates only after tty.setraw() (which discards pending input) has
+      completed -- sending earlier would race the terminal mode switch.
+    * After sending, wait for the capture process's result file, which it
+      writes atomically only once capturing is complete -- so the result is
+      read only when it is final, never while it is half-written or absent."""
     out_path = tmp_path / f"{validation_id}.bin"
+    ready_path = tmp_path / f"{validation_id}.ready"
     terminal.open_validation_session(
-        validation_id, ["python3", str(_CAPTURE_SCRIPT), str(out_path), "1.0"]
+        validation_id,
+        [
+            "python3",
+            str(_CAPTURE_SCRIPT),
+            str(out_path),
+            "--ready",
+            str(ready_path),
+            "--expect",
+            str(len(payload.encode("utf-8"))),
+            *capture_args,
+        ],
     )
     session_name = terminal.derive_validation_session_name(validation_id)
-
+    _wait_for_file(ready_path, ready_timeout, "capture readiness (raw mode set)")
     terminal._send_literal_text(session_name, payload)
-
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        if out_path.exists() and out_path.stat().st_size >= len(payload.encode("utf-8")):
-            break
-        time.sleep(0.1)
-    else:
-        time.sleep(1.3)  # let the capture script's own idle timeout flush what it has
-    return out_path.read_bytes() if out_path.exists() else b""
+    _wait_for_file(out_path, done_timeout, "capture completion")
+    return out_path.read_bytes()
 
 
 # ---- byte-fidelity characterization: same contract before and after the
@@ -103,6 +134,29 @@ def _send_and_capture_raw_bytes(validation_id: str, payload: str, tmp_path: Path
 )
 def test_send_literal_text_delivers_exact_bytes(case_id, payload, tmp_path):
     captured = _send_and_capture_raw_bytes(f"charmatrix-{case_id}", payload, tmp_path)
+    assert captured == payload.encode("utf-8")
+
+
+def test_raw_capture_waits_for_readiness_when_the_capture_process_starts_slowly(tmp_path):
+    """The capture process takes 0.8s to enter raw mode. Because the test
+    waits for the readiness file instead of sending right after the session
+    is created, nothing is typed into the pane before tty.setraw() (which
+    would flush it), and the bytes still arrive exactly."""
+    payload = r"a\b"
+    captured = _send_and_capture_raw_bytes(
+        "slowstart", payload, tmp_path, capture_args=("--pre-raw-delay", "0.8")
+    )
+    assert captured == payload.encode("utf-8")
+
+
+def test_raw_capture_waits_for_completion_when_saving_is_slow(tmp_path):
+    """The capture process receives the bytes promptly but only publishes the
+    result 1.5s later. The test must wait for the completion file rather than
+    read an absent/empty result early."""
+    payload = r"a\b"
+    captured = _send_and_capture_raw_bytes(
+        "slowsave", payload, tmp_path, capture_args=("--save-delay", "1.5")
+    )
     assert captured == payload.encode("utf-8")
 
 
