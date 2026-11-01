@@ -156,9 +156,21 @@ def test_case_only_collision_detected():
     assert cfgmod.find_case_only_collision("srv_lab", ["srv6_lab"]) is None
 
 
+def _fs_folds_case(lab_root) -> bool:
+    """True when this host's filesystem resolves a case-only different name
+    to the existing lab/topologies/sample_lab.yaml (e.g. default macOS
+    APFS). Read-only: nothing is written to detect it."""
+    return (lab_root / "topologies" / "SAMPLE_LAB.yaml").exists()
+
+
 def test_plan_topology_definition_flags_case_collision(lab_root):
     session = cfgmod.CliSession(lab_root)
     session.enter_configure()
+    if _fs_folds_case(lab_root):
+        # Creation is impossible here, so it is refused before any prompt.
+        with pytest.raises(cfgmod.ConfigError, match="case-sensitive"):
+            session.plan_topology_definition("SAMPLE_LAB")
+        return
     plan = session.plan_topology_definition("SAMPLE_LAB")
     assert plan.kind == "case_collision"
     assert plan.existing == "sample_lab"
@@ -168,6 +180,12 @@ def test_confirmed_case_collision_creates_distinct_topology(lab_root):
     session = cfgmod.CliSession(lab_root)
     session.enter_configure()
     plan = cfgmod.TopologyPlan("create_new", "SAMPLE_LAB")
+    if _fs_folds_case(lab_root):
+        with pytest.raises(cfgmod.ConfigError, match="cannot be created"):
+            session.apply_topology_definition_plan(plan)
+        assert session.definition_kind is None and session.definition_candidate is None
+        assert lab.load_topology("sample_lab", lab_root)["name"] == "sample_lab"
+        return
     session.apply_topology_definition_plan(plan)
     assert session.definition_name == "SAMPLE_LAB"
     assert session.definition_candidate["name"] == "SAMPLE_LAB"

@@ -423,9 +423,25 @@ class CliSession:
             return False, "Uncommitted changes exist. Use 'commit' or 'clear' before switching."
         return True, None
 
+    def _reject_filesystem_alias(self, kind: str, name: str) -> None:
+        """Refuse a name that is not a stored definition's exact name but
+        that the filesystem resolves to one (case-only / normalization
+        alias, e.g. `SAMPLE_LAB` for `sample_lab.yaml` on macOS): such a
+        definition can neither be loaded nor created, so this must fail
+        before any prompt or any change to the candidate state."""
+        state = lab.definition_file_state(kind, name, self.lab_root)
+        if state == "alias":
+            directory = self.lab_root / lab._DEFINITION_DIRECTORIES[kind]
+            raise ConfigError(
+                str(lab._alias_error(_DEFINITION_KIND_LABELS[kind], directory, name, "cannot be created or opened"))
+            )
+        if state == "invalid":
+            raise ConfigError(f"{_DEFINITION_KIND_LABELS[kind]} '{name}' is not a valid definition name.")
+
     def _enter_definition(self, kind: str, name: str, mode: str) -> None:
         exists_fn, load_fn, new_data_fn = _DEFINITION_LOADERS[kind]
         if not (self.definition_kind == kind and self.definition_name == name and self.definition_candidate is not None):
+            self._reject_filesystem_alias(kind, name)
             if exists_fn(name, self.lab_root):
                 data = load_fn(name, self.lab_root)
                 self.definition_original = copy.deepcopy(data)
@@ -447,6 +463,9 @@ class CliSession:
         existing_names = lab.list_topology_names(self.lab_root)
         if name in existing_names:
             return TopologyPlan("select_existing", name)
+        # Before any confirmation prompt: a case-only name the filesystem
+        # folds onto an existing file cannot be created at all.
+        self._reject_filesystem_alias("topology", name)
         collision = find_case_only_collision(name, existing_names)
         if collision is not None:
             return TopologyPlan("case_collision", name, collision)
@@ -901,6 +920,17 @@ class CliSession:
             except lab.LabConfigError as exc:
                 errors.append(str(exc))
 
+        if definition_being_written and not definition_being_deleted:
+            state = lab.definition_file_state(self.definition_kind, self.definition_name, self.lab_root)
+            label = _DEFINITION_KIND_LABELS[self.definition_kind]
+            if state in ("alias", "invalid"):
+                errors.append(
+                    f"{label} '{self.definition_name}' cannot be saved: its name collides with, or is not "
+                    "a valid stored definition name."
+                )
+            elif state == "exact" and self.definition_original is None:
+                errors.append(f"{label} '{self.definition_name}' already exists; refusing to overwrite it.")
+
         def _baseline_exists(kind: str, name: str) -> bool:
             return bool(_DEFINITION_LOADERS[kind][0](name, self.lab_root))
 
@@ -976,7 +1006,12 @@ class CliSession:
             self._reset_mutation_tracking()
         else:
             if definition_being_written:
-                _DEFINITION_WRITERS[self.definition_kind](self.definition_name, self.definition_candidate, self.lab_root)
+                _DEFINITION_WRITERS[self.definition_kind](
+                    self.definition_name,
+                    self.definition_candidate,
+                    self.lab_root,
+                    create_only=self.definition_original is None,
+                )
                 self.definition_original = copy.deepcopy(self.definition_candidate)
                 written_target = (self.definition_kind, self.definition_name, "saved")
             self._reset_mutation_tracking()

@@ -20,6 +20,7 @@ from network_lab_mcp.cli import main as climain
 
 SENTINEL = "SENTINEL-pw-do-not-leak"
 real_replace = os.replace
+real_link = os.link
 
 
 def _snap(lab_root):
@@ -40,7 +41,9 @@ def _session(lab_root):
 
 
 def _fail_replace(monkeypatch, when):
-    """Fail os.replace when `when(dst_name, call_index)`; record every call."""
+    """Fail the publishing step when `when(dst_name, call_index)`; record every
+    call. Updating an existing file publishes with os.replace; creating a new
+    definition publishes with os.link (overwrite-safe), so both are covered."""
     calls = []
 
     def fake(src, dst):
@@ -49,7 +52,14 @@ def _fail_replace(monkeypatch, when):
             raise OSError("injected replace failure")
         return real_replace(src, dst)
 
+    def fake_link(src, dst, *a, **k):
+        calls.append(os.path.basename(str(dst)))
+        if when(os.path.basename(str(dst)), len(calls)):
+            raise OSError("injected link failure")
+        return real_link(src, dst, *a, **k)
+
     monkeypatch.setattr(os, "replace", fake)
+    monkeypatch.setattr(os, "link", fake_link)
     return calls
 
 
@@ -116,6 +126,7 @@ def test_t29_c_settings_replace_fails_and_retry_converges(lab_root, monkeypatch,
 
     # ---- T29-D/E: retry (injection removed) ----
     monkeypatch.setattr(os, "replace", real_replace)
+    monkeypatch.setattr(os, "link", real_link)
     definition_before = (lab_root / "access-info" / "sr-mpls.yaml").read_bytes()
     writes = []
     orig_write = lab.write_access_info

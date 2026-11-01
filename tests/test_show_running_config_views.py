@@ -214,12 +214,18 @@ def test_reference_name_nonexistent_reference_rejected(lab_root, capsys):
 
 
 def test_reference_name_case_sensitive(lab_root, capsys):
-    _write_reference(lab_root, "IosXR_Basics")
-    _settings(lab_root, active_references=["IosXR_Basics"])
+    # Not "IosXR_Basics": that differs from the fixture's stored `iosxr_basics`
+    # only by case and cannot coexist with it on a case-insensitive filesystem
+    # (default macOS), where saving it would be refused as an alias.
+    _write_reference(lab_root, "IosXR_Mixed")
+    _settings(lab_root, active_references=["IosXR_Mixed"])
     session = cfgmod.CliSession(lab_root)
 
-    climain.execute_command_line(session, "show running-config reference IosXR_Basics")
-    assert "IosXR_Basics" in capsys.readouterr().out
+    climain.execute_command_line(session, "show running-config reference IosXR_Mixed")
+    assert "IosXR_Mixed" in capsys.readouterr().out
+
+    climain.execute_command_line(session, "show running-config reference iosxr_mixed")
+    assert capsys.readouterr().out.strip() == "% Reference 'iosxr_mixed' is not active in running-config."
 
     climain.execute_command_line(session, "show running-config reference iosxr_basics")
     assert capsys.readouterr().out.strip() == "% Reference 'iosxr_basics' is not active in running-config."

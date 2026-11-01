@@ -894,9 +894,30 @@ Create a separate topology named 'SRv6_Lab'? [yes/no]:
 
 This is a narrow safety net, not fuzzy name matching: `srv6-lab`,
 `srv6lab`, and `srv_lab` are all ordinary new-topology names relative to an
-existing `srv6_lab` and never trigger this prompt. It applies only to
-`topology <name>`; access-info/scenario/reference names have no equivalent
-safeguard.
+existing `srv6_lab` and never trigger this prompt. The prompt applies only
+to `topology <name>`.
+
+**Filesystem behavior.** A definition's identity is its exact file name
+(`<name>.yaml`). Two names that differ only by letter case can coexist only
+on a case-sensitive filesystem (typical Linux). On a case-insensitive or
+Unicode-normalizing filesystem (default macOS APFS), `SRv6_Lab` and `srv6_lab`
+are the same file, so the CLI **refuses before any prompt** and without
+changing the candidate, `dirty` state or revision:
+
+```
+% Topology 'SRv6_Lab' cannot be created or opened: definition names are
+% case-sensitive and must match the stored name exactly. It resolves to the
+% stored definition 'srv6_lab'.
+```
+
+The same refusal applies to `access-info`, `scenario` and `reference` names,
+to loading (an alias is never read as the stored definition), and to saving
+and deleting (an alias never overwrites or removes the stored file).
+A `settings.yaml` selection that only matches a stored definition through
+such an alias is treated like any other dangling selection: the CLI still
+starts, `show running-config` and the commit warning report it, and it can
+be corrected to the exact name. It is never adopted or rewritten
+automatically; the MCP tools fail closed for it.
 
 ## Definition switching guard
 
@@ -1758,11 +1779,13 @@ password entry on that one controlled path.
   fixed (see [scenario_format.md](scenario_format.md)) — only "valid
   YAML, root is a mapping" is enforced.
 - `lab/principles.yaml` is not edited by the CLI.
-- The case-only collision safeguard is implemented for `topology <name>`
-  only; `device <name>` (under either topology or access-info) and
-  access-info/scenario/reference names have no equivalent safeguard
-  (identifiers remain fully case-sensitive, but a near-duplicate by case is
-  not flagged).
+- The case-only collision *confirmation prompt* exists for `topology <name>`
+  only; `device <name>` and access-info/scenario/reference names are
+  identifiers that remain fully case-sensitive but get no prompt. A
+  case-only alias that the host filesystem folds onto an existing file is
+  refused for all four definition kinds (see the filesystem behavior above).
+  Verified on Linux (simulated case folding) and on macOS APFS; other
+  case-insensitive filesystems are not validated.
 - access-info has no external-editor support (see above).
 - Single-hop OpenSSH ProxyJump only: a jump host cannot itself reference
   another jump host (no jump chains), and only `type: host` /

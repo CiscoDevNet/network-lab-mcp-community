@@ -214,6 +214,7 @@ def test_t16_write_failure_keeps_candidate(lab_root, monkeypatch):
         raise OSError("disk full")
 
     monkeypatch.setattr(lab.os, "replace", boom)
+    monkeypatch.setattr(lab.os, "link", boom)  # a new definition is published with os.link
     with pytest.raises(OSError):
         session.commit()
     assert not lab.access_info_exists("sr-mpls", lab_root)
