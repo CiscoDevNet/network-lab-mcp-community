@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Stage C building blocks: telnet client pinning, loopback port, and
-lsof -F based TCP ownership verification (scenarios A-J). Local only."""
+"""Tunnel building blocks: telnet client pinning, loopback port, and
+lsof -F based TCP ownership verification. Local only."""
 
 from __future__ import annotations
 

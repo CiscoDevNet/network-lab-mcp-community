@@ -1099,7 +1099,7 @@ def _build_transport_command(device_config: dict) -> tuple[str, list[str]]:
 
     if transport == "telnet":
         if jump_host is not None:
-            # Stage C (tunnel pane, TCP ownership check) is not wired in, so
+            # The tunnel pane and TCP ownership check are not wired in, so
             # even with the constant True this path stays closed.
             raise TerminalError("telnet via jump host is not enabled")
         try:
@@ -1522,7 +1522,7 @@ def _authenticate_managed_telnet_session(
 # Telnet over an SSH local port forward (logical session = tunnel + device)
 #
 # One logical Managed Terminal ("PAGENT") is two tmux sessions, each created
-# through _create_logged_session() so Option C applies to both (read gate,
+# through _create_logged_session() so the disconnect-safe launch applies to both (read gate,
 # exec, remain-on-exit, pane identity, pipe-pane logging):
 #   network-lab-tunnel-<device>  `ssh -N -T -L 127.0.0.1:<port>:<host>:<port>`
 #   network-lab-device-<device>  `<abs telnet> -K -E 127.0.0.1 <port>`

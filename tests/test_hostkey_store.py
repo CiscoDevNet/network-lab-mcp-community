@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Stage 1: known_hosts classification / removal with the REAL ssh-keygen,
+"""known_hosts classification / removal with the REAL ssh-keygen,
 operating only on files inside the isolated sandbox via the forced wrapper."""
 
 from __future__ import annotations

@@ -286,7 +286,7 @@ def run_registration_connection(
       prompt's host/port/algorithm/fingerprint all match.
     * The hop under test never gets a credential (all auth methods off).
     * For a target behind a jump host the jump hop must already be trusted
-      (strict); its password is sent only through the Stage-B attribution
+      (strict); its password is sent only through the jump-prompt attribution
       (`terminal._classify_proxyjump_prompt`), at most once.
     """
     label, fp = expected

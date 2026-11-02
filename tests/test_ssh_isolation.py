@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Stage 0: forced-wrapper isolation, verified with Fake executables only.
+"""Forced-wrapper isolation, verified with Fake executables only.
 No real ssh / ssh-keygen / sshd is started by this module."""
 
 from __future__ import annotations

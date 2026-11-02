@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Stage B: jump-server password authentication for SSH ProxyJump, against
+"""Jump-server password authentication for SSH ProxyJump, against
 local fake ssh scripts in an isolated tmux (no network, no real ssh)."""
 
 from __future__ import annotations
@@ -127,7 +127,7 @@ def test_strict_host_key_for_every_hop_with_or_without_jump_password():
     _, cmd = terminal._build_transport_command(_cfg())
     assert "StrictHostKeyChecking=yes" in cmd and "StrictHostKeyChecking=no" not in " ".join(cmd)
     _, cmd = terminal._build_transport_command(_cfg(jump_password=None))
-    # policy since Step 5.3.3a: strict on every hop regardless of password configuration
+    # policy: strict on every hop regardless of password configuration
     assert "StrictHostKeyChecking=yes" in cmd and "accept-new" not in " ".join(cmd)
     joined = " ".join(terminal._build_transport_command(_cfg())[1])
     assert "SENTINEL" not in joined and "UserKnownHostsFile" not in joined

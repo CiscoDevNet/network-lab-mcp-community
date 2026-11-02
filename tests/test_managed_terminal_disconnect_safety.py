@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Disconnect safety for managed terminals (Option C).
+"""Disconnect safety for managed terminals.
 
 Requirement under test: once the SSH/Telnet transport of a managed session
 has ended -- or its state cannot be established -- text sent through

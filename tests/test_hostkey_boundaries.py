@@ -100,7 +100,7 @@ def test_registration_command_disables_every_auth_method_on_the_hop():
                 "GSSAPIAuthentication=no", "NumberOfPasswordPrompts=0"):
         assert opt in cmd
     proxy = next(a for a in cmd if a.startswith("ProxyCommand="))
-    assert "PreferredAuthentications=none" not in proxy  # the jump hop may authenticate (Stage B)
+    assert "PreferredAuthentications=none" not in proxy  # the jump hop may authenticate
     assert "HostKeyAlgorithms=ssh-ed25519" in cmd
 
 

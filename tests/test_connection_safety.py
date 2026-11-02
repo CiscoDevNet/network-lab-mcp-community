@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Stage A: access-info validation and ssh/telnet argv safety (no network)."""
+"""Access-info validation and ssh/telnet argv safety (no network)."""
 
 from __future__ import annotations
 

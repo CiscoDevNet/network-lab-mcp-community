@@ -130,7 +130,7 @@ def test_proxyjump_matrix(lab, name, jstate, tstate, should_open):
     assert "Accepted" not in log(rt, "t")  # the target never authenticated
     if jstate != "T":
         assert "Accepted" not in log(rt, "j")  # an untrusted jump never authenticated either
-    # the pane is dead: a `yes` cannot reach any shell (Option C)
+    # the pane is dead: a `yes` cannot reach any shell (disconnect-safe launch)
     wait_for(lambda: terminal.read_device("R1")["content"], ["verification failed"], 10)
     with pytest.raises(terminal.TerminalError):
         terminal.send_to_device("R1", "yes", None, True)

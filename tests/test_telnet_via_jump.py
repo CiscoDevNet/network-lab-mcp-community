@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Stage C: Telnet over an SSH local port forward, end to end against local
+"""Telnet over an SSH local port forward, end to end against local
 fakes only: a fake ssh (password prompt + loopback listener that relays to a
 local dummy device), a fake telnet client, a dummy Telnet device server, and
 the isolated tmux. No real ssh/telnet binary, host or credential is used."""
@@ -413,7 +413,7 @@ def test_tunnel_session_unreachable_from_terminal_send_path(env):
     assert "network-lab-tunnel-PAGENT" not in {s["session_name"] for s in terminal.list_device_sessions()}
 
 
-# ---- Stage D: Discovery uses the same connection foundation ----
+# ---- Discovery uses the same connection foundation ----
 
 
 def test_discovery_login_over_tunnel_and_cleanup(env):

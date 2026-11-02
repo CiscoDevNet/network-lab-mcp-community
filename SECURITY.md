@@ -273,7 +273,7 @@ Custom `ProxyCommand` or `ssh` wrapper settings in the operator's own
 ### Telnet via jump host (SSH local port forward)
 
 `transport: telnet` with `jump-host` runs as one logical Managed Terminal made
-of two tmux sessions, both created through the Option C launch path (read
+of two tmux sessions, both created through the managed-terminal launch path (read
 gate, `exec`, remain-on-exit, pane identity, pipe-pane logging):
 
 - tunnel session `network-lab-tunnel-<device>`: `ssh -N -T -o ExitOnForwardFailure=yes
@@ -320,12 +320,15 @@ Telnet are unaffected. Discovery uses the same code with its own namespaces
 (`network-lab-discovery-*`, `network-lab-discoverytunnel-*`) and never reuses a
 session.
 
-Not verified against real software (only Fakes were used): OpenSSH's actual
-prompt text and `Authenticated to` log line at LogLevel=VERBOSE, whether
-real `lsof` behaviour
-for `ssh -L` listeners, the macOS telnet client's option negotiation
-(`-K`, NEW-ENVIRON), and real devices. Treat this as a CONDITIONAL GO until a
-separately authorised test against a local throwaway sshd.
+Verification status of this path. Verified with fake `ssh`/`telnet`
+executables and an isolated tmux: the launch, ownership and cleanup logic.
+Verified with a real OpenSSH 10.3 client against throw-away loopback `sshd`
+instances in an isolated sandbox (never the user's `~/.ssh` or `known_hosts`):
+strict per-hop host key verification (unknown and changed keys are refused),
+and that no prompt reaches `terminal_send`. Not verified: whether real `lsof`
+behaviour for `ssh -L` listeners matches the Fakes, the macOS telnet client's
+option negotiation (`-K`, NEW-ENVIRON), a real jump server (including its
+password authentication), real routers, and Linux.
 
 Residual risks: Telnet is plaintext between the jump host and the device;
 loopback is not per-process access control (any local process can connect, and
@@ -339,11 +342,11 @@ the tunnel pane's log lives in the device's log directory as a separate file.
 - **Human only.** Approval, removal and replacement of host keys exist only in the interactive human CLI. MCP tools and managed terminals have no code path to them (tested).
 - **Independent verification.** The expected key type and `SHA256:` fingerprint must come from a trusted channel other than the connection being verified. A key is registered only if the presented key matches exactly; OpenSSH writes the entry itself.
 - **Keys before credentials.** Registration connections disable authentication on the hop under test. Credential-carrying Discovery connections run `StrictHostKeyChecking=yes` on every hop. Approvals are in-memory, scoped, expiring (900 s) and single-use.
-- **Registration connections and jump passwords.** A registration connection may send a *jump host* password only through the Stage B attribution logic, at most once per connection, never when the prompt cannot be attributed to the jump hop, and never again after a re-prompt or failure for the same jump host in the same run. Their total is capped at `min(40, 2 x (devices behind a password-authenticated jump host) + 6)`. The target's credentials are never sent on a registration connection.
+- **Registration connections and jump passwords.** A registration connection may send a *jump host* password only through the jump-prompt attribution logic, at most once per connection, never when the prompt cannot be attributed to the jump hop, and never again after a re-prompt or failure for the same jump host in the same run. Their total is capped at `min(40, 2 x (devices behind a password-authenticated jump host) + 6)`. The target's credentials are never sent on a registration connection.
 - **known_hosts changes under concurrency.** Before removal the file is re-checked (size, mtime, inode, hash, symlink, owner, permissions). The backup is never written back wholesale: if the file changed in a way that cannot be explained by removing exactly the target host's lines, nothing is repaired automatically and the backup path is shown for manual recovery. Entries other programs add in the meantime are preserved.
 - **Stops without automatic recovery.** A presented key whose type or fingerprint differs from the approved one, certificate-authority/revoked markers, shared or pattern host entries, and an unreadable or symlinked `known_hosts` stop the operation and change nothing.
 - **Replacement** verifies the new key on a copy first, backs up `known_hosts` (to a `0700` directory, files `0600`; contains other hosts' keys; never auto-deleted; may or may not be excluded from your own backup/sync tools), removes exactly one host's entries and registers the new key after a second exact match. `GlobalKnownHostsFile` is never modified.
-- **Residual risks.** A TTY does not prove a human is typing: an AI or script able to drive your terminal (PTY automation) can approve; keep the human CLI out of the AI's reach. Concurrent modification of `known_hosts` by other programs is detected on a best-effort basis (fail closed), not prevented. Legacy `ssh-rsa` (SHA-1) host keys are not supported. SSH features not handled (certificates/`@cert-authority`, `KnownHostsCommand`, DNS-based host keys, shared or pattern host entries) fail closed or fall back to manual recovery. (Fixed in Step 5.3.3a: managed terminals now verify the jump hop strictly too.) Telnet-over-SSH-tunnel host-key registration and replacement are disabled. Verified only against isolated local OpenSSH servers, not against real routers or a real jump server.
+- **Residual risks.** A TTY does not prove a human is typing: an AI or script able to drive your terminal (PTY automation) can approve; keep the human CLI out of the AI's reach. Concurrent modification of `known_hosts` by other programs is detected on a best-effort basis (fail closed), not prevented. Legacy `ssh-rsa` (SHA-1) host keys are not supported. SSH features not handled (certificates/`@cert-authority`, `KnownHostsCommand`, DNS-based host keys, shared or pattern host entries) fail closed or fall back to manual recovery. (Managed terminals verify the jump hop strictly as well.) Telnet-over-SSH-tunnel host-key registration and replacement are disabled. Verified only against isolated local OpenSSH servers, not against real routers or a real jump server.
 
 ## 12. Candidate / commit boundary
 
