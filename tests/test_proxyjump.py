@@ -181,11 +181,12 @@ def test_direct_ssh_has_no_proxyjump_argv():
         {"transport": "ssh", "address": "192.0.2.11", "port": 22, "username": "cisco"}
     )
     assert transport == "ssh"
-    assert command == ["ssh", "-p", "22", "cisco@192.0.2.11"]
+    assert command == ["ssh", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-p", "22",
+                       "cisco@192.0.2.11"]
     assert "-J" not in command
 
 
-def test_proxyjump_ssh_argv_has_native_dash_j_option():
+def test_proxyjump_ssh_argv_has_per_hop_strict_proxycommand():
     transport, command = terminal._build_transport_command(
         {
             "transport": "ssh",
@@ -200,7 +201,10 @@ def test_proxyjump_ssh_argv_has_native_dash_j_option():
         }
     )
     assert transport == "ssh"
-    assert command == ["ssh", "-J", "jump-user@192.0.2.10:22", "-p", "22", "cisco@192.0.2.11"]
+    proxy = next(a for a in command if a.startswith("ProxyCommand="))
+    assert "-J" not in command and "-W %h:%p" in proxy and "-p 22 jump-user@192.0.2.10" in proxy
+    assert proxy.count("StrictHostKeyChecking=yes") == 1 and command.count("StrictHostKeyChecking=yes") == 1
+    assert command[-3:] == ["-p", "22", "cisco@192.0.2.11"]
 
 
 def test_proxyjump_preserves_non_default_ports():
@@ -213,7 +217,8 @@ def test_proxyjump_preserves_non_default_ports():
             "jump_host_config": {"address": "10.0.0.1", "port": 2200, "username": "jump"},
         }
     )
-    assert command == ["ssh", "-J", "jump@10.0.0.1:2200", "-p", "2222", "target@10.0.0.5"]
+    proxy = next(a for a in command if a.startswith("ProxyCommand="))
+    assert "-p 2200" in proxy and "jump@10.0.0.1" in proxy and command[-3:] == ["-p", "2222", "target@10.0.0.5"]
 
 
 def test_proxyjump_argv_never_contains_passwords():
@@ -303,10 +308,12 @@ def test_terminal_open_proxyjump_argv_construction_unaffected_by_discovery_login
     assert transport == "ssh"
     # The jump host has a configured password (answered by Network Lab MCP),
     # so host keys must already be trusted: StrictHostKeyChecking=yes.
-    assert command == [
-        "ssh", "-o", "StrictHostKeyChecking=yes", "-J", "jump-user@192.0.2.10:22", "-p", "22",
-        "target-user@192.0.2.11",
-    ]
+    proxy = next(a for a in command if a.startswith("ProxyCommand="))
+    assert command[:5] == ["ssh", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no"]
+    assert command[-3:] == ["-p", "22", "target-user@192.0.2.11"]
+    # the jump hop gets its own strict policy (it does not inherit one with -J)
+    assert "StrictHostKeyChecking=yes" in proxy and "-W %h:%p" in proxy and "jump-user@192.0.2.10" in proxy
+    assert "-J" not in command
     joined = " ".join(command)
     assert "target-secret" not in joined
     assert "jump-secret" not in joined

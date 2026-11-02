@@ -134,13 +134,14 @@ def test_connection_closed_before_prompt(tmp_path, monkeypatch):
 
 
 def test_discovery_argv_is_strict_and_secret_free_when_jump_password_set():
-    _, cmd = terminal._build_transport_command(_cfg(), accept_new_host_keys=True)
+    _, cmd = terminal._build_transport_command(_cfg())
     joined = " ".join(cmd)
     assert "StrictHostKeyChecking=yes" in cmd and "accept-new" not in joined
     assert "SENTINEL" not in joined and "UserKnownHostsFile" not in joined
-    assert cmd.count("-J") == 1
+    assert "-J" not in cmd and "ProxyCommand=" in joined
 
 
-def test_discovery_without_jump_password_keeps_existing_accept_new():
-    _, cmd = terminal._build_transport_command(_cfg(jump_pw=None), accept_new_host_keys=True)
-    assert "StrictHostKeyChecking=accept-new" in " ".join(cmd)
+def test_discovery_without_jump_password_is_also_strict_and_never_accept_new():
+    _, cmd = terminal._build_transport_command(_cfg(jump_pw=None))
+    joined = " ".join(cmd)
+    assert "accept-new" not in joined and joined.count("StrictHostKeyChecking=yes") == 2  # target + jump child

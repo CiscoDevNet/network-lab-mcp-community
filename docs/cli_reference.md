@@ -506,6 +506,48 @@ and re-selecting the same reference is an exact net-zero: no diff, no
 policy (clear text, same as definition-mode `show running-config` for
 access-info) — it does not change what MCP tools, logs, or errors expose.
 
+## SSH host keys during `discover topology`
+
+`discover topology` (interactive terminal only) verifies the SSH host key of every SSH hop. A non-interactive run (no TTY) is strict too: an unknown key stops Discovery with a hint to run it interactively, a changed key stops it, and no host key is ever registered, approved, removed or replaced.
+
+**Registered key matches:** no question is asked.
+
+**Unknown key:**
+
+```
+Device: Router1
+SSH hop: target
+Host: 192.0.2.20
+Port: 22
+
+The SSH host key requires verification.
+Key type [ED25519/ECDSA/RSA]: ED25519
+Expected SHA256 fingerprint: SHA256:...
+Select an action:
+  1. Cancel (default)
+  2. Show verification details
+  3. Approve expected host key
+Choice [1]: 3
+Final confirmation [yes/no]: yes
+```
+
+Obtain the fingerprint from a trusted channel, not from the connection being verified. For a jump server such as `jump1`, run on its console `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` (ECDSA and RSA keys are also possible). Router-specific commands depend on the platform; consult its documentation.
+
+- Input is read from the controlling terminal (`/dev/tty`) only; pre-typed input is discarded, the default is Cancel, and each answer must arrive within 180 seconds. The approval lives 900 seconds, in memory, for one host/port/hop/key and one use.
+- Only ED25519, ECDSA (nistp256/384/521) and RSA (SHA-2 signatures, `rsa-sha2-512/256`) are accepted. Legacy `ssh-rsa` (SHA-1) is never enabled; a device that offers nothing else must be recovered manually.
+- `MD5:` fingerprints are not accepted.
+- If the host presents a different key type or fingerprint than you approved, or `known_hosts` contains entries that cannot be handled safely (certificate-authority or revoked markers, shared or pattern host fields, unreadable file), Discovery stops with a message and `known_hosts` is left unchanged; recover manually (see below).
+
+**Changed key:** the connection stops before any credential is sent. Choose `3. Review replacement of obsolete host key`, enter the new key type and fingerprint, and confirm. The old file is backed up before removal.
+
+**Backups:** `~/Library/Application Support/Network Lab MCP/ssh-hostkey-backups/` on macOS (`~/.local/state/network-lab-mcp/ssh-hostkey-backups/` on Linux), directory `0700`, files `0600`, never overwritten and never deleted automatically. Each backup contains your whole `known_hosts` (other hosts' keys), so protect or remove old backups yourself.
+
+**Manual recovery** (any time): `ssh-keygen -R <host>` (or `ssh-keygen -R "[<host>]:<port>"`), then re-run `discover topology`.
+
+**Managed terminals** (`terminal_open` through the MCP client) are strict as well: an unknown or changed key of the target or the jump host ends the connection with `Host key verification failed`; there is no prompt to answer and nothing is registered. Register the key first with `discover topology`, or manually: `ssh -o StrictHostKeyChecking=ask user@host` after verifying the fingerprint through a trusted channel.
+
+**Telnet over an SSH jump host:** the jump host key must already be registered; registration and replacement are not offered on that path (register it once with a manual `ssh`).
+
 ## Global configuration mode commands
 
 | Command | Effect |
@@ -671,7 +713,7 @@ missing value there is left exactly as before (not papered over).
 
 | Command | Effect |
 |---------|--------|
-| `type <iosxr\|iosxe\|ios\|nxos\|host>` | Device type. See README.md's ["Supported device types & Discovery scope"](../README.md#supported-device-types--discovery-scope). |
+| `type <iosxr\|iosxe\|ios\|nxos\|host>` | Device type. See README.md's ["Supported device types & Discovery scope"](../README.md#supported-device-types). |
 | `show running-config` | Just *this device's* full committed block from the topology above — empty if this device (or the whole topology) has never been committed. |
 | `show` / `show configuration` | Just this device's uncommitted field(s) (only `type` is modeled here). |
 | `commit` | Validate and persist; stays in this device's mode. |
@@ -693,7 +735,7 @@ external `edit` command, and displayed as read-only review information by
 | Command | Effect |
 |---------|--------|
 | `device <name>` | Create or edit a device's private connection data (case-sensitive); enters access-info device mode. |
-| `jump-host <name>` | Create or edit a reusable single-hop OpenSSH ProxyJump endpoint (case-sensitive); enters access-info jump-host mode. See README.md's ["Single-hop SSH jump hosts"](../README.md#single-hop-ssh-jump-hosts-proxyjump). |
+| `jump-host <name>` | Create or edit a reusable single-hop OpenSSH ProxyJump endpoint (case-sensitive); enters access-info jump-host mode. See README.md's ["Single-hop SSH jump hosts"](../README.md#ssh-jump-server-support). |
 | `no device <name>` | Remove a device entirely from the candidate (Tab/`?` complete only names present in the *current candidate*, including ones created but not yet committed in this same session). Does not touch committed YAML until `commit`; does not cascade to topology or any other definition. Removing a nonexistent name is a clear error, not a silent no-op. |
 | `no jump-host <name>` | Remove a jump host entirely from the candidate, the same way. Does not cascade: a device still referencing the removed jump host is left as-is, and `commit` will then fail with a dangling-reference error until the reference is fixed or cleared (`no jump-host` inside that device's own mode) or the jump host is restored. |
 | `show running-config` | This access-info definition's own **full committed** state, re-read fresh from disk — empty if it has never been committed. **Not** the MCP running-config selection. Passwords in **clear text** (see "Password display policy" below). |
@@ -1771,7 +1813,7 @@ password entry on that one controlled path.
   through a commit.
 - `discover topology [l3]` supports IOS XR/IOS XE (LLDP + CDP) and classic IOS
   (CDP only) — see README.md's ["Supported device types & Discovery
-  scope"](../README.md#supported-device-types--discovery-scope) for the
+  scope"](../README.md#supported-device-types) for the
   full scope and limitations; no NX-OS discovery, no automatic commit or
   `active_topology` selection, and no discovery-history command.
 - `show logging` only lists/reads existing terminal logs; there is no
@@ -1791,7 +1833,7 @@ password entry on that one controlled path.
 - Single-hop OpenSSH ProxyJump only: a jump host cannot itself reference
   another jump host (no jump chains), and only `type: host` /
   `transport: ssh` jump hosts are accepted — see README.md's
-  ["Single-hop SSH jump hosts"](../README.md#single-hop-ssh-jump-hosts-proxyjump).
+  ["Single-hop SSH jump hosts"](../README.md#ssh-jump-server-support).
 - Candidate configuration is memory-only: it is not recoverable after an
   abrupt process termination (SIGKILL, crash, host failure). Normal exit
   paths (`root`, `exit`, `end`, `clear`, `quit`, Ctrl-D) never lose it

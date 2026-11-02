@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from network_lab_mcp import connection_safety, tunnel_safety
+from network_lab_mcp import connection_safety, ssh_isolation, tunnel_safety
 
 TMUX_SOCKET_NAME = "network-lab-mcp"
 
@@ -274,6 +274,9 @@ def _session_lock(session_name: str) -> threading.Lock:
 
 
 def _tmux_base() -> list[str]:
+    runtime = ssh_isolation.active_runtime()
+    if runtime is not None:
+        return [runtime.tmux, "-L", TMUX_SOCKET_NAME]
     if shutil.which("tmux") is None:
         raise TerminalError("The 'tmux' binary is not available on this system.")
     return ["tmux", "-L", TMUX_SOCKET_NAME]
@@ -1053,18 +1056,41 @@ def _ssh_target(config: dict, default_port: int) -> tuple[str, int]:
     return target, port
 
 
-def _build_transport_command(device_config: dict, *, accept_new_host_keys: bool = False) -> tuple[str, list[str]]:
+def _isolate_ssh_command(command: list[str]) -> list[str]:
+    """Test-only: when an isolated runtime is installed (never in
+    production), route ssh through the forced wrapper with the mandatory
+    isolation options. Without a runtime the command is returned unchanged."""
+    runtime = ssh_isolation.active_runtime()
+    if runtime is None:
+        return command
+    return [runtime.wrapper("ssh"), *ssh_isolation.required_ssh_args(runtime), *command[1:]]
+
+
+def _ssh_base_argv() -> list[str]:
+    """Executable (+ mandatory isolation options under a test runtime) for an
+    ssh child started by ProxyCommand. Production: the resolved absolute ssh."""
+    runtime = ssh_isolation.active_runtime()
+    if runtime is not None:
+        return [runtime.wrapper("ssh"), *ssh_isolation.required_ssh_args(runtime)]
+    return [_resolve_ssh_binary()]
+
+
+# Every SSH hop of every terminal this module starts is verified strictly:
+# an unknown or changed host key is refused (no yes/no prompt that could be
+# answered by the AI through terminal_send, never `accept-new`). Host keys
+# are registered/replaced only by the human CLI (human CLI only).
+_STRICT_HOST_KEY_OPTS = ["-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no"]
+
+
+def _build_transport_command(device_config: dict) -> tuple[str, list[str]]:
     """Single lowest-level builder of every ssh/telnet argv (managed
     terminals and Discovery both pass through here), so the telnet-via-jump
     guard below cannot be bypassed by a different caller.
 
-    `accept_new_host_keys` is used only by the private Discovery bootstrap
-    path (see discovery.py). terminal_open() never sets it.
-
-    When the jump host has a configured password the jump-server login is
-    answered by Network Lab MCP, so host keys are then required to be
-    already trusted (`StrictHostKeyChecking=yes`); a user ssh_config of
-    accept-new/no is not inherited for that path."""
+    SSH always uses StrictHostKeyChecking=yes on every hop. With a jump host
+    the jump hop is a structured `-o ProxyCommand=ssh ... -W %h:%p` child
+    because OpenSSH's `-J` child does not inherit a command-line
+    StrictHostKeyChecking (OpenSSH 10.3: an unknown jump key still prompted)."""
     transport = device_config.get("transport")
     address = device_config.get("address")
     if not address:
@@ -1087,21 +1113,13 @@ def _build_transport_command(device_config: dict, *, accept_new_host_keys: bool 
     if transport == "ssh":
         _require_binary("ssh")
         target, port = _ssh_target(device_config, 22)
-        host_key_opts = (
-            ["-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=no"] if accept_new_host_keys else []
-        )
-        command = ["ssh", *host_key_opts, "-p", str(port), target]
+        command = ["ssh", *_STRICT_HOST_KEY_OPTS]
         if jump_host is not None:
             jump_target, jump_port = _ssh_target(jump_host, 22)
-            user, _, host = jump_target.rpartition("@")
-            jump_spec = f"{user + '@' if user else ''}{connection_safety.format_host_for_jump(host)}:{jump_port}"
-            if jump_host.get("password"):
-                # Network Lab MCP answers the jump login, so host keys must
-                # already be trusted -- Discovery's accept-new is not used.
-                host_key_opts = (["-o", "BatchMode=no"] if accept_new_host_keys else []) + [
-                    "-o", "StrictHostKeyChecking=yes"]
-            command = ["ssh", *host_key_opts, "-J", jump_spec, "-p", str(port), target]
-        return transport, command
+            child = [*_ssh_base_argv(), *_STRICT_HOST_KEY_OPTS, "-W", "%h:%p", "-p", str(jump_port), jump_target]
+            command += ["-o", "ProxyCommand=" + " ".join(shlex.quote(part) for part in child)]
+        command += ["-p", str(port), target]
+        return transport, _isolate_ssh_command(command)
 
     raise TerminalError(f"Unsupported transport '{transport}'. Expected 'ssh' or 'telnet'.")
 
@@ -1545,6 +1563,10 @@ def _resolve_ssh_binary() -> str:
 
 
 def _build_tunnel_command(device_config: dict, local_port: int) -> list[str]:
+    if ssh_isolation.active_runtime() is not None:
+        # The forced test wrapper forbids -L; the tunnel path is not isolated
+        # for real-OpenSSH tests, so it must not run under a test runtime.
+        raise TerminalError("SSH port-forward tunnels are not available under the isolated test runtime.")
     jump = device_config["jump_host_config"]
     jump_target, jump_port = _ssh_target(jump, 22)
     try:
@@ -2125,7 +2147,14 @@ def authenticate_bootstrap_jump_stage(device_name: str, device_config: dict, tex
         return text, last_line
 
 
-def open_bootstrap_terminal(device_name: str, device_config: dict) -> dict:
+def _expected_ssh_executable() -> str:
+    runtime = ssh_isolation.active_runtime()
+    if runtime is not None:
+        return runtime.wrapper("ssh")
+    return _resolve_ssh_binary()
+
+
+def open_bootstrap_terminal(device_name: str, device_config: dict, *, ssh_command: list[str] | None = None) -> dict:
     """Open a private, temporary session for Discovery only. Always creates
     a fresh session (Discovery never reuses a prior bootstrap session -- see
     close_bootstrap_terminal(), which callers must use once collection for
@@ -2141,7 +2170,14 @@ def open_bootstrap_terminal(device_name: str, device_config: dict) -> dict:
             result = _open_telnet_via_jump(device_name, device_config, session_name, discovery=True)
             return {"device": device_name, "session_name": session_name, "transport": result["transport"]}
         _close_session(session_name)  # never reuse a stale bootstrap session
-        transport, command = _build_transport_command(device_config, accept_new_host_keys=True)
+        if ssh_command is not None:
+            # Host-key-managed Discovery (human CLI only): a pre-built ssh argv with explicit
+            # per-hop StrictHostKeyChecking. Only the pinned ssh executable is accepted.
+            if device_config.get("transport") != "ssh" or not ssh_command or Path(ssh_command[0]).resolve() != Path(_expected_ssh_executable()).resolve():
+                raise TerminalError("Unsupported host-key-managed command.")
+            transport, command = "ssh", list(ssh_command)
+        else:
+            transport, command = _build_transport_command(device_config)
         _ensure_managed_session(session_name, command, log_device_name=device_name)
         return {"device": device_name, "session_name": session_name, "transport": transport}
 

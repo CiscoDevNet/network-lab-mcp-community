@@ -195,10 +195,17 @@ authentication are supported.
   not by itself guarantee that a host key was verified by a human. Pre-populate
   `known_hosts` for lab devices if you want to avoid trust-on-first-use
   decisions being made through the terminal.
-- **Topology discovery:** the Discovery bootstrap login uses
-  `StrictHostKeyChecking=accept-new`, which records a new host key on first
-  contact (trust on first use) and rejects a changed one. Use it only on lab
-  networks where that is acceptable.
+- **Topology discovery:** Discovery never uses `accept-new` or any other
+  trust-on-first-use mode. Every SSH hop runs with `StrictHostKeyChecking=yes`;
+  a new key can only be registered by the human CLI after the operator approved
+  the expected key type and SHA256 fingerprint (section 11a). A non-interactive
+  run stops on an unknown or changed key and changes nothing.
+- **Managed terminals:** every SSH hop (target and jump host) uses
+  `StrictHostKeyChecking=yes` and `UpdateHostKeys=no`, so an unknown or changed
+  key ends the connection instead of showing a `yes/no` prompt that could be
+  answered through `terminal_send`. The managed terminal never registers,
+  removes or replaces host keys; register keys with the human CLI
+  (`discover topology`) or a manual `ssh` first.
 - Do not weaken SSH settings to make Network Lab MCP work.
 
 ## 10. Telnet
@@ -213,7 +220,8 @@ risk is understood and accepted.
 ## 11. Jump hosts
 
 A device may reference one jump host from the same access-info definition,
-connected with OpenSSH `-J`. Multi-hop chains are not supported, and a device
+connected through OpenSSH with an explicit per-hop
+`-o ProxyCommand=ssh ... -W %h:%p` child (not `-J`, see below). Multi-hop chains are not supported, and a device
 using a jump host must use SSH.
 
 Jump-host authentication is expected to be non-interactive (key or agent). A
@@ -252,11 +260,13 @@ Custom `ProxyCommand` or `ssh` wrapper settings in the operator's own
   `jump host authentication failed`. The pane and process state are
   re-verified immediately before sending. This reduces, but cannot eliminate,
   the window between prompt detection and sending.
-- When a jump-host password is configured the ssh command gets
-  `-o StrictHostKeyChecking=yes`: unknown or changed host keys fail instead
-  of being accepted, whatever the user's `ssh_config` says. Whether OpenSSH
-  applies that option to the `-J` hop was not verified against a real ssh.
-- Discovery answers the jump-host prompt through the same stage logic (`terminal.authenticate_bootstrap_jump_stage`), once per hop, with the same attribution and re-prompt fail-closed rules. With a jump-host password configured Discovery also uses `StrictHostKeyChecking=yes` instead of `accept-new`, so an unknown or changed key fails Discovery. Verified only against local fakes; real OpenSSH prompt text and whether the option reaches the `-J` hop are unverified.
+- The ssh command always gets `-o StrictHostKeyChecking=yes` for the target
+  **and** for the jump hop (inside the ProxyCommand child): unknown or changed
+  host keys fail instead of being accepted, whatever the user's `ssh_config`
+  says. Verified with OpenSSH 10.3 on loopback: with `-J` the jump hop does
+  **not** inherit a command-line `StrictHostKeyChecking` (it still prompted),
+  which is why `-J` is no longer used.
+- Discovery answers the jump-host prompt through the same stage logic (`terminal.authenticate_bootstrap_jump_stage`), once per hop, with the same attribution and re-prompt fail-closed rules. Discovery uses `StrictHostKeyChecking=yes` on every hop, so an unknown or changed key fails Discovery. The jump-host prompt logic was verified against local fakes and the host-key behaviour against loopback OpenSSH; real routers and a real jump server are unverified.
 - Access-info address, port and username are validated at commit and again
   when the argv is built; unsafe values never reach ssh/telnet.
 
@@ -312,7 +322,7 @@ session.
 
 Not verified against real software (only Fakes were used): OpenSSH's actual
 prompt text and `Authenticated to` log line at LogLevel=VERBOSE, whether
-`StrictHostKeyChecking=yes` is applied to the `-J` hop, real `lsof` behaviour
+real `lsof` behaviour
 for `ssh -L` listeners, the macOS telnet client's option negotiation
 (`-K`, NEW-ENVIRON), and real devices. Treat this as a CONDITIONAL GO until a
 separately authorised test against a local throwaway sshd.
@@ -323,6 +333,17 @@ the ownership proofs narrow but cannot eliminate the window between a proof
 and the next keystroke); lsof snapshots are not atomic; a tunnel left running
 after a crash holds a loopback port and a jump-host connection until closed;
 the tunnel pane's log lives in the device's log directory as a separate file.
+
+## 11a. SSH host-key approval and recovery (`discover topology`)
+
+- **Human only.** Approval, removal and replacement of host keys exist only in the interactive human CLI. MCP tools and managed terminals have no code path to them (tested).
+- **Independent verification.** The expected key type and `SHA256:` fingerprint must come from a trusted channel other than the connection being verified. A key is registered only if the presented key matches exactly; OpenSSH writes the entry itself.
+- **Keys before credentials.** Registration connections disable authentication on the hop under test. Credential-carrying Discovery connections run `StrictHostKeyChecking=yes` on every hop. Approvals are in-memory, scoped, expiring (900 s) and single-use.
+- **Registration connections and jump passwords.** A registration connection may send a *jump host* password only through the Stage B attribution logic, at most once per connection, never when the prompt cannot be attributed to the jump hop, and never again after a re-prompt or failure for the same jump host in the same run. Their total is capped at `min(40, 2 x (devices behind a password-authenticated jump host) + 6)`. The target's credentials are never sent on a registration connection.
+- **known_hosts changes under concurrency.** Before removal the file is re-checked (size, mtime, inode, hash, symlink, owner, permissions). The backup is never written back wholesale: if the file changed in a way that cannot be explained by removing exactly the target host's lines, nothing is repaired automatically and the backup path is shown for manual recovery. Entries other programs add in the meantime are preserved.
+- **Stops without automatic recovery.** A presented key whose type or fingerprint differs from the approved one, certificate-authority/revoked markers, shared or pattern host entries, and an unreadable or symlinked `known_hosts` stop the operation and change nothing.
+- **Replacement** verifies the new key on a copy first, backs up `known_hosts` (to a `0700` directory, files `0600`; contains other hosts' keys; never auto-deleted; may or may not be excluded from your own backup/sync tools), removes exactly one host's entries and registers the new key after a second exact match. `GlobalKnownHostsFile` is never modified.
+- **Residual risks.** A TTY does not prove a human is typing: an AI or script able to drive your terminal (PTY automation) can approve; keep the human CLI out of the AI's reach. Concurrent modification of `known_hosts` by other programs is detected on a best-effort basis (fail closed), not prevented. Legacy `ssh-rsa` (SHA-1) host keys are not supported. SSH features not handled (certificates/`@cert-authority`, `KnownHostsCommand`, DNS-based host keys, shared or pattern host entries) fail closed or fall back to manual recovery. (Fixed in Step 5.3.3a: managed terminals now verify the jump hop strictly too.) Telnet-over-SSH-tunnel host-key registration and replacement are disabled. Verified only against isolated local OpenSSH servers, not against real routers or a real jump server.
 
 ## 12. Candidate / commit boundary
 

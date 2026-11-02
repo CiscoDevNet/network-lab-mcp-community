@@ -52,6 +52,14 @@ Network Lab MCP is **not** a network-engineering reasoning model, a fixed test-s
 
 > **Safety boundary:** the candidate/commit model protects Network Lab MCP's *managed lab definitions and selections*. It does **not** automatically make device CLI commands read-only or require human approval before every command sent by an AI client. Configure client permissions and use an isolated lab accordingly.
 
+### Built on Proven Tools
+
+Network Lab MCP follows a lightweight, composable design: **reuse established tools for network connectivity and terminal management, and build the AI-oriented engineering layer on top**. Rather than implementing its own SSH or Telnet stack or terminal-session manager, it orchestrates **OpenSSH**, **tmux**, and a local **Telnet client** where legacy access is required.
+
+OpenSSH handles SSH transport and authentication; tmux provides persistent, observable terminal sessions; and Telnet supports legacy lab devices. Network Lab MCP adds logical device resolution, private connection handling, session lifecycle and safety checks, topology discovery, and reusable engineering context. The AI client supplies reasoning; the engineer retains operational judgment and control.
+
+This approach avoids reinventing mature protocols, but still requires careful integration around SSH host keys, jump-hop behavior, terminal ownership, and failure handling. See [Connection architecture](docs/connection_architecture.md) for the internal design and trade-offs.
+
 ### A deliberately small MCP interface
 
 Network Lab MCP exposes exactly **seven MCP tools**:
@@ -331,7 +339,7 @@ Restart Codex after changing its configuration. AI-client configuration and appr
 | `Device 'Router1' is not present in access-info` | The active topology and active access-info have different device inventories. Add an authorized connection definition or select the intended definitions **in the human CLI**; never guess credentials. |
 | Discovery connects but produces zero managed links | Check whether observed neighbors are actually registered as managed devices. Unresolved LLDP/CDP neighbors do not become guessed topology links. |
 | Jump-host password prompt is rejected | Check the running version, private access-info selection, prompt/host identity, and authentication configuration. Do not disable fail-closed checks to force access. |
-| Host key verification failed | Verify the jump-server/target identity and trusted host keys through an approved process. **Never use `StrictHostKeyChecking=no` as a workaround.** |
+| Host key verification failed | The key of the jump server or target is not registered or has changed. Verify its identity through a trusted channel, then register it with `discover topology` from an interactive terminal (or manually with `ssh`). Managed terminals never register keys. **Never use `StrictHostKeyChecking=no` as a workaround.** |
 
 **Important: topology and access-info are independently selected.** A topology can contain `Router2` while the selected access-info only contains `Router1` and `LegacyRouter`. In that case, opening `Router2` must fail rather than discovering or guessing its credentials. Discovery can create a topology *definition* without automatically making it the active topology. The second selection/commit step matters; see the example below.
 
@@ -401,6 +409,16 @@ access-info example_lab
 
 Add the credentials through the private configuration workflow when needed. This example is not a claim that those documentation-only addresses are reachable. The active topology must also use the exact logical device IDs `Router1` and `LegacyRouter` for AI terminal access.
 
+### SSH host keys in `discover topology` (human CLI only)
+
+When you run `discover topology` from an interactive terminal, Network Lab MCP manages SSH host keys for every SSH hop (the target and, for ProxyJump, the jump server):
+
+- **Already registered and matching:** nothing is asked; Discovery continues.
+- **Not registered:** you are asked for the expected key type (`ED25519`, `ECDSA` or `RSA`) and its `SHA256:` fingerprint, obtained from the device console or another trusted source (for a jump server, run `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` there; ECDSA and RSA host keys also exist). Only if the key the host actually presents is exactly that key does OpenSSH register it.
+- **Changed:** the connection stops. You may choose to review replacement: the new key is verified on a throw-away copy of `known_hosts`, a backup of the old file is saved, only that host's entries are removed, and the new key is registered after a second exact match.
+
+This is available only in the human CLI. Without an interactive terminal, `discover topology` is strict: an unknown or changed key stops it and nothing is registered. MCP tools and managed terminals cannot approve, remove or update host keys; they verify every SSH hop strictly (target and jump server) and refuse unknown or changed keys. See [SECURITY.md](SECURITY.md) and [docs/cli_reference.md](docs/cli_reference.md).
+
 ### Validation and security status
 
 On **November 2, 2026**, macOS real-lab E2E checks succeeded for an SSH-enabled IOS XR device and a legacy Telnet-only IOS device, both through an SSH jump server: managed terminal open, authentication, read-only `show` commands, response retrieval, simultaneous sessions, independent closure, and final cleanup. Discovery also connected through both methods and collected LLDP/CDP observations. This is **specific observed coverage**, not a claim that all macOS/Telnet/OpenSSH combinations, unexpected disconnects, or restart/fault conditions have been tested.
@@ -410,6 +428,8 @@ On **November 2, 2026**, macOS real-lab E2E checks succeeded for an SSH-enabled 
 - Local port forwarding through `127.0.0.1` is not a process-level access-control boundary.
 - Private device and jump-server passwords are resolved internally; they must not be put in AI prompts, published logs, or repository examples.
 - SSH host-key verification must remain enabled. Unknown/mismatched host keys require deliberate verification, not automatic bypass.
+
+**Not yet validated in a real lab:** that E2E check predates the SSH host-key management and the strict per-hop `ProxyCommand` described above. Those were tested against isolated loopback OpenSSH servers and fakes only. Registration and replacement of host keys, jump-server password authentication during registration, updating a real `known_hosts`, and Linux have **not** been exercised against real routers or a real jump server; repeat the managed-terminal and Discovery checks before relying on them.
 
 ## Example: discovering and selecting a topology
 
@@ -516,6 +536,7 @@ See [SECURITY.md](SECURITY.md) for the complete trust model and vulnerability re
 - Editable checkout required; no standard non-editable/wheel installation.
 - `access-info` is edited through structured CLI commands, not the external YAML editor.
 - SSH jump-server support is limited to one hop; Telnet-through-jump requires a compatible local Telnet client.
+- Host keys must be registered before use: managed terminals refuse unknown or changed keys. Registration and replacement exist only in the interactive `discover topology`, and are disabled for Telnet-over-SSH tunnels (register the jump-server key manually). Legacy `ssh-rsa` (SHA-1) host keys are not supported.
 - Scenario/Reference schemas are intentionally flexible; only `topology <name>` asks for confirmation on a case-only near-duplicate; on case-insensitive filesystems (default macOS) a case-only alias of an existing definition is refused for every definition kind.
 - The November 2026 macOS E2E check covers specific SSH and Telnet lab paths, not all disconnect/fault/restart scenarios, operating-system releases, or device types; newly added jump workflows have not been fully revalidated on Ubuntu.
 - Full cross-vendor operation and all forms of autonomous deployment are not claimed or validated.
@@ -546,6 +567,7 @@ network-lab-mcp/
 │   │   ├── vibe-coding-vs-vibe-networking.webp
 │   │   └── network-lab-mcp-configuration-model.webp
 │   ├── architecture.md
+│   ├── connection_architecture.md
 │   ├── mcp_tools.md
 │   ├── cli_reference.md
 │   └── scenario_format.md
@@ -565,6 +587,7 @@ Avoid `--showlocals` when tests could access real credentials.
 ## Documentation
 
 - [Architecture and configuration model](docs/architecture.md)
+- [Connection architecture: OpenSSH, tmux, and Telnet](docs/connection_architecture.md)
 - [MCP tool contract](docs/mcp_tools.md)
 - [Human CLI reference](docs/cli_reference.md)
 - [Scenario and Reference format](docs/scenario_format.md)

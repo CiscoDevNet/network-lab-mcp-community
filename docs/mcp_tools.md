@@ -183,7 +183,7 @@ This active-topology-membership restriction is a separate code path from
 Discovery: `discover topology`'s private bootstrap connectivity (which does
 automate login, only for its own temporary sessions) never requires
 active-topology membership and is never reachable through this tool — see
-[architecture.md](architecture.md#discovery-bootstrap-session-namespace).
+[architecture.md](architecture.md#structurally-separate-session-namespaces).
 
 **Error behavior**: raises a tool error (fail closed, never a silent guess)
 when:

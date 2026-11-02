@@ -65,7 +65,8 @@ def test_ipv6_jump_is_bracketed_single_argv_element():
         {"transport": "ssh", "address": "2001:db8::2", "username": "u",
          "jump_host_config": {"address": "2001:db8::1", "username": "j"}}
     )
-    assert "j@[2001:db8::1]:22" in cmd and cmd.count("-J") == 1
+    proxy = next(a for a in cmd if a.startswith("ProxyCommand="))
+    assert "j@2001:db8::1" in proxy and "-p 22" in proxy and "-J" not in cmd and "-W %h:%p" in proxy
 
 
 def test_commit_validation_rejects_unsafe_access_info(lab_root):
@@ -104,8 +105,6 @@ def test_telnet_via_jump_guard_is_off_and_not_overridable(monkeypatch):
     cfg = {"transport": "telnet", "address": "192.0.2.20", "jump_host_config": {"address": "192.0.2.10"}}
     with pytest.raises(terminal.TerminalError, match="telnet via jump host is not enabled"):
         terminal._build_transport_command(cfg)
-    with pytest.raises(terminal.TerminalError, match="telnet via jump host is not enabled"):
-        terminal._build_transport_command(cfg, accept_new_host_keys=True)
 
 
 def test_guard_does_not_touch_other_transports():
