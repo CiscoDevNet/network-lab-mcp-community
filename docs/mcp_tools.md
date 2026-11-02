@@ -202,6 +202,12 @@ when:
 - the device references a `jump_host` that does not exist in the same
   access-info definition;
 - authentication definitively fails or is rejected (either transport);
+- the connection ends before login completes (for example a refused
+  connection or an unresolvable name): the error reports the exit status
+  only, the exited session is kept so `terminal_read()` shows why, and the
+  next `terminal_open()` reconnects;
+- an existing session was created by an older version and cannot be verified
+  as safe (close it with `terminal_close()` first);
 - the device's transport is unsupported, the required `ssh`/`telnet` binary
   is unavailable, or the device name cannot be mapped to a valid session
   name.
@@ -266,9 +272,31 @@ already-open session does not stay usable if the active topology changes to
 no longer include this device — use `terminal_close()` and reopen it (or
 switch the active topology back) instead.
 
+**Important behavior — disconnect safety**: input is only ever delivered to
+the device's own transport (`ssh`/`telnet`). The transport is the session's
+main process, so once it ends there is no local shell for later input to
+reach; `terminal_send()` also checks the session before sending and refuses
+it with one of these stable reasons:
+
+- `session exited` — the SSH/Telnet connection has ended (for example `exit`,
+  an idle timeout, a network failure, or a failed connection attempt). Use
+  `terminal_read()` for the final output, then `terminal_close()` or
+  `terminal_open()` to reconnect.
+- `session identity mismatch` / `session identity could not be verified` —
+  the session's pane is not the one recorded when it was created (including
+  a session created by an older version). Close it and open it again.
+- `session is not ready yet` — the session has not finished starting.
+- `session state unavailable` — the session state could not be determined;
+  nothing is sent (fail closed).
+
+Input that is sent while a session is still waiting at a login prompt,
+host-key confirmation, or similar interactive step is unaffected: those
+sessions are alive and ready.
+
 **Error behavior**: raises a tool error when the device is not present in
 the active topology, the device's session does not exist (call
-`terminal_open()` first), or an unsupported key name is given in `keys`.
+`terminal_open()` first), the session is refused for one of the reasons
+above, or an unsupported key name is given in `keys`.
 
 ## terminal_read()
 
@@ -320,6 +348,14 @@ the active topology, or the device's session does not exist.
   ]
 }
 ```
+
+`state` is one of:
+
+- `running` — the connection process is alive;
+- `exited` — the SSH/Telnet connection has ended; the final output is still
+  readable with `terminal_read()`, `terminal_send()` is refused, and
+  `terminal_open()` reconnects with a new session;
+- `unknown` — tmux could not report the state.
 
 **Usage example**: call this to see which devices already have an open
 session before deciding whether to call `terminal_open()` again, or to find
@@ -389,3 +425,14 @@ a stale session cannot silently continue being driven after the topology
 changed out from under it. `terminal_list()`/`terminal_close()` stay
 unrestricted on purpose: a stale session must remain discoverable and
 closeable, or it could never be cleaned up.
+
+
+### Jump hosts and `terminal_open`
+
+For an ssh device with a jump host, `terminal_open` completes the jump-server
+and target password prompts privately (once each). Telnet devices with a jump
+host are opened as one logical session (internal SSH tunnel + telnet); `terminal_list` shows one entry,
+`terminal_close` ends both, and `terminal_send` is refused once either ends. Errors are stable strings such as
+`telnet client not found`, `host key verification failed`, `jump host authentication failed`,
+`tunnel ownership could not be verified`, `telnet via jump host is not enabled`. The tool set is unchanged
+(seven tools).

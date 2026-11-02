@@ -221,6 +221,109 @@ password prompt from the jump host is not answered automatically, and a prompt
 that cannot be attributed to the target or the jump host fails closed. Jump
 host entries are part of private access-info and are not returned over MCP.
 
+### Disconnect safety and the jump-host boundary
+
+When an SSH/Telnet connection ends (exit, idle timeout, network failure, a
+failed connection attempt), input sent afterwards through `terminal_send`
+must never be executed by a local shell. A managed session's transport is
+the pane's main process, so no local shell remains; the session becomes an
+`exited` pane that `terminal_send` refuses. This protects the machine running
+Network Lab MCP.
+
+The guarantee holds for the connections Network Lab MCP starts: direct SSH,
+Telnet, and the single-hop OpenSSH `-J` ProxyJump, where the jump host only
+forwards the connection and no interactive jump-host shell exists. It does
+**not** cover a nested connection started from an interactive shell on a
+jump host (for example `ssh jump` and then `ssh router`): if the inner
+connection ended, input could reach the jump host's shell. That form is not
+supported. A future form could start the inner connection with
+`exec ssh ...` / `exec telnet ...` on the jump host so that no shell remains.
+Custom `ProxyCommand` or `ssh` wrapper settings in the operator's own
+`~/.ssh/config` are outside this guarantee.
+
+### Jump-server authentication (SSH ProxyJump)
+
+- A jump-host password prompt is answered by Network Lab MCP only when a
+  jump-host password is configured, the prompt names exactly the configured
+  jump user and address (`user@host's password:` or `(user@host) Password:`),
+  and the two hops are distinguishable. Aliases, mismatching users, bare
+  `Password:` prompts and identical user/host on both hops fail closed.
+- Each hop's password is sent at most once; a re-prompt is
+  `jump host authentication failed`. The pane and process state are
+  re-verified immediately before sending. This reduces, but cannot eliminate,
+  the window between prompt detection and sending.
+- When a jump-host password is configured the ssh command gets
+  `-o StrictHostKeyChecking=yes`: unknown or changed host keys fail instead
+  of being accepted, whatever the user's `ssh_config` says. Whether OpenSSH
+  applies that option to the `-J` hop was not verified against a real ssh.
+- Discovery answers the jump-host prompt through the same stage logic (`terminal.authenticate_bootstrap_jump_stage`), once per hop, with the same attribution and re-prompt fail-closed rules. With a jump-host password configured Discovery also uses `StrictHostKeyChecking=yes` instead of `accept-new`, so an unknown or changed key fails Discovery. Verified only against local fakes; real OpenSSH prompt text and whether the option reaches the `-J` hop are unverified.
+- Access-info address, port and username are validated at commit and again
+  when the argv is built; unsafe values never reach ssh/telnet.
+
+### Telnet via jump host (SSH local port forward)
+
+`transport: telnet` with `jump-host` runs as one logical Managed Terminal made
+of two tmux sessions, both created through the Option C launch path (read
+gate, `exec`, remain-on-exit, pane identity, pipe-pane logging):
+
+- tunnel session `network-lab-tunnel-<device>`: `ssh -N -T -o ExitOnForwardFailure=yes
+  -o ForwardAgent=no -o ForwardX11=no -o PermitLocalCommand=no
+  -o StrictHostKeyChecking=yes -o ControlMaster=no -o ControlPath=none
+  -o LogLevel=VERBOSE -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+  -L 127.0.0.1:<dynamic-port>:<device>:<port> <jump>`. It is internal: no MCP
+  tool derives its name, `terminal_list` never shows it, `terminal_send`
+  cannot reach it. The 15 s x 3 keepalive (about 45 s) ends a silently dead
+  tunnel without being so tight that a slow link drops it.
+- device session `network-lab-device-<device>`: the telnet client, resolved once
+  to an absolute path (`telnet client not found` before any tunnel starts),
+  run as `<abs telnet> -K -E 127.0.0.1 <port>` (no auto-login, no escape).
+
+Order of events: jump password answered once on the tunnel pane (prompt must
+name the configured jump user and address, the pane is re-verified right
+before sending) -> *ready* only when the pane is alive, OpenSSH logged
+`Authenticated to ...`, and the managed ssh pid is the sole owner of the
+`127.0.0.1:<port>` listener -> telnet starts -> an `lsof -nP -F` snapshot must
+show exactly one ESTABLISHED connection from the telnet pid to the port whose
+server side is owned by the managed ssh pid -> the same 4-tuple and owners must
+verify again immediately before the username and again before the password.
+Any lsof failure, parse failure, missing/duplicate socket, foreign owner or
+changed 4-tuple sends nothing and closes both sessions. `ControlMaster=no`
+plus `ControlPath=none` means a foreign ControlMaster cannot own the listener.
+A port conflict (explicit bind error only) is retried on a new port up to 3
+times; each retry is a new ssh and answers the jump password once again.
+
+Lifecycle: the telnet client ending closes the tunnel (lazily, on the next
+list/read/send/open); a dead tunnel makes `terminal_send` refuse and
+`terminal_list` report `exited`; `terminal_close` closes the device session and
+then the tunnel session by their derived names, and refuses a tunnel session
+whose recorded pane identity cannot be verified. After an MCP restart the tmux
+options (pane id/pid, tunnel port, tunnel session name) allow reuse of a
+healthy logical session after re-verifying ownership; a tunnel session without a
+matching device session is an orphan that is neither reused nor deleted
+automatically (`terminal_close` is the explicit way out).
+
+The runtime guard is the code constant `terminal.TELNET_VIA_JUMP_ENABLED`
+(True since the safety tests in `tests/test_telnet_via_jump.py` pass). No
+environment variable, YAML, CLI command or MCP argument reads or changes it.
+Set it to False to disable the path again; Direct SSH, ProxyJump and direct
+Telnet are unaffected. Discovery uses the same code with its own namespaces
+(`network-lab-discovery-*`, `network-lab-discoverytunnel-*`) and never reuses a
+session.
+
+Not verified against real software (only Fakes were used): OpenSSH's actual
+prompt text and `Authenticated to` log line at LogLevel=VERBOSE, whether
+`StrictHostKeyChecking=yes` is applied to the `-J` hop, real `lsof` behaviour
+for `ssh -L` listeners, the macOS telnet client's option negotiation
+(`-K`, NEW-ENVIRON), and real devices. Treat this as a CONDITIONAL GO until a
+separately authorised test against a local throwaway sshd.
+
+Residual risks: Telnet is plaintext between the jump host and the device;
+loopback is not per-process access control (any local process can connect, and
+the ownership proofs narrow but cannot eliminate the window between a proof
+and the next keystroke); lsof snapshots are not atomic; a tunnel left running
+after a crash holds a loopback port and a jump-host connection until closed;
+the tunnel pane's log lives in the device's log directory as a separate file.
+
 ## 12. Candidate / commit boundary
 
 The CLI's candidate/commit model governs **Network Lab MCP's own definitions

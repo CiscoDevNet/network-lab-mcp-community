@@ -129,7 +129,7 @@ def _script_prompt_then_failure(tmp_path, user_host: str = "r1-user@192.0.2.20")
 
 
 def _script_never_prompts(tmp_path) -> list[str]:
-    return _write_script(tmp_path, "never_prompts.sh", "echo already-connected\nsleep 5\n")
+    return _write_script(tmp_path, "never_prompts.sh", "echo already-connected\nsleep 30\n")
 
 
 def _script_prompt_then_hangs(tmp_path, user_host: str = "r1-user@192.0.2.20") -> list[str]:
@@ -138,7 +138,7 @@ def _script_prompt_then_hangs(tmp_path, user_host: str = "r1-user@192.0.2.20") -
 
 
 def _script_harmless(tmp_path, text: str = "hello", name: str = "harmless.sh") -> list[str]:
-    return _write_script(tmp_path, name, f"echo {text}\nsleep 5\n")
+    return _write_script(tmp_path, name, f"echo {text}\nsleep 30\n")
 
 
 def _monkeypatch_transport(monkeypatch, command: list[str]) -> None:
@@ -234,7 +234,7 @@ def test_missing_configured_password_fails_safely(monkeypatch, tmp_path):
     with pytest.raises(terminal.TerminalError) as excinfo:
         terminal.open_device_terminal("R1", _NO_PASSWORD_CONFIG)
     assert "no private password is configured" in str(excinfo.value)
-    assert len(sent) == 1  # only the fake ssh command itself was ever typed in
+    assert len(sent) == 0  # nothing was typed: the transport is the pane's own process, started directly
 
 
 # ==========================================================================

@@ -69,14 +69,15 @@ def test_device_jump_host_missing_reference_rejected(lab_root):
         lab.write_access_info("jh", data, lab_root)
 
 
-def test_device_telnet_with_jump_host_rejected(lab_root):
+def test_device_telnet_with_jump_host_commit_allowed_but_runtime_guarded(lab_root):
+    # Commit-time acceptance is separate from runtime use: the runtime guard
+    # (terminal.TELNET_VIA_JUMP_ENABLED) is what keeps the path closed.
     data = {
         "name": "jh",
         "jump_hosts": {"jump1": {"type": "host", "transport": "ssh"}},
         "devices": {"R1": {"type": "iosxr", "transport": "telnet", "jump_host": "jump1"}},
     }
-    with pytest.raises(lab.LabConfigError, match="transport is not 'ssh'"):
-        lab.write_access_info("jh", data, lab_root)
+    lab.write_access_info("jh", data, lab_root)
 
 
 def test_no_multi_hop_support_is_structurally_impossible(lab_root, monkeypatch):
@@ -300,7 +301,12 @@ def test_terminal_open_proxyjump_argv_construction_unaffected_by_discovery_login
     jump/target credentials, exactly as before this fix."""
     transport, command = terminal._build_transport_command(_TARGET_CONFIG)
     assert transport == "ssh"
-    assert command == ["ssh", "-J", "jump-user@192.0.2.10:22", "-p", "22", "target-user@192.0.2.11"]
+    # The jump host has a configured password (answered by Network Lab MCP),
+    # so host keys must already be trusted: StrictHostKeyChecking=yes.
+    assert command == [
+        "ssh", "-o", "StrictHostKeyChecking=yes", "-J", "jump-user@192.0.2.10:22", "-p", "22",
+        "target-user@192.0.2.11",
+    ]
     joined = " ".join(command)
     assert "target-secret" not in joined
     assert "jump-secret" not in joined
@@ -369,8 +375,12 @@ def test_terminal_open_proxyjump_jump_host_prompt_never_sends_target_password(mo
         tmp_path, "jump_prompt.sh", 'printf "jump-user@192.0.2.10'"'"'s password: "\nsleep 5\n'
     )
     monkeypatch.setattr(terminal, "_build_transport_command", lambda config, **kw: ("ssh", script))
+    # Without a configured jump-host password the jump prompt still fails
+    # closed (with a configured one it is answered once; see
+    # tests/test_jump_authentication.py).
+    no_jump_password = {**_TARGET_CONFIG, "jump_host_config": {"address": "192.0.2.10", "username": "jump-user"}}
     with pytest.raises(terminal.TerminalError, match="jump-host password prompt"):
-        terminal.open_device_terminal("PJ1", _TARGET_CONFIG)
+        terminal.open_device_terminal("PJ1", no_jump_password)
     # The newly-created, now-unusable session is cleaned up -- and,
     # either way, neither credential ever appears anywhere observable.
     assert "PJ1" not in {s["device"] for s in terminal.list_device_sessions()}

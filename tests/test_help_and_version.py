@@ -54,13 +54,22 @@ def test_help_claude_mentions_seven_tools_and_privacy_boundary():
     assert "logical device id" in text.lower()
     # Reuses the exact, already-verified registration command from
     # README.md rather than inventing a new one.
-    assert "claude mcp add network-lab -s user -- /path/to/network-lab-mcp/.venv/bin/network-lab-mcp" in text
+    assert (
+        "claude mcp add --scope user network-lab -- \\\n"
+        "         /absolute/path/to/network-lab-mcp/.venv/bin/network-lab-mcp"
+    ) in text
+    assert "$(pwd)/.venv/bin/network-lab-mcp" in text
+    assert "run_cli.sh" in text
 
 
 def test_help_claude_command_matches_readme():
     with open("README.md", encoding="utf-8") as handle:
         readme = handle.read()
-    assert "claude mcp add network-lab -s user -- \\\n  /path/to/network-lab-mcp/.venv/bin/network-lab-mcp" in readme
+    # README and `help claude` use the same registration form (user scope,
+    # `--scope user`, executable path on the continuation line).
+    assert "claude mcp add --scope user network-lab -- \\\n" in readme
+    assert ".venv/bin/network-lab-mcp" in readme
+    assert "claude mcp add network-lab -s user" not in readme
 
 
 def test_help_workflow_lists_ordered_steps_and_mentions_discovery():
@@ -122,8 +131,8 @@ def test_render_version_info_contains_all_required_fields():
 def test_version_matches_expected_release_metadata():
     import network_lab_mcp
 
-    assert network_lab_mcp.__version__ == "0.2.0"
-    assert network_lab_mcp.__release_date__ == "2026-10-03"
+    assert network_lab_mcp.__version__ == "0.3.0"
+    assert network_lab_mcp.__release_date__ == "unreleased"
     assert network_lab_mcp.__author__ == "Eitaro Uemura"
     assert network_lab_mcp.__license__ == "Apache-2.0"
 
@@ -275,7 +284,7 @@ def test_pyproject_declares_expected_version_author_license():
     # this project supports >=3.10); a plain text check is enough here.
     with open("pyproject.toml", encoding="utf-8") as handle:
         text = handle.read()
-    assert 'version = "0.2.0"' in text
+    assert 'version = "0.3.0"' in text
     assert 'name = "Eitaro Uemura"' in text
     assert 'license = "Apache-2.0"' in text
     assert 'license-files = ["LICENSE"]' in text

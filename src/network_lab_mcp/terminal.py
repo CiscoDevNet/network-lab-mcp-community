@@ -34,9 +34,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from network_lab_mcp import connection_safety, tunnel_safety
+
 TMUX_SOCKET_NAME = "network-lab-mcp"
 
 PRODUCTION_PREFIX = "network-lab-device-"
+TUNNEL_PREFIX = "network-lab-tunnel-"
+DISCOVERY_TUNNEL_PREFIX = "network-lab-discoverytunnel-"
 VALIDATION_PREFIX = "network-lab-validation-"
 DISCOVERY_PREFIX = "network-lab-discovery-"
 BOOTSTRAP_SESSION = "network-lab-bootstrap-initializer"
@@ -147,7 +151,7 @@ def resolve_target_password_prompt(device_config: dict, prompt_line: str) -> Pas
     if not jump_host_config:
         return PasswordPromptOutcome(True, device_config.get("password") or "", "")
 
-    hop_match = SSH_HOP_PASSWORD_PROMPT_RE.search(prompt_line)
+    hop_match = SSH_HOP_PASSWORD_PROMPT_RE.search(prompt_line) or SSH_KBDINT_PASSWORD_PROMPT_RE.search(prompt_line)
     hop_host = hop_match.group("hop_host") if hop_match else None
     if hop_host is not None and hop_host == str(device_config.get("address")):
         return PasswordPromptOutcome(True, device_config.get("password") or "", "")
@@ -194,6 +198,22 @@ def derive_discovery_session_name(device_name: str) -> str:
 
 def is_production_session(session_name: str) -> bool:
     return session_name.startswith(PRODUCTION_PREFIX)
+
+
+def derive_tunnel_session_name(device_name: str) -> str:
+    """Internal-only SSH tunnel session of a Telnet-via-jump logical session.
+    Never addressable by any MCP tool (those derive production names only)."""
+    _validate_identifier(device_name, "Device name")
+    return f"{TUNNEL_PREFIX}{device_name}"
+
+
+def derive_discovery_tunnel_session_name(device_name: str) -> str:
+    _validate_identifier(device_name, "Device name")
+    return f"{DISCOVERY_TUNNEL_PREFIX}{device_name}"
+
+
+def is_tunnel_session(session_name: str) -> bool:
+    return session_name.startswith((TUNNEL_PREFIX, DISCOVERY_TUNNEL_PREFIX))
 
 
 def is_validation_session(session_name: str) -> bool:
@@ -293,18 +313,143 @@ def _create_session(session_name: str, command: list[str]) -> None:
     _run(["new-session", "-d", "-s", session_name, "-x", "220", "-y", "50", *command])
 
 
+# Fixed, non-interactive launch wrapper for managed (production and
+# Discovery) sessions. The transport (ssh/telnet) is started with `exec`, so
+# it *replaces* this shell as the pane's main process: when the transport
+# ends, the pane has no process left and tmux keeps it as a dead pane
+# (remain-on-exit) -- there is no local shell for later input to reach.
+#
+# The `read` is a start gate. It keeps the pane blocked until the caller has
+# finished configuring it (remain-on-exit, logging, identity), so a transport
+# that fails immediately can neither die unlogged nor die before
+# remain-on-exit applies. Every way of leaving this script other than a
+# successful `exec` is an `exit` with a non-zero status (missing command,
+# gate EOF, SIGHUP, exec failure); none leaves an interactive shell. The
+# command to run is passed as separate argv words (never re-parsed by a
+# shell), and carries no secrets.
+_LAUNCH_GATE_SCRIPT = (
+    '[ "$#" -ge 1 ] || exit 2; '
+    "IFS= read -r _nlm_gate || exit 1; "
+    'exec "$@"; '
+    "exit 127"
+)
+
+# tmux user options recording the identity of a managed session's one pane.
+# Window-scoped so they resolve from the pane itself.
+_OPT_PANE_ID = "@nlm_pane_id"
+_OPT_PANE_PID = "@nlm_pane_pid"
+_OPT_GATE = "@nlm_gate"
+_GATE_OPEN = "open"
+_GATE_PENDING = "pending"
+
+
+def _release_launch_gate(pane_id: str) -> None:
+    """Internal only: lets the launch wrapper proceed to `exec` the transport.
+    Never reachable from terminal_send(): that path refuses a pane whose
+    gate is not open."""
+    _run(["send-keys", "-t", pane_id, "--", "Enter"])
+
+
 def _create_logged_session(session_name: str, device_name: str, command: list[str]) -> None:
-    """Like _create_session(), but attaches persistent pipe-pane logging
-    (see _start_session_logging()) *before* `command` (the ssh/telnet
-    transport) starts running in the pane, instead of after -- so the
-    earliest output (login banner, host-key message, the very first
-    password prompt) is never lost to the log. The pane starts with a
-    neutral shell (no command), which is what gives logging a moment to
-    attach before `command` is typed into it and executed."""
-    _run(["new-session", "-d", "-s", session_name, "-x", "220", "-y", "50"])
-    _start_session_logging(session_name, device_name)
-    _send_literal_text(session_name, shlex.join(command))
-    _send_enter(session_name)
+    """Create a managed session whose pane runs the transport directly.
+
+    Order matters and is deliberate:
+      1. remain-on-exit is already on server-wide (_ensure_tmux_environment)
+         and is set again on the new window before anything can exit;
+      2. the pane starts blocked on the launch gate, running no transport;
+      3. its identity is recorded and persistent pipe-pane logging is
+         attached and verified -- so the very first output (banner, host-key
+         text, the first password prompt, or an immediate failure message)
+         is logged;
+      4. only then is the gate released and the transport `exec`ed.
+    Any failure before the gate opens removes the half-built session."""
+    if not command or not all(isinstance(word, str) and word for word in command):
+        raise TerminalError("Invalid transport command.")
+    result = _run(
+        [
+            "new-session", "-d", "-s", session_name, "-x", "220", "-y", "50",
+            "-P", "-F", "#{pane_id} #{pane_pid}",
+            "/bin/sh", "-c", _LAUNCH_GATE_SCRIPT, "sh", *command,
+        ]
+    )
+    try:
+        fields = result.stdout.split()
+        if len(fields) != 2 or not fields[0].startswith("%"):
+            raise TerminalError("Could not determine the new session's pane identity.")
+        pane_id, pane_pid = fields
+        _run(["set-option", "-w", "-t", pane_id, "remain-on-exit", "on"])
+        if _run(["show-options", "-w", "-v", "-t", pane_id, "remain-on-exit"]).stdout.strip() != "on":
+            raise TerminalError("remain-on-exit could not be enabled for the new session.")
+        _run(["set-option", "-w", "-t", pane_id, _OPT_PANE_ID, pane_id])
+        _run(["set-option", "-w", "-t", pane_id, _OPT_PANE_PID, pane_pid])
+        _run(["set-option", "-w", "-t", pane_id, _OPT_GATE, _GATE_PENDING])
+        _start_session_logging(session_name, device_name)
+        if _run(["display-message", "-p", "-t", pane_id, "#{pane_pipe}"]).stdout.strip() != "1":
+            raise TerminalError("Terminal logging could not be enabled for the new session.")
+        _release_launch_gate(pane_id)
+        _run(["set-option", "-w", "-t", pane_id, _OPT_GATE, _GATE_OPEN])
+    except BaseException:
+        _kill_session_if_exists(session_name)
+        raise
+
+
+def _pane_exit_description(session_name: str) -> str:
+    result = _run(
+        ["list-panes", "-t", session_name, "-F", "#{pane_dead_status}|#{pane_dead_signal}"], check=False
+    )
+    status, _, signal = (result.stdout.strip().splitlines() or ["|"])[0].partition("|")
+    if signal:
+        return f"signal {signal}"
+    return f"exit status {status}" if status else "exit status unknown"
+
+
+def _managed_pane_target(session_name: str) -> str:
+    """Verify, fail-closed, that `session_name` is a managed session whose
+    single pane is the one recorded at creation, is alive, and has been
+    released from its start gate; return that pane's id for use as the tmux
+    target (so a later session of the same name can never be addressed by
+    mistake). Raises TerminalError with a stable reason otherwise."""
+    result = _run(
+        [
+            "list-panes", "-t", session_name, "-F",
+            f"#{{pane_id}}\t#{{pane_dead}}\t#{{{_OPT_PANE_ID}}}\t#{{{_OPT_GATE}}}",
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        if not _session_exists(session_name):
+            raise TerminalError(f"Session '{session_name}' does not exist.")
+        raise TerminalError(f"Session '{session_name}': session state unavailable.")
+    rows = [line.split("\t") for line in result.stdout.splitlines() if line.strip()]
+    if len(rows) != 1 or len(rows[0]) != 4:
+        raise TerminalError(f"Session '{session_name}': session identity mismatch (unexpected pane layout).")
+    pane_id, dead, recorded_id, gate = rows[0]
+    if not recorded_id:
+        raise TerminalError(
+            f"Session '{session_name}': session identity could not be verified (it was not created by this "
+            "version). Close it with terminal_close() and open it again."
+        )
+    if recorded_id != pane_id:
+        raise TerminalError(f"Session '{session_name}': session identity mismatch.")
+    if dead == "1":
+        raise TerminalError(
+            f"Session '{session_name}': session exited ({_pane_exit_description(session_name)}). "
+            "Use terminal_read() for the final output, then terminal_close() or terminal_open() to reconnect."
+        )
+    if gate != _GATE_OPEN:
+        raise TerminalError(f"Session '{session_name}': session is not ready yet.")
+    return pane_id
+
+
+def _send_target(session_name: str) -> str:
+    """tmux target for sending input to `session_name`: managed namespaces
+    (production and Discovery) go through the identity/liveness guard;
+    local validation sessions keep their plain session target."""
+    if is_production_session(session_name) or is_discovery_session(session_name) or is_tunnel_session(session_name):
+        return _managed_pane_target(session_name)
+    if not _session_exists(session_name):
+        raise TerminalError(f"Session '{session_name}' does not exist.")
+    return session_name
 
 
 def _kill_session_if_exists(session_name: str) -> None:
@@ -387,8 +532,7 @@ def _send_text_via_stdin(session_name: str, buffer_name: str, text: str) -> None
     it from `session_name`), so concurrent text delivery on different
     sessions never shares a buffer. Neither this function's own tmux
     command lines nor its error messages ever include `text` itself."""
-    if not _session_exists(session_name):
-        raise TerminalError(f"Session '{session_name}' does not exist.")
+    target = _send_target(session_name)
     load_result = subprocess.run(
         _tmux_base() + ["load-buffer", "-b", buffer_name, "-"],
         input=text,
@@ -398,7 +542,7 @@ def _send_text_via_stdin(session_name: str, buffer_name: str, text: str) -> None
     if load_result.returncode != 0:
         raise TerminalError(f"tmux command failed: load-buffer: {load_result.stderr.strip()}")
     try:
-        _run(["paste-buffer", "-r", "-d", "-b", buffer_name, "-t", session_name])
+        _run(["paste-buffer", "-r", "-d", "-b", buffer_name, "-t", target])
     finally:
         # Defensive: `paste-buffer -d` already deletes the buffer itself on
         # success; this only guards against a buffer surviving if
@@ -428,8 +572,7 @@ def _send_secret_text(session_name: str, secret: str) -> None:
 
 
 def _send_special_keys(session_name: str, keys: list[str]) -> None:
-    if not _session_exists(session_name):
-        raise TerminalError(f"Session '{session_name}' does not exist.")
+    target = _send_target(session_name)
     for key in keys:
         if key not in _SPECIAL_KEYS and not _SPECIAL_KEY_RE.match(key):
             raise TerminalError(
@@ -437,13 +580,12 @@ def _send_special_keys(session_name: str, keys: list[str]) -> None:
                 "or 'C-<letter>' / 'M-<letter>' combinations."
             )
     if keys:
-        _run(["send-keys", "-t", session_name, "--", *keys])
+        _run(["send-keys", "-t", target, "--", *keys])
 
 
 def _send_enter(session_name: str) -> None:
-    if not _session_exists(session_name):
-        raise TerminalError(f"Session '{session_name}' does not exist.")
-    _run(["send-keys", "-t", session_name, "--", "Enter"])
+    target = _send_target(session_name)
+    _run(["send-keys", "-t", target, "--", "Enter"])
 
 
 def _capture_pane(session_name: str, lines: int) -> str:
@@ -517,6 +659,9 @@ def _wait_for_pattern(
             tail = "\n".join(last_text.splitlines()[-5:])
             if pattern.search(tail):
                 return last_text
+        if _pane_state(session_name) == "exited":
+            # The transport has ended and nothing further can ever appear.
+            raise TerminalError(f"Session '{session_name}' exited while waiting for expected output.")
         time.sleep(poll_interval)
     raise TerminalError(
         f"Timed out after {timeout:.0f}s waiting for expected output on session '{session_name}'."
@@ -673,8 +818,11 @@ def _device_has_active_session(device_name: str) -> bool:
     device currently exists -- the only two session kinds that ever
     attach persistent logging. This is a read-only check: it never
     creates, closes, or otherwise touches either session."""
-    return _session_exists(derive_production_session_name(device_name)) or _session_exists(
-        derive_discovery_session_name(device_name)
+    return (
+        _session_exists(derive_production_session_name(device_name))
+        or _session_exists(derive_discovery_session_name(device_name))
+        or _session_exists(derive_tunnel_session_name(device_name))
+        or _session_exists(derive_discovery_tunnel_session_name(device_name))
     )
 
 
@@ -881,28 +1029,60 @@ def _require_binary(binary: str) -> None:
         raise TerminalError(f"The '{binary}' binary is not available on this system.")
 
 
+# Runtime guard (code constant, deliberately not readable from environment
+# variables, YAML, the CLI or MCP arguments): telnet through an SSH jump host
+# (local port forwarding) stays disabled until the tunnel safety acceptance
+# conditions in SECURITY.md ("Telnet via jump host") are all met.
+TELNET_VIA_JUMP_ENABLED = True
+
+
 def _ssh_target(config: dict, default_port: int) -> tuple[str, int]:
     address = config.get("address")
     if not address:
         raise TerminalError("Device configuration is missing 'address'.")
     port = config.get("port", default_port)
     username = config.get("username")
+    try:
+        connection_safety.validate_host(address)
+        port = connection_safety.validate_port(port)
+        if username:
+            connection_safety.validate_username(username)
+    except connection_safety.UnsafeConnectionValue as exc:
+        raise TerminalError(f"Unsafe connection value in device configuration: {exc}.") from None
     target = f"{username}@{address}" if username else str(address)
     return target, port
 
 
 def _build_transport_command(device_config: dict, *, accept_new_host_keys: bool = False) -> tuple[str, list[str]]:
-    """`accept_new_host_keys` is used only by the private Discovery bootstrap
-    path (see discovery.py): Discovery is an unattended flow with no human
-    to answer an interactive host-key confirmation prompt, so it passes
-    `-o StrictHostKeyChecking=accept-new` (still verifies/records the key,
-    it just never blocks on a fresh one) instead of automating that prompt.
-    terminal_open() (human/Claude-driven) never sets this -- its behavior is
-    completely unchanged."""
+    """Single lowest-level builder of every ssh/telnet argv (managed
+    terminals and Discovery both pass through here), so the telnet-via-jump
+    guard below cannot be bypassed by a different caller.
+
+    `accept_new_host_keys` is used only by the private Discovery bootstrap
+    path (see discovery.py). terminal_open() never sets it.
+
+    When the jump host has a configured password the jump-server login is
+    answered by Network Lab MCP, so host keys are then required to be
+    already trusted (`StrictHostKeyChecking=yes`); a user ssh_config of
+    accept-new/no is not inherited for that path."""
     transport = device_config.get("transport")
     address = device_config.get("address")
     if not address:
         raise TerminalError("Device configuration is missing 'address'.")
+    jump_host = device_config.get("jump_host_config")
+
+    if transport == "telnet":
+        if jump_host is not None:
+            # Stage C (tunnel pane, TCP ownership check) is not wired in, so
+            # even with the constant True this path stays closed.
+            raise TerminalError("telnet via jump host is not enabled")
+        try:
+            connection_safety.validate_host(address)
+            port = connection_safety.validate_port(device_config.get("port", 23))
+        except connection_safety.UnsafeConnectionValue as exc:
+            raise TerminalError(f"Unsafe connection value in device configuration: {exc}.") from None
+        _require_binary("telnet")
+        return transport, ["telnet", str(address), str(port)]
 
     if transport == "ssh":
         _require_binary("ssh")
@@ -911,23 +1091,17 @@ def _build_transport_command(device_config: dict, *, accept_new_host_keys: bool 
             ["-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=no"] if accept_new_host_keys else []
         )
         command = ["ssh", *host_key_opts, "-p", str(port), target]
-
-        jump_host = device_config.get("jump_host_config")
         if jump_host is not None:
-            # Single-hop native OpenSSH ProxyJump (-J jump-target:jump-port).
-            # No shell-hop automation: OpenSSH itself opens the second SSH
-            # connection through the first, and the tmux pane still just
-            # sees one interactive session to read/send against, exactly
-            # like a direct connection.
             jump_target, jump_port = _ssh_target(jump_host, 22)
-            command = ["ssh", *host_key_opts, "-J", f"{jump_target}:{jump_port}", "-p", str(port), target]
-
+            user, _, host = jump_target.rpartition("@")
+            jump_spec = f"{user + '@' if user else ''}{connection_safety.format_host_for_jump(host)}:{jump_port}"
+            if jump_host.get("password"):
+                # Network Lab MCP answers the jump login, so host keys must
+                # already be trusted -- Discovery's accept-new is not used.
+                host_key_opts = (["-o", "BatchMode=no"] if accept_new_host_keys else []) + [
+                    "-o", "StrictHostKeyChecking=yes"]
+            command = ["ssh", *host_key_opts, "-J", jump_spec, "-p", str(port), target]
         return transport, command
-
-    if transport == "telnet":
-        _require_binary("telnet")
-        port = device_config.get("port", 23)
-        return transport, ["telnet", str(address), str(port)]
 
     raise TerminalError(f"Unsupported transport '{transport}'. Expected 'ssh' or 'telnet'.")
 
@@ -1000,6 +1174,61 @@ def _last_nonblank_line(text: str) -> str:
     return ""
 
 
+# OpenSSH keyboard-interactive prompt: "(user@host) Password:".
+SSH_KBDINT_PASSWORD_PROMPT_RE = re.compile(r"\((?P<hop_user>[^\s@)]+)@(?P<hop_host>[^\s)]+)\) [Pp]assword:\s*$")
+
+
+def _classify_proxyjump_prompt(device_config: dict, prompt_line: str) -> str:
+    """'target', 'jump' or 'unknown' for one password-prompt line of a
+    ProxyJump connection. Both the prompting user and host must equal the
+    configured values of exactly one hop; anything else (aliases, a hop
+    whose user/host equals the other hop's, no user@host in the prompt) is
+    'unknown' and the caller fails closed. A matching name is necessary but
+    not proof of the authenticating process, hence the surrounding
+    send-once and pre-send re-verification."""
+    jump = device_config.get("jump_host_config") or {}
+    match = SSH_HOP_PASSWORD_PROMPT_RE.search(prompt_line) or SSH_KBDINT_PASSWORD_PROMPT_RE.search(prompt_line)
+    if not match:
+        return "unknown"
+    seen = (match.group("hop_user"), match.group("hop_host"))
+
+    def same(cfg: dict) -> bool:
+        user = cfg.get("username")
+        return str(cfg.get("address")) == seen[1] and (not user or str(user) == seen[0])
+
+    is_target, is_jump = same(device_config), same(jump)
+    if is_target == is_jump:  # neither, or indistinguishable
+        return "unknown"
+    return "target" if is_target else "jump"
+
+
+def _wait_after_jump_password(session_name: str, prev_text: str, prompt_line: str) -> tuple[str, str]:
+    """Poll after the jump-server password was sent. Returns (text, outcome)
+    with outcome 'reprompt' (same prompt again: rejected), 'failure' (an
+    OpenSSH failure message appeared), 'next_prompt' (a different password
+    prompt, i.e. the target hop) or 'quiet' (no further signal in the
+    bounded wait, e.g. the target uses key auth). Occurrence counts, not
+    mere presence, are compared so the already-visible old prompt is never
+    mistaken for a new one."""
+    prev_prompts = prev_text.splitlines().count(prompt_line)
+    prev_failures = len(_SSH_AUTH_FAILURE_RE.findall(prev_text))
+    deadline = time.monotonic() + _MANAGED_AUTH_SETTLE_TIMEOUT_SECONDS
+    text = prev_text
+    while time.monotonic() < deadline:
+        text = _capture_pane(session_name, HISTORY_LIMIT)
+        if text.splitlines().count(prompt_line) > prev_prompts:
+            return text, "reprompt"
+        if len(_SSH_AUTH_FAILURE_RE.findall(text)) > prev_failures:
+            return text, "failure"
+        last = _last_nonblank_line(text)
+        if last != prompt_line and PASSWORD_PROMPT_RE.search(last):
+            return text, "next_prompt"
+        if _pane_state(session_name) == "exited":
+            return text, "failure"
+        time.sleep(0.3)
+    return text, "quiet"
+
+
 def _authenticate_managed_session(
     device_name: str, device_config: dict, session_name: str, *, newly_created: bool
 ) -> None:
@@ -1015,6 +1244,36 @@ def _authenticate_managed_session(
         _authenticate_managed_ssh_session(device_name, device_config, session_name, newly_created=newly_created)
     elif transport == "telnet":
         _authenticate_managed_telnet_session(device_name, device_config, session_name, newly_created=newly_created)
+
+
+def _authenticate_jump_stage(
+    device_name: str, device_config: dict, session_name: str, text: str, last_line: str
+) -> tuple[str, str]:
+    """Answer the jump-server password prompt (stage 1 of ProxyJump) at most
+    once, only when the prompt is attributable to the jump hop and a jump
+    password is configured. Returns the (text, last_line) to continue the
+    target stage with. Every failure is a sanitized TerminalError."""
+    kind = _classify_proxyjump_prompt(device_config, last_line)
+    if kind != "jump":
+        return text, last_line  # target prompt (or unknown, rejected by the caller)
+    password = (device_config.get("jump_host_config") or {}).get("password")
+    if not password:
+        raise TerminalError(
+            f"Device '{device_name}': cannot safely complete authentication (jump-host password prompt). "
+            "Configure a jump-host password, key/agent-based authentication, or answer the prompt manually."
+        )
+    # Re-verify immediately before sending: the pane must still end in the
+    # very same prompt and the process must still be alive (TOCTOU).
+    if _pane_state(session_name) == "exited" or _last_nonblank_line(_capture_pane(session_name, HISTORY_LIMIT)) != last_line:
+        raise TerminalError(f"Device '{device_name}': session state changed before jump host authentication.")
+    _send_secret_text(session_name, password)  # send-once: no code path below sends again
+    _send_enter(session_name)
+    new_text, outcome = _wait_after_jump_password(session_name, text, last_line)
+    if outcome in ("reprompt", "failure"):
+        raise TerminalError(f"Device '{device_name}': jump host authentication failed.")
+    if outcome == "quiet":
+        return new_text, ""  # no further prompt: the jump login progressed
+    return new_text, _last_nonblank_line(new_text)
 
 
 def _authenticate_managed_ssh_session(
@@ -1049,6 +1308,15 @@ def _authenticate_managed_ssh_session(
     last_line = _last_nonblank_line(text)
     if not PASSWORD_PROMPT_RE.search(last_line):
         return  # not currently at a password prompt -- nothing to do
+
+    if device_config.get("jump_host_config"):
+        text, last_line = _authenticate_jump_stage(device_name, device_config, session_name, text, last_line)
+        if not PASSWORD_PROMPT_RE.search(last_line):
+            return  # jump login done and no target password prompt followed (key auth etc.)
+        if _classify_proxyjump_prompt(device_config, last_line) != "target":
+            raise TerminalError(
+                f"Device '{device_name}': cannot safely complete authentication (ambiguous password prompt)."
+            )
 
     outcome = resolve_target_password_prompt(device_config, last_line)
     if not outcome.matched_target:
@@ -1134,7 +1402,7 @@ _TELNET_MANAGED_LOGIN_WAIT_RE = re.compile(
 
 
 def _authenticate_managed_telnet_session(
-    device_name: str, device_config: dict, session_name: str, *, newly_created: bool
+    device_name: str, device_config: dict, session_name: str, *, newly_created: bool, pre_send_check=None
 ) -> None:
     """Complete classic-IOS-style Telnet login for a managed session if
     (and only if) it is currently, or imminently, sitting at a bounded
@@ -1173,6 +1441,8 @@ def _authenticate_managed_telnet_session(
                 f"Device '{device_name}': a username prompt appeared but no username is configured "
                 "in the active access-info definition."
             )
+        if pre_send_check is not None:
+            pre_send_check()
         _send_secret_text(session_name, str(username))
         _send_enter(session_name)
         try:
@@ -1202,6 +1472,8 @@ def _authenticate_managed_telnet_session(
         )
 
     baseline = text
+    if pre_send_check is not None:
+        pre_send_check()
     _send_secret_text(session_name, outcome.password)
     _send_enter(session_name)
     try:
@@ -1226,6 +1498,343 @@ def _authenticate_managed_telnet_session(
     # relies on (see IOS_STYLE_PROMPT_RE's own docstring) -- rather than
     # assuming an unrecognized response means success.
     raise TerminalError(f"Device '{device_name}': did not reach a device prompt after Telnet login.")
+
+
+# --------------------------------------------------------------------------
+# Telnet over an SSH local port forward (logical session = tunnel + device)
+#
+# One logical Managed Terminal ("PAGENT") is two tmux sessions, each created
+# through _create_logged_session() so Option C applies to both (read gate,
+# exec, remain-on-exit, pane identity, pipe-pane logging):
+#   network-lab-tunnel-<device>  `ssh -N -T -L 127.0.0.1:<port>:<host>:<port>`
+#   network-lab-device-<device>  `<abs telnet> -K -E 127.0.0.1 <port>`
+# Only the device session is reachable from the MCP tools; the tunnel session
+# is internal (its own namespace, derived name, never listed). The jump host
+# password is answered once on the tunnel pane after verifying the prompt;
+# Telnet credentials are sent only after the established TCP connection is
+# proven (twice, plus before each credential) to run between the managed
+# telnet process and the managed ssh process.
+# --------------------------------------------------------------------------
+
+_OPT_TUNNEL_PORT = "@nlm_tunnel_port"
+_OPT_TUNNEL_SESSION = "@nlm_tunnel_session"
+
+_TUNNEL_AUTH_TIMEOUT_SECONDS = 30
+_TUNNEL_LISTEN_TIMEOUT_SECONDS = 10
+_TUNNEL_CONNECT_TIMEOUT_SECONDS = 10
+_TUNNEL_POLL_SECONDS = 0.2
+_TUNNEL_PORT_ATTEMPTS = 3
+# Dead-peer detection: 3 missed 15s probes (~45s) ends a silently dead tunnel.
+_TUNNEL_SERVER_ALIVE_INTERVAL = 15
+_TUNNEL_SERVER_ALIVE_COUNT = 3
+
+_TUNNEL_AUTHENTICATED_RE = re.compile(r"Authenticated to \S+|Authentication succeeded", re.IGNORECASE)
+_TUNNEL_HOSTKEY_FAILURE_RE = re.compile(
+    r"Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|No (?:\w+ )?host key", re.IGNORECASE
+)
+_TUNNEL_PORT_CONFLICT_RE = re.compile(
+    r"Address already in use|cannot listen to port|Could not request local forwarding", re.IGNORECASE
+)
+
+
+def _resolve_ssh_binary() -> str:
+    found = shutil.which("ssh")
+    if not found:
+        raise TerminalError("The 'ssh' binary is not available on this system.")
+    return found
+
+
+def _build_tunnel_command(device_config: dict, local_port: int) -> list[str]:
+    jump = device_config["jump_host_config"]
+    jump_target, jump_port = _ssh_target(jump, 22)
+    try:
+        dest_host = connection_safety.validate_host(device_config.get("address"))
+        dest_port = connection_safety.validate_port(device_config.get("port", 23))
+    except connection_safety.UnsafeConnectionValue as exc:
+        raise TerminalError(f"Unsafe connection value in device configuration: {exc}.") from None
+    forward = f"127.0.0.1:{int(local_port)}:{connection_safety.format_host_for_jump(dest_host)}:{dest_port}"
+    return [
+        _resolve_ssh_binary(), "-N", "-T",
+        "-o", "ExitOnForwardFailure=yes", "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
+        "-o", "PermitLocalCommand=no", "-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=no",
+        "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "LogLevel=VERBOSE",
+        "-o", f"ServerAliveInterval={_TUNNEL_SERVER_ALIVE_INTERVAL}",
+        "-o", f"ServerAliveCountMax={_TUNNEL_SERVER_ALIVE_COUNT}",
+        "-L", forward, "-p", str(jump_port), jump_target,
+    ]
+
+
+def _pane_option(session_name: str, option: str) -> str:
+    return _run(["show-options", "-w", "-v", "-q", "-t", session_name, option], check=False).stdout.strip()
+
+
+def _verified_pane_pid(session_name: str) -> int:
+    """PID of the session's pane process (the exec'd ssh/telnet), verified
+    against tmux's live value so a reused/foreign pane is never trusted."""
+    pane_id = _managed_pane_target(session_name)
+    recorded = _pane_option(session_name, _OPT_PANE_PID)
+    live = _run(["display-message", "-p", "-t", pane_id, "#{pane_pid}"]).stdout.strip()
+    if not recorded or recorded != live or not live.isdigit():
+        raise TerminalError(f"Session '{session_name}': session identity mismatch.")
+    return int(live)
+
+
+def _close_tunnel_session(tunnel_session: str) -> bool:
+    """Close the tunnel session only if its recorded pane identity verifies;
+    an unidentifiable session in this namespace is refused, never killed."""
+    if not _session_exists(tunnel_session):
+        return False
+    pane = _run(["list-panes", "-t", tunnel_session, "-F", "#{pane_id}"], check=False).stdout.split()
+    if len(pane) != 1 or _pane_option(tunnel_session, _OPT_PANE_ID) != pane[0]:
+        raise TerminalError(
+            f"Tunnel session '{tunnel_session}' cannot be identified as managed; it was left untouched."
+        )
+    _run(["kill-session", "-t", tunnel_session])
+    return True
+
+
+def _tunnel_alive(tunnel_session: str) -> bool:
+    return _session_exists(tunnel_session) and _pane_state(tunnel_session) == "running"
+
+
+def _reap_tunnel_if_device_ended(session_name: str) -> None:
+    """Telnet ended -> the tunnel must end too (its log is already on disk)."""
+    tunnel = _pane_option(session_name, _OPT_TUNNEL_SESSION) if _session_exists(session_name) else ""
+    if tunnel and _pane_state(session_name) == "exited":
+        try:
+            _close_tunnel_session(tunnel)
+        except TerminalError:
+            pass
+
+
+def _logical_state(session_name: str) -> str:
+    _reap_tunnel_if_device_ended(session_name)
+    state = _pane_state(session_name)
+    tunnel = _pane_option(session_name, _OPT_TUNNEL_SESSION)
+    if state == "running" and tunnel and not _tunnel_alive(tunnel):
+        return "exited"
+    return state
+
+
+def _require_logical_session_alive(session_name: str) -> None:
+    _reap_tunnel_if_device_ended(session_name)
+    tunnel = _pane_option(session_name, _OPT_TUNNEL_SESSION) if _session_exists(session_name) else ""
+    if tunnel and _pane_state(session_name) == "running" and not _tunnel_alive(tunnel):
+        raise TerminalError(f"Session '{session_name}': tunnel ended; the session can no longer be used.")
+
+
+def _tunnel_failure_reason(text: str) -> str:
+    if _TUNNEL_HOSTKEY_FAILURE_RE.search(text):
+        return "host key verification failed"
+    if re.search(r"Permission denied|Authentication failed", text, re.IGNORECASE):
+        return "jump host authentication failed"
+    return "tunnel establishment failed"
+
+
+class _PortConflict(Exception):
+    pass
+
+
+def _establish_tunnel(device_name: str, device_config: dict, tunnel_session: str, port: int) -> int:
+    """Create the tunnel session and drive it to *ready*. Returns the tunnel
+    (ssh) pid. Ready = pane alive, SSH authentication logged, and the managed
+    ssh pid is the sole owner of the 127.0.0.1:<port> listener."""
+    jump = device_config["jump_host_config"]
+    _create_logged_session(tunnel_session, device_name, _build_tunnel_command(device_config, port))
+    try:
+        _run(["set-option", "-w", "-t", tunnel_session, _OPT_TUNNEL_PORT, str(port)])
+        pid = _verified_pane_pid(tunnel_session)
+        deadline = time.monotonic() + _TUNNEL_AUTH_TIMEOUT_SECONDS
+        sent_prompt = ""
+        authenticated = False
+        while time.monotonic() < deadline:
+            text = _capture_pane(tunnel_session, HISTORY_LIMIT)
+            if _pane_state(tunnel_session) == "exited":
+                text = _capture_pane(tunnel_session, HISTORY_LIMIT)  # final output (the pane may have just died)
+                if _TUNNEL_PORT_CONFLICT_RE.search(text) and authenticated_text(text):
+                    raise _PortConflict()
+                raise TerminalError(f"Device '{device_name}': {_tunnel_failure_reason(text)}.")
+            if _TUNNEL_HOSTKEY_FAILURE_RE.search(text):
+                raise TerminalError(f"Device '{device_name}': host key verification failed.")
+            last = _last_nonblank_line(text)
+            if PASSWORD_PROMPT_RE.search(last):
+                if sent_prompt:
+                    if text.splitlines().count(sent_prompt) > 1 or last != sent_prompt:
+                        raise TerminalError(f"Device '{device_name}': jump host authentication failed.")
+                else:
+                    _answer_tunnel_prompt(device_name, jump, tunnel_session, last)
+                    sent_prompt = last
+            if authenticated_text(text):
+                authenticated = True
+                try:
+                    tunnel_safety.verify_listener(
+                        tunnel_safety.run_lsof(), tunnel_port=port, managed_ssh_pids=frozenset({pid})
+                    )
+                    return pid
+                except tunnel_safety.TunnelSafetyError:
+                    pass  # not listening yet (or not provably ours): keep waiting, fail at the deadline
+            time.sleep(_TUNNEL_POLL_SECONDS)
+        raise TerminalError(
+            f"Device '{device_name}': "
+            + ("tunnel ownership could not be verified." if authenticated else "tunnel establishment failed.")
+        )
+    except BaseException:
+        try:
+            _close_tunnel_session(tunnel_session)
+        except TerminalError:
+            pass
+        raise
+
+
+def authenticated_text(text: str) -> bool:
+    return bool(_TUNNEL_AUTHENTICATED_RE.search(text))
+
+
+def _answer_tunnel_prompt(device_name: str, jump: dict, tunnel_session: str, prompt_line: str) -> None:
+    """The only prompt a direct `ssh jump` can show is the jump hop's own.
+    Require its identity to match the configured jump user/address, then send
+    the jump password exactly once (the caller never calls this twice)."""
+    match = SSH_HOP_PASSWORD_PROMPT_RE.search(prompt_line) or SSH_KBDINT_PASSWORD_PROMPT_RE.search(prompt_line)
+    user = jump.get("username")
+    if not match or match.group("hop_host") != str(jump.get("address")) or (
+        user and match.group("hop_user") != str(user)
+    ):
+        raise TerminalError(
+            f"Device '{device_name}': cannot safely complete authentication (ambiguous password prompt)."
+        )
+    password = jump.get("password")
+    if not password:
+        raise TerminalError(
+            f"Device '{device_name}': cannot safely complete authentication (jump-host password prompt)."
+        )
+    if _pane_state(tunnel_session) == "exited" or _last_nonblank_line(
+        _capture_pane(tunnel_session, HISTORY_LIMIT)
+    ) != prompt_line:
+        raise TerminalError(f"Device '{device_name}': session state changed before jump host authentication.")
+    _send_secret_text(tunnel_session, password)
+    _send_enter(tunnel_session)
+
+
+def _open_telnet_via_jump(
+    device_name: str, device_config: dict, session_name: str, *, discovery: bool = False
+) -> dict:
+    """Caller holds the device session lock. `discovery=True` uses the
+    Discovery namespaces and never reuses an existing session."""
+    if not TELNET_VIA_JUMP_ENABLED:
+        raise TerminalError("telnet via jump host is not enabled")
+    try:
+        client = tunnel_safety.resolve_telnet_client()
+    except tunnel_safety.TunnelSafetyError as exc:
+        raise TerminalError(str(exc)) from None  # before any tunnel is started
+    jump = device_config["jump_host_config"]
+    if str(jump.get("address")) == str(device_config.get("address")):
+        raise TerminalError(f"Device '{device_name}': jump host and device must differ.")
+    tunnel_session = (
+        derive_discovery_tunnel_session_name(device_name) if discovery else derive_tunnel_session_name(device_name)
+    )
+    auth_config = {k: v for k, v in device_config.items() if k != "jump_host_config"}
+
+    if discovery:
+        _close_session(session_name)  # Discovery never reuses a stale bootstrap session
+        _close_tunnel_session(tunnel_session)
+    if _session_exists(session_name):
+        if _logical_state(session_name) == "running" and _pane_option(session_name, _OPT_TUNNEL_SESSION) == tunnel_session:
+            return _reuse_telnet_via_jump(device_name, auth_config, session_name, tunnel_session)
+        # Ended (or tunnel-less) logical session: reconnect from scratch.
+        _close_session(session_name)
+        _close_tunnel_session(tunnel_session)
+    elif _session_exists(tunnel_session):
+        raise TerminalError(
+            f"Device '{device_name}': an orphaned tunnel session exists and was not reused; "
+            "close it with terminal_close() first."
+        )
+
+    bootstrap_created = _ensure_tmux_environment()
+    last_error: Exception | None = None
+    for _ in range(_TUNNEL_PORT_ATTEMPTS):
+        port = tunnel_safety.allocate_loopback_port()
+        try:
+            tunnel_pid = _establish_tunnel(device_name, device_config, tunnel_session, port)
+            break
+        except _PortConflict as exc:
+            last_error = exc
+            continue
+        finally:
+            if bootstrap_created:
+                _kill_session_if_exists(BOOTSTRAP_SESSION)
+    else:
+        raise TerminalError(f"Device '{device_name}': tunnel establishment failed (local port conflict).") from last_error
+
+    try:
+        _create_logged_session(session_name, device_name, tunnel_safety.telnet_argv(client, port))
+        _run(["set-option", "-w", "-t", session_name, _OPT_TUNNEL_SESSION, tunnel_session])
+        device_pid = _verified_pane_pid(session_name)
+        check = _make_ownership_check(port, tunnel_pid, device_pid)
+        _wait_for_established_connection(session_name, check)
+        _authenticate_managed_telnet_session(
+            device_name, auth_config, session_name, newly_created=True, pre_send_check=check
+        )
+        if _pane_state(session_name) == "exited":
+            raise TerminalError(
+                f"Device '{device_name}': target unreachable or connection ended before login completed "
+                f"({_pane_exit_description(session_name)}). Use terminal_read() for the final output."
+            )
+    except BaseException:
+        _close_session(session_name)
+        _close_tunnel_session(tunnel_session)
+        raise
+    return {"device": device_name, "session_name": session_name, "reused": False, "transport": "telnet"}
+
+
+def _make_ownership_check(port: int, tunnel_pid: int, device_pid: int):
+    """Returns a callable that re-proves, from a fresh lsof snapshot, that the
+    telnet process's connection is the very same 4-tuple (and ssh owner) as
+    every earlier proof. Any difference or doubt raises."""
+    state: dict = {}
+
+    def check() -> None:
+        try:
+            ident = tunnel_safety.verify_tcp_ownership(
+                tunnel_safety.run_lsof(),
+                tunnel_port=port,
+                managed_ssh_pids=frozenset({tunnel_pid}),
+                client_pids=frozenset({device_pid}),
+            )
+        except tunnel_safety.TunnelSafetyError:
+            raise TerminalError("tunnel ownership could not be verified") from None
+        if state.setdefault("identity", ident) != ident:
+            raise TerminalError("tunnel ownership could not be verified")
+
+    return check
+
+
+def _wait_for_established_connection(session_name: str, check) -> None:
+    deadline = time.monotonic() + _TUNNEL_CONNECT_TIMEOUT_SECONDS
+    last: TerminalError | None = None
+    while time.monotonic() < deadline:
+        try:
+            check()
+            return
+        except TerminalError as exc:
+            last = exc
+        if _pane_state(session_name) == "exited":
+            raise TerminalError("target unreachable: connection ended immediately")
+        time.sleep(_TUNNEL_POLL_SECONDS)
+    raise last or TerminalError("tunnel ownership could not be verified")
+
+
+def _reuse_telnet_via_jump(device_name: str, auth_config: dict, session_name: str, tunnel_session: str) -> dict:
+    port_text = _pane_option(tunnel_session, _OPT_TUNNEL_PORT)
+    if not port_text.isdigit():
+        raise TerminalError(f"Device '{device_name}': session identity could not be verified.")
+    tunnel_pid = _verified_pane_pid(tunnel_session)
+    device_pid = _verified_pane_pid(session_name)
+    check = _make_ownership_check(int(port_text), tunnel_pid, device_pid)
+    _wait_for_established_connection(session_name, check)
+    _authenticate_managed_telnet_session(
+        device_name, auth_config, session_name, newly_created=False, pre_send_check=check
+    )
+    return {"device": device_name, "session_name": session_name, "reused": True, "transport": "telnet"}
 
 
 # --------------------------------------------------------------------------
@@ -1256,7 +1865,23 @@ def open_device_terminal(device_name: str, device_config: dict) -> dict:
     reused)."""
     session_name = derive_production_session_name(device_name)
     with _session_lock(session_name):
+        if device_config.get("transport") == "telnet" and device_config.get("jump_host_config") is not None:
+            return _open_telnet_via_jump(device_name, device_config, session_name)
         transport, command = _build_transport_command(device_config)
+        if _session_exists(session_name):
+            state = _pane_state(session_name)
+            if state == "exited":
+                # The connection already ended: never hand a dead pane back
+                # as a reusable session. Its transcript is already persisted
+                # by the session's own pipe-pane log; remove it and reconnect.
+                _close_session(session_name)
+            elif state == "running" and not _run(
+                ["show-options", "-w", "-v", "-q", "-t", session_name, _OPT_PANE_ID], check=False
+            ).stdout.strip():
+                raise TerminalError(
+                    f"Device '{device_name}': an existing session was created by an older version and cannot be "
+                    "verified as safe. Close it with terminal_close() and open it again."
+                )
         reused = _ensure_managed_session(session_name, command, log_device_name=device_name)
         try:
             _authenticate_managed_session(device_name, device_config, session_name, newly_created=not reused)
@@ -1264,6 +1889,16 @@ def open_device_terminal(device_name: str, device_config: dict) -> dict:
             if not reused:
                 _close_session(session_name)
             raise
+        if not reused and _pane_state(session_name) == "exited":
+            # The transport ended before a usable session existed (refused
+            # connection, unresolvable name, immediate failure). The exited
+            # pane is kept so terminal_read() can show why; sending to it is
+            # refused, and the next terminal_open() reconnects.
+            raise TerminalError(
+                f"Device '{device_name}': the connection ended before login completed "
+                f"({_pane_exit_description(session_name)}). Use terminal_read() for the final output, "
+                "then terminal_open() to retry."
+            )
         return {
             "device": device_name,
             "session_name": session_name,
@@ -1277,6 +1912,7 @@ def send_to_device(device_name: str, text: str | None, keys: list[str] | None, e
     (in that order). Serialized per-device: see open_device_terminal()."""
     session_name = derive_production_session_name(device_name)
     with _session_lock(session_name):
+        _require_logical_session_alive(session_name)
         if text:
             _send_literal_text(session_name, text)
         if keys:
@@ -1291,6 +1927,7 @@ def read_device(device_name: str, lines: int = DEFAULT_READ_LINES) -> dict:
     Serialized per-device: see open_device_terminal()."""
     session_name = derive_production_session_name(device_name)
     with _session_lock(session_name):
+        _reap_tunnel_if_device_ended(session_name)
         content = _capture_pane(session_name, lines)
         return {"device": device_name, "session_name": session_name, "content": content}
 
@@ -1310,7 +1947,7 @@ def list_device_sessions() -> list[dict]:
             {
                 "device": production_device_name(session_name),
                 "session_name": session_name,
-                "state": _pane_state(session_name),
+                "state": _logical_state(session_name),
             }
         )
     return sessions
@@ -1322,6 +1959,7 @@ def close_device_terminal(device_name: str) -> dict:
     session_name = derive_production_session_name(device_name)
     with _session_lock(session_name):
         closed = _close_session(session_name)
+        _close_tunnel_session(derive_tunnel_session_name(device_name))
         return {"device": device_name, "session_name": session_name, "closed": closed}
 
 
@@ -1468,6 +2106,25 @@ def list_discovery_device_ids() -> list[str]:
 # --------------------------------------------------------------------------
 
 
+def authenticate_bootstrap_jump_stage(device_name: str, device_config: dict, text: str, last_line: str) -> tuple[str, str]:
+    """Discovery entry to the managed jump-server stage logic
+    (_authenticate_jump_stage: attribution by user+address, pre-send
+    re-verification, one send). Returns (text, last_line) to continue the
+    target stage with; last_line == "" means no further prompt appeared. A
+    remaining password prompt must be attributable to the target itself.
+    Raises TerminalError (sanitized) otherwise."""
+    session_name = derive_discovery_session_name(device_name)
+    with _session_lock(session_name):
+        text, last_line = _authenticate_jump_stage(device_name, device_config, session_name, text, last_line)
+        if last_line and PASSWORD_PROMPT_RE.search(last_line) and _classify_proxyjump_prompt(
+            device_config, last_line
+        ) != "target":
+            raise TerminalError(
+                f"Device '{device_name}': cannot safely complete authentication (ambiguous password prompt)."
+            )
+        return text, last_line
+
+
 def open_bootstrap_terminal(device_name: str, device_config: dict) -> dict:
     """Open a private, temporary session for Discovery only. Always creates
     a fresh session (Discovery never reuses a prior bootstrap session -- see
@@ -1480,6 +2137,9 @@ def open_bootstrap_terminal(device_name: str, device_config: dict) -> dict:
     Discovery collector thread never contends with another device's."""
     session_name = derive_discovery_session_name(device_name)
     with _session_lock(session_name):
+        if device_config.get("transport") == "telnet" and device_config.get("jump_host_config") is not None:
+            result = _open_telnet_via_jump(device_name, device_config, session_name, discovery=True)
+            return {"device": device_name, "session_name": session_name, "transport": result["transport"]}
         _close_session(session_name)  # never reuse a stale bootstrap session
         transport, command = _build_transport_command(device_config, accept_new_host_keys=True)
         _ensure_managed_session(session_name, command, log_device_name=device_name)
@@ -1489,6 +2149,7 @@ def open_bootstrap_terminal(device_name: str, device_config: dict) -> dict:
 def send_to_bootstrap(device_name: str, text: str | None, keys: list[str] | None, enter: bool) -> None:
     session_name = derive_discovery_session_name(device_name)
     with _session_lock(session_name):
+        _require_logical_session_alive(session_name)
         if text:
             _send_literal_text(session_name, text)
         if keys:
@@ -1506,6 +2167,7 @@ def send_secret_to_bootstrap(device_name: str, secret: str) -> None:
     time)."""
     session_name = derive_discovery_session_name(device_name)
     with _session_lock(session_name):
+        _require_logical_session_alive(session_name)
         _send_secret_text(session_name, secret)
         _send_enter(session_name)
 
@@ -1527,7 +2189,9 @@ def read_bootstrap(device_name: str, lines: int = HISTORY_LIMIT) -> str:
 def close_bootstrap_terminal(device_name: str) -> bool:
     session_name = derive_discovery_session_name(device_name)
     with _session_lock(session_name):
-        return _close_session(session_name)
+        closed = _close_session(session_name)
+        _close_tunnel_session(derive_discovery_tunnel_session_name(device_name))
+        return closed
 
 
 # --------------------------------------------------------------------------

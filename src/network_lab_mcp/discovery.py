@@ -171,6 +171,24 @@ def _resolve_login_password(device_id: str, device_config: dict, prompt_line: st
     )
 
 
+def _answer_jump_stage(device_id: str, device_config: dict, text: str, prompt_re: re.Pattern) -> str:
+    """For a ProxyJump device, answer the jump-server password prompt (once,
+    via terminal's shared stage logic) and return the pane text to continue
+    the target stage with. No-op for direct connections."""
+    if not device_config.get("jump_host_config"):
+        return text
+    last_line = _last_nonblank_line(text)
+    if not terminal.PASSWORD_PROMPT_RE.search(last_line):
+        return text
+    try:
+        text, last_line = terminal.authenticate_bootstrap_jump_stage(device_id, device_config, text, last_line)
+    except terminal.TerminalError as exc:
+        raise DiscoveryError(str(exc)) from None
+    if not last_line:  # no further prompt: e.g. key-based target authentication
+        text = terminal.wait_for_bootstrap_pattern(device_id, prompt_re, LOGIN_TIMEOUT_SECONDS)
+    return text
+
+
 def _login(device_id: str, device_config: dict) -> str:
     """Open the bootstrap session, answer at most one password prompt, and
     return the resolved hostname once the IOS XR prompt is seen. Does not
@@ -179,6 +197,7 @@ def _login(device_id: str, device_config: dict) -> str:
     avoids that prompt outright instead)."""
     terminal.open_bootstrap_terminal(device_id, device_config)
     text = terminal.wait_for_bootstrap_pattern(device_id, _LOGIN_WAIT_RE, LOGIN_TIMEOUT_SECONDS)
+    text = _answer_jump_stage(device_id, device_config, text, _IOSXR_PROMPT_RE)
     last_line = _last_nonblank_line(text)
     if terminal.PASSWORD_PROMPT_RE.search(last_line):
         password = _resolve_login_password(device_id, device_config, last_line)
@@ -209,6 +228,7 @@ def _login_ios_style(device_id: str, device_config: dict) -> str:
     IOS/IOS XE login configurations show before "Password:"."""
     terminal.open_bootstrap_terminal(device_id, device_config)
     text = terminal.wait_for_bootstrap_pattern(device_id, _IOS_STYLE_LOGIN_WAIT_RE, LOGIN_TIMEOUT_SECONDS)
+    text = _answer_jump_stage(device_id, device_config, text, _IOS_STYLE_PROMPT_RE)
     last_line = _last_nonblank_line(text)
     if _USERNAME_PROMPT_RE.search(last_line):
         username = device_config.get("username")
