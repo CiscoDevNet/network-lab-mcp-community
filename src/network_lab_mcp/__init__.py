@@ -34,9 +34,9 @@ if __license__ == "unavailable":
 
 # Not a standard packaging metadata field, so pyproject.toml has nowhere to
 # put it; this constant is the single source of truth for it instead of a
-# second copy living in cli/main.py. It stays "unreleased" until the public
-# release date is confirmed; set it to that date (YYYY-MM-DD) at release time.
-__release_date__ = "unreleased"
+# second copy living in cli/main.py. Set it to the release date (YYYY-MM-DD)
+# when a version is released.
+__release_date__ = "2026-11-02"
 
 try:
     # The MCP SDK is a required (never optional) runtime dependency -- see

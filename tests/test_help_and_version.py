@@ -132,7 +132,7 @@ def test_version_matches_expected_release_metadata():
     import network_lab_mcp
 
     assert network_lab_mcp.__version__ == "0.3.0"
-    assert network_lab_mcp.__release_date__ == "unreleased"
+    assert network_lab_mcp.__release_date__ == "2026-11-02"
     assert network_lab_mcp.__author__ == "Eitaro Uemura"
     assert network_lab_mcp.__license__ == "Apache-2.0"
 

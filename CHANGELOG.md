@@ -1,8 +1,6 @@
 # Changelog
 
-## 0.3.0 — Unreleased
-
-The release date is set when v0.3.0 is publicly released.
+## 0.3.0 — 2026-11-02
 
 ### Added
 - **macOS local workstation support:** run Network Lab MCP and the Claude Code MCP registration on macOS; the README

@@ -128,7 +128,7 @@ network-lab# show version
 Network Lab MCP
 
   Version:       0.3.0
-  Release date:  unreleased
+  Release date:  2026-11-02
   Git commit:    abc1234
   Git branch:    main
   Author:        Eitaro Uemura
@@ -151,8 +151,8 @@ network-lab(config)# show version
 - **Release date** is a small constant in `network_lab_mcp/__init__.py`
   (`__release_date__`), since standard packaging metadata has no field for
   it; it is a separate concept from **Version** (a release date is not a
-  version identifier). It reads `unreleased` until the public release date
-  is confirmed, then is set to that date at release time.
+  version identifier). It holds the release date (`YYYY-MM-DD`) of the installed
+  version.
 - **Git commit** and **Git branch** are both resolved dynamically
   (`git rev-parse --short HEAD` / `git rev-parse --abbrev-ref HEAD` against
   the repository checkout) every time the command runs — neither is ever
