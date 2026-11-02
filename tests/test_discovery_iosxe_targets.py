@@ -32,14 +32,14 @@ def _write_access_info(lab_root, devices):
 def test_select_iosxe_targets_filters_by_normalized_type():
     access_data = {
         "devices": {
-            "PAGENT": {"type": "iosxe", "address": "192.0.2.30", "transport": "telnet"},
+            "LegacyRouter": {"type": "iosxe", "address": "192.0.2.30", "transport": "telnet"},
             "R1": {"type": "iosxr", "address": "192.0.2.11", "transport": "ssh"},
             "SRV1": {"type": "host", "address": "192.0.2.40"},
         }
     }
     targets = discovery._select_iosxe_targets(access_data)
-    assert set(targets) == {"PAGENT"}
-    assert targets["PAGENT"]["transport"] == "telnet"
+    assert set(targets) == {"LegacyRouter"}
+    assert targets["LegacyRouter"]["transport"] == "telnet"
 
 
 def test_select_iosxe_targets_empty_when_none_present():
@@ -68,12 +68,12 @@ def _fake_iosxr_collect(device_id, cfg):
     }
 
 
-def _fake_iosxe_collect_pagent(device_id, cfg):
+def _fake_iosxe_collect_legacyrouter(device_id, cfg):
     cdp_header = "Device ID        Local Intrfce     Holdtme    Capability  Platform    Port ID"
     row_r1 = f"{'HOST-R1':<17}{'Gig0/0':<18}{'137':<11}{'R':<12}{'ASR9K Ser':<12}Gi0/0/0/10"
     row_r2 = f"{'HOST-R2':<17}{'Gig0/1':<18}{'137':<11}{'R':<12}{'ASR9K Ser':<12}Gi0/0/0/10"
     return {
-        "hostname": "PAGENT",
+        "hostname": "LegacyRouter",
         "show_version": "x",
         # IOS XE also collects LLDP -- disabled here (the
         # real, documented Cisco text), which must mean zero LLDP
@@ -84,15 +84,15 @@ def _fake_iosxe_collect_pagent(device_id, cfg):
 
 
 def test_iosxe_only_definition_discovers_via_cdp(lab_root, monkeypatch):
-    _write_access_info(lab_root, {"PAGENT": {"type": "iosxe", "address": "192.0.2.30", "transport": "telnet"}})
-    monkeypatch.setattr(discovery, "_bootstrap_collect_iosxe", _fake_iosxe_collect_pagent)
+    _write_access_info(lab_root, {"LegacyRouter": {"type": "iosxe", "address": "192.0.2.30", "transport": "telnet"}})
+    monkeypatch.setattr(discovery, "_bootstrap_collect_iosxe", _fake_iosxe_collect_legacyrouter)
 
     result = discovery.discover_topology(lab_root)
 
     assert result.iosxr_target_count == 0
     assert result.iosxe_target_count == 1
     assert result.connected_count == 1
-    assert result.devices == {"PAGENT": {"type": "iosxe"}}
+    assert result.devices == {"LegacyRouter": {"type": "iosxe"}}
     # LegacyRouter's own CDP neighbors (HOST-R1/-R2) are not managed devices
     # here (only LegacyRouter itself is in this definition), so they stay
     # unresolved -- never auto-created as topology devices.
@@ -113,7 +113,7 @@ def test_mixed_iosxr_and_iosxe_definition_produces_expected_managed_links(lab_ro
             port = "Gig0/0"
         else:
             port = "Gig0/1"
-        row = f"{'PAGENT':<17}{'Gi0/0/0/10':<18}{'144':<11}{'R':<12}{'Cisco 720':<12}{port}"
+        row = f"{'LegacyRouter':<17}{'Gi0/0/0/10':<18}{'144':<11}{'R':<12}{'Cisco 720':<12}{port}"
         unmanaged = "labsw-a07.example.com"
         cont = f"{'':<17}{'Fas 0/0':<18}{'159':<11}{'S I':<12}{'WS-C2960X':<12}Gig 1/0/16"
         return {
@@ -128,14 +128,14 @@ def test_mixed_iosxr_and_iosxe_definition_produces_expected_managed_links(lab_ro
         }
 
     monkeypatch.setattr(discovery, "_bootstrap_collect", fake_iosxr_collect)
-    monkeypatch.setattr(discovery, "_bootstrap_collect_iosxe", _fake_iosxe_collect_pagent)
+    monkeypatch.setattr(discovery, "_bootstrap_collect_iosxe", _fake_iosxe_collect_legacyrouter)
 
     _write_access_info(
         lab_root,
         {
             "R1": {"type": "iosxr", "address": "192.0.2.11", "transport": "ssh"},
             "R2": {"type": "iosxr", "address": "192.0.2.12", "transport": "ssh"},
-            "PAGENT": {"type": "iosxe", "address": "192.0.2.30", "transport": "telnet"},
+            "LegacyRouter": {"type": "iosxe", "address": "192.0.2.30", "transport": "telnet"},
         },
     )
 
@@ -150,14 +150,14 @@ def test_mixed_iosxr_and_iosxe_definition_produces_expected_managed_links(lab_ro
         tuple(sorted(((link.a_device, link.a_interface), (link.b_device, link.b_interface))))
         for link in result.managed_links
     }
-    assert (("PAGENT", "Gig0/0"), ("R1", "Gi0/0/0/10")) in link_pairs
-    assert (("PAGENT", "Gig0/1"), ("R2", "Gi0/0/0/10")) in link_pairs
+    assert (("LegacyRouter", "Gig0/0"), ("R1", "Gi0/0/0/10")) in link_pairs
+    assert (("LegacyRouter", "Gig0/1"), ("R2", "Gi0/0/0/10")) in link_pairs
 
     unresolved_ids = {u.remote_device_id_raw for u in result.unresolved}
     assert "labsw-a07.example.com" in unresolved_ids
     assert "labsw-a07.example.com" not in result.devices
 
-    assert result.devices["PAGENT"]["type"] == "iosxe"
+    assert result.devices["LegacyRouter"]["type"] == "iosxe"
     assert result.devices["R1"]["type"] == "iosxr"
 
 
@@ -173,7 +173,7 @@ def test_only_iosxe_collector_is_invoked_for_iosxe_targets(lab_root, monkeypatch
 
     def fake_iosxe(device_id, cfg):
         iosxe_calls.append(device_id)
-        return _fake_iosxe_collect_pagent(device_id, cfg)
+        return _fake_iosxe_collect_legacyrouter(device_id, cfg)
 
     monkeypatch.setattr(discovery, "_bootstrap_collect", fake_iosxr)
     monkeypatch.setattr(discovery, "_bootstrap_collect_iosxe", fake_iosxe)
@@ -182,11 +182,11 @@ def test_only_iosxe_collector_is_invoked_for_iosxe_targets(lab_root, monkeypatch
         lab_root,
         {
             "R1": {"type": "iosxr", "address": "192.0.2.11", "transport": "ssh"},
-            "PAGENT": {"type": "iosxe", "address": "192.0.2.30", "transport": "telnet"},
+            "LegacyRouter": {"type": "iosxe", "address": "192.0.2.30", "transport": "telnet"},
         },
     )
 
     discovery.discover_topology(lab_root)
 
     assert iosxr_calls == ["R1"]
-    assert iosxe_calls == ["PAGENT"]
+    assert iosxe_calls == ["LegacyRouter"]

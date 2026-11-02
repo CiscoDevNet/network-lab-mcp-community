@@ -334,7 +334,7 @@ def test_ios_type_and_l3_interfaces_survive_candidate_only_then_clear(lab_root, 
         monkeypatch,
         _fake_result(
             devices={
-                "PAGENT": {
+                "LegacyRouter": {
                     "type": "ios",
                     "interfaces": {"GigabitEthernet0/0.2000": {"ipv4_address": "10.20.0.10", "vrf": "tgn1"}},
                 }
@@ -343,8 +343,8 @@ def test_ios_type_and_l3_interfaces_survive_candidate_only_then_clear(lab_root, 
         ),
     )
 
-    assert session.definition_candidate["devices"]["PAGENT"]["type"] == "ios"
-    assert session.definition_candidate["devices"]["PAGENT"]["interfaces"]["GigabitEthernet0/0.2000"] == {
+    assert session.definition_candidate["devices"]["LegacyRouter"]["type"] == "ios"
+    assert session.definition_candidate["devices"]["LegacyRouter"]["interfaces"]["GigabitEthernet0/0.2000"] == {
         "ipv4_address": "10.20.0.10",
         "vrf": "tgn1",
     }
@@ -362,7 +362,7 @@ def test_ios_type_and_l3_interfaces_survive_commit_and_reload(lab_root, monkeypa
         monkeypatch,
         _fake_result(
             devices={
-                "PAGENT": {
+                "LegacyRouter": {
                     "type": "ios",
                     "interfaces": {"GigabitEthernet0/0.2000": {"ipv4_address": "10.20.0.10", "vrf": "tgn1"}},
                 }
@@ -373,8 +373,8 @@ def test_ios_type_and_l3_interfaces_survive_commit_and_reload(lab_root, monkeypa
     climain.execute_command_line(session, "commit")
 
     reloaded = lab.load_topology("discovered_lab", lab_root)
-    assert reloaded["devices"]["PAGENT"]["type"] == "ios"
-    assert reloaded["devices"]["PAGENT"]["interfaces"]["GigabitEthernet0/0.2000"]["ipv4_address"] == "10.20.0.10"
+    assert reloaded["devices"]["LegacyRouter"]["type"] == "ios"
+    assert reloaded["devices"]["LegacyRouter"]["interfaces"]["GigabitEthernet0/0.2000"]["ipv4_address"] == "10.20.0.10"
 
 
 def test_l3_enrichment_failure_for_one_device_does_not_lose_its_managed_link(lab_root, monkeypatch):

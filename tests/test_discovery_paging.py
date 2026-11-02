@@ -50,7 +50,7 @@ def _fake_wait_always_succeeds(prompt_text):
 
 @pytest.mark.parametrize(
     "collector_name,prompt_text",
-    [("_bootstrap_collect_iosxe", "SW3#"), ("_bootstrap_collect_ios", "PAGENT#")],
+    [("_bootstrap_collect_iosxe", "SW3#"), ("_bootstrap_collect_ios", "LegacyRouter#")],
 )
 def test_paging_is_sent_immediately_after_login_before_any_show_command(monkeypatch, collector_name, prompt_text):
     monkeypatch.setattr(discovery, "_login_ios_style", lambda device_id, cfg: "SW3")

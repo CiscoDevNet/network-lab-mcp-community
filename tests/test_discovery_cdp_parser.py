@@ -46,7 +46,7 @@ def test_one_line_iosxr_style_row():
             "                  S - Switch, H - Host, I - IGMP, r - Repeater",
             "",
             _HEADER,
-            _one_line_row("PAGENT", "Gi0/0/0/10", "144", "R", "Cisco 720", "Gig0/0"),
+            _one_line_row("LegacyRouter", "Gi0/0/0/10", "144", "R", "Cisco 720", "Gig0/0"),
             "",
         ]
     )
@@ -56,7 +56,7 @@ def test_one_line_iosxr_style_row():
         NeighborObservation(
             local_device_id="R1",
             local_interface="Gi0/0/0/10",
-            remote_device_id_raw="PAGENT",
+            remote_device_id_raw="LegacyRouter",
             remote_port_id="Gig0/0",
             capabilities=("router",),
             source="cdp",
@@ -73,7 +73,7 @@ def test_wrapped_fqdn_device_id_row():
             "",
         ]
     )
-    observations = parse_cdp_neighbors(text, "PAGENT")
+    observations = parse_cdp_neighbors(text, "LegacyRouter")
 
     assert len(observations) == 1
     obs = observations[0]
@@ -88,7 +88,7 @@ def test_mixed_one_line_and_wrapped_rows_in_the_same_table():
     text = "\n".join(
         [
             _HEADER,
-            _one_line_row("PAGENT", "Gi0/0/0/10", "144", "R", "Cisco 720", "Gig0/0"),
+            _one_line_row("LegacyRouter", "Gi0/0/0/10", "144", "R", "Cisco 720", "Gig0/0"),
             "labsw-a07.example.com",
             _continuation_row("Fas 0/0", "159", "S I", "WS-C2960X", "Gig 1/0/16"),
             "",
@@ -97,7 +97,7 @@ def test_mixed_one_line_and_wrapped_rows_in_the_same_table():
     observations = parse_cdp_neighbors(text, "R1")
 
     assert len(observations) == 2
-    assert {o.remote_device_id_raw for o in observations} == {"PAGENT", "labsw-a07.example.com"}
+    assert {o.remote_device_id_raw for o in observations} == {"LegacyRouter", "labsw-a07.example.com"}
 
 
 def test_multi_word_port_id_and_platform_on_one_line():
@@ -108,7 +108,7 @@ def test_multi_word_port_id_and_platform_on_one_line():
             "",
         ]
     )
-    observations = parse_cdp_neighbors(text, "PAGENT")
+    observations = parse_cdp_neighbors(text, "LegacyRouter")
 
     assert len(observations) == 1
     obs = observations[0]
@@ -140,23 +140,23 @@ def test_malformed_row_is_skipped_without_crashing():
         [
             _HEADER,
             "this row has no holdtime number at all",
-            _one_line_row("PAGENT", "Gi0/0/0/10", "144", "R", "Cisco 720", "Gig0/0"),
+            _one_line_row("LegacyRouter", "Gi0/0/0/10", "144", "R", "Cisco 720", "Gig0/0"),
             "",
         ]
     )
     observations = parse_cdp_neighbors(text, "R1")
     assert len(observations) == 1
-    assert observations[0].remote_device_id_raw == "PAGENT"
+    assert observations[0].remote_device_id_raw == "LegacyRouter"
 
 
 def test_multiple_neighbors_deterministic_order():
     text = "\n".join(
         [
             _HEADER,
-            _one_line_row("PAGENT", "Gi0/0/0/10", "144", "R", "Cisco 720", "Gig0/0"),
+            _one_line_row("LegacyRouter", "Gi0/0/0/10", "144", "R", "Cisco 720", "Gig0/0"),
             _one_line_row("R2", "Gi0/0/0/2", "120", "R", "ASR9K Ser", "Gi0/0/0/2"),
             "",
         ]
     )
     observations = parse_cdp_neighbors(text, "R1")
-    assert [o.remote_device_id_raw for o in observations] == ["PAGENT", "R2"]
+    assert [o.remote_device_id_raw for o in observations] == ["LegacyRouter", "R2"]

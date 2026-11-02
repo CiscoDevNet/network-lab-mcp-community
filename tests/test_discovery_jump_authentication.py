@@ -77,8 +77,8 @@ def test_target_key_auth_after_jump_password(tmp_path, monkeypatch):
 def test_ios_style_login_also_supports_jump(tmp_path, monkeypatch):
     got = _fake(tmp_path, monkeypatch,
                 _p("jump-user", JUMP) + _rec(tmp_path, "jump") + _p("target-user", TARGET)
-                + _rec(tmp_path, "target") + 'stty echo\necho\necho "PAGENT#"\nsleep 5\n')
-    assert discovery._login_ios_style("PAGENT", _cfg()) == "PAGENT"
+                + _rec(tmp_path, "target") + 'stty echo\necho\necho "LegacyRouter#"\nsleep 5\n')
+    assert discovery._login_ios_style("LegacyRouter", _cfg()) == "LegacyRouter"
     assert got.read_text().split() == ["jump=JUMP-SENTINEL", "target=TARGET-SENTINEL"]
 
 

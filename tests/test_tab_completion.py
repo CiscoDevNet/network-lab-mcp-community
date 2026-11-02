@@ -2,12 +2,12 @@
 """Tab/`?` completion regression tests for the `tab` key binding's
 multiple-candidate branch (`_make_key_bindings()` in cli/main.py).
 
-Root cause investigated: `reference pa?` / `scenario m?` do NOT actually
+Root cause investigated: `reference le?` / `scenario m?` do NOT actually
 duplicate-render on this HEAD (verified independently via a headless
 prompt_toolkit session and a real PTY run through pyte) -- the real,
 reproduced bug is that Tab with more than one candidate never extended the
-buffer to the longest common prefix at all (e.g. "reference pa<TAB>" left
-the buffer completely unchanged at "reference pa" instead of advancing to
+buffer to the longest common prefix at all (e.g. "reference le<TAB>" left
+the buffer completely unchanged at "reference le" instead of advancing to
 "reference legacyrouter_"), even though the ambiguous candidate list was always
 printed correctly. These tests cover the two pure functions factored out
 of the `tab` key binding to fix that (`_longest_common_prefix()`,
@@ -67,7 +67,7 @@ def make_ctx(**kwargs) -> grammar.CliContext:
 
 
 def test_lcp_partial_divergence():
-    assert climain._longest_common_prefix(["pagent_pkts", "pagent_tgn"]) == "pagent_"
+    assert climain._longest_common_prefix(["legacyrouter_pkts", "legacyrouter_tgn"]) == "legacyrouter_"
 
 
 def test_lcp_one_candidate_is_prefix_of_another():
@@ -84,7 +84,7 @@ def test_lcp_no_common_prefix():
 
 
 def test_lcp_single_candidate_is_itself():
-    assert climain._longest_common_prefix(["pagent_pkts"]) == "pagent_pkts"
+    assert climain._longest_common_prefix(["legacyrouter_pkts"]) == "legacyrouter_pkts"
 
 
 def test_lcp_empty_list():
@@ -101,15 +101,15 @@ def test_lcp_three_candidates_narrows_to_shared_prefix():
 
 
 def test_extension_advances_past_typed_prefix():
-    result = grammar.CompletionResult(candidates=["pagent_pkts", "pagent_tgn"], replace_prefix="pa")
-    assert climain._tab_multi_candidate_extension(result) == "pagent_"
+    result = grammar.CompletionResult(candidates=["legacyrouter_pkts", "legacyrouter_tgn"], replace_prefix="le")
+    assert climain._tab_multi_candidate_extension(result) == "legacyrouter_"
 
 
 def test_extension_none_when_already_at_common_prefix():
     # Already typed exactly the full common prefix -- nothing further to
     # extend to (must not be reported as an extension, or Tab would loop
     # inserting the same text it already has).
-    result = grammar.CompletionResult(candidates=["pagent_pkts", "pagent_tgn"], replace_prefix="pagent_")
+    result = grammar.CompletionResult(candidates=["legacyrouter_pkts", "legacyrouter_tgn"], replace_prefix="legacyrouter_")
     assert climain._tab_multi_candidate_extension(result) is None
 
 
@@ -137,22 +137,22 @@ def test_extension_none_when_candidates_diverge_immediately():
 # ==========================================================================
 
 
-def test_reference_pa_tab_extends_to_pagent_underscore():
-    ctx = make_ctx(reference_names=("pagent_pkts", "pagent_tgn", "sample"))
-    result = grammar.complete("global", "reference pa", ctx)
-    assert set(result.candidates) == {"pagent_pkts", "pagent_tgn"}
-    assert climain._tab_multi_candidate_extension(result) == "pagent_"
+def test_reference_pa_tab_extends_to_legacyrouter_underscore():
+    ctx = make_ctx(reference_names=("legacyrouter_pkts", "legacyrouter_tgn", "sample"))
+    result = grammar.complete("global", "reference le", ctx)
+    assert set(result.candidates) == {"legacyrouter_pkts", "legacyrouter_tgn"}
+    assert climain._tab_multi_candidate_extension(result) == "legacyrouter_"
 
 
-def test_reference_pagent_p_tab_is_unique_full_completion():
-    ctx = make_ctx(reference_names=("pagent_pkts", "pagent_tgn", "sample"))
-    result = grammar.complete("global", "reference pagent_p", ctx)
-    assert result.candidates == ["pagent_pkts"]
+def test_reference_legacyrouter_p_tab_is_unique_full_completion():
+    ctx = make_ctx(reference_names=("legacyrouter_pkts", "legacyrouter_tgn", "sample"))
+    result = grammar.complete("global", "reference legacyrouter_p", ctx)
+    assert result.candidates == ["legacyrouter_pkts"]
     # Unique-candidate completion is the *other* branch of the tab key
     # binding (len(candidates) == 1), not this extension helper -- assert
     # the contract it relies on instead: the one candidate, complete with
     # no trailing space of its own.
-    assert result.candidates[0] == "pagent_pkts"
+    assert result.candidates[0] == "legacyrouter_pkts"
 
 
 def test_scenario_m_tab_extends_without_premature_trailing_space():
@@ -207,12 +207,12 @@ def test_literal_single_candidate_unaffected_by_extension_helper():
 
 
 def test_reference_prefix_help_has_no_duplicate_rendering():
-    ctx = make_ctx(reference_names=("pagent_pkts", "pagent_tgn", "sample"))
-    result = grammar.help("global", "reference pa", ctx)
+    ctx = make_ctx(reference_names=("legacyrouter_pkts", "legacyrouter_tgn", "sample"))
+    result = grammar.help("global", "reference le", ctx)
     tokens = [line.token for line in result.lines]
     assert tokens == sorted(tokens)
-    assert tokens.count("pagent_pkts") == 1
-    assert tokens.count("pagent_tgn") == 1
+    assert tokens.count("legacyrouter_pkts") == 1
+    assert tokens.count("legacyrouter_tgn") == 1
     assert all(line.description == "Existing reference definition" for line in result.lines)
 
 
@@ -233,9 +233,9 @@ def test_scenario_prefix_help_has_no_duplicate_rendering():
 
 
 def test_candidate_ordering_unchanged_for_reference():
-    ctx = make_ctx(reference_names=("pagent_tgn", "pagent_pkts", "sample"))
-    result = grammar.complete("global", "reference pa", ctx)
-    assert result.candidates == sorted(result.candidates) == ["pagent_pkts", "pagent_tgn"]
+    ctx = make_ctx(reference_names=("legacyrouter_tgn", "legacyrouter_pkts", "sample"))
+    result = grammar.complete("global", "reference le", ctx)
+    assert result.candidates == sorted(result.candidates) == ["legacyrouter_pkts", "legacyrouter_tgn"]
 
 
 # ==========================================================================
@@ -301,8 +301,8 @@ def tab_flow_lab_root(tmp_path):
         {"name": "multi_flow_path_validation_failure_test"},
     )
     _write_yaml(root / "references" / "sample.yaml", {"name": "sample"})
-    _write_yaml(root / "references" / "pagent_pkts.yaml", {"name": "pagent_pkts"})
-    _write_yaml(root / "references" / "pagent_tgn.yaml", {"name": "pagent_tgn"})
+    _write_yaml(root / "references" / "legacyrouter_pkts.yaml", {"name": "legacyrouter_pkts"})
+    _write_yaml(root / "references" / "legacyrouter_tgn.yaml", {"name": "legacyrouter_tgn"})
     return root
 
 
@@ -380,42 +380,42 @@ def _run_tab_flow(lab_root, scenario) -> None:
 
 def test_reference_pa_tab_extends_only_no_list_shown(tab_flow_lab_root):
     async def scenario(h):
-        await h.type_text("reference pa")
+        await h.type_text("reference le")
         printed = await h.press_tab()
-        assert h.buffer_text() == "reference pagent_"
+        assert h.buffer_text() == "reference legacyrouter_"
         assert printed == ""
 
     _run_tab_flow(tab_flow_lab_root, scenario)
 
 
-def test_reference_pagent__tab_shows_list_once_lcp_exhausted(tab_flow_lab_root):
+def test_reference_legacyrouter__tab_shows_list_once_lcp_exhausted(tab_flow_lab_root):
     async def scenario(h):
-        await h.type_text("reference pagent_")
+        await h.type_text("reference legacyrouter_")
         printed = await h.press_tab()
-        assert h.buffer_text() == "reference pagent_"
-        assert "pagent_pkts" in printed
-        assert "pagent_tgn" in printed
+        assert h.buffer_text() == "reference legacyrouter_"
+        assert "legacyrouter_pkts" in printed
+        assert "legacyrouter_tgn" in printed
 
     _run_tab_flow(tab_flow_lab_root, scenario)
 
 
-def test_reference_pagent__tab_pressed_again_shows_list_again(tab_flow_lab_root):
+def test_reference_legacyrouter__tab_pressed_again_shows_list_again(tab_flow_lab_root):
     async def scenario(h):
-        await h.type_text("reference pagent_")
+        await h.type_text("reference legacyrouter_")
         first = await h.press_tab()
         second = await h.press_tab()
-        assert h.buffer_text() == "reference pagent_"
-        assert "pagent_pkts" in first and "pagent_tgn" in first
-        assert "pagent_pkts" in second and "pagent_tgn" in second
+        assert h.buffer_text() == "reference legacyrouter_"
+        assert "legacyrouter_pkts" in first and "legacyrouter_tgn" in first
+        assert "legacyrouter_pkts" in second and "legacyrouter_tgn" in second
 
     _run_tab_flow(tab_flow_lab_root, scenario)
 
 
-def test_reference_pagent_p_tab_completes_unique_candidate(tab_flow_lab_root):
+def test_reference_legacyrouter_p_tab_completes_unique_candidate(tab_flow_lab_root):
     async def scenario(h):
-        await h.type_text("reference pagent_p")
+        await h.type_text("reference legacyrouter_p")
         printed = await h.press_tab()
-        assert h.buffer_text() == "reference pagent_pkts"
+        assert h.buffer_text() == "reference legacyrouter_pkts"
         assert printed == ""
 
     _run_tab_flow(tab_flow_lab_root, scenario)
@@ -497,12 +497,12 @@ def test_scenario_mu_question_mark_shows_help_only_no_candidate_list(tab_flow_la
 
 def test_reference_pa_question_mark_shows_help_only(tab_flow_lab_root):
     async def scenario(h):
-        await h.type_text("reference pa")
+        await h.type_text("reference le")
         h.pipe_input.send_text("?")
         await h.settle()
         printed = h._buf.getvalue()
         assert "Existing reference definition" in printed
-        assert printed.count("pagent_pkts") == 1
-        assert printed.count("pagent_tgn") == 1
+        assert printed.count("legacyrouter_pkts") == 1
+        assert printed.count("legacyrouter_tgn") == 1
 
     _run_tab_flow(tab_flow_lab_root, scenario)

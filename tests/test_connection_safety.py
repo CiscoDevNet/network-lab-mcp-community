@@ -83,7 +83,7 @@ def test_telnet_with_jump_host_commit_allowed(lab_root):
     data = {
         "name": "x",
         "jump_hosts": {"jump1": {"type": "host", "transport": "ssh", "address": "192.0.2.10"}},
-        "devices": {"PAGENT": {"type": "ios", "transport": "telnet", "address": "192.0.2.20", "jump_host": "jump1"}},
+        "devices": {"LegacyRouter": {"type": "ios", "transport": "telnet", "address": "192.0.2.20", "jump_host": "jump1"}},
     }
     lab.write_access_info("x", data, lab_root)
 
@@ -120,10 +120,10 @@ def test_guard_blocks_before_any_process_or_binary_lookup(monkeypatch):
     monkeypatch.setattr(terminal, "_ensure_managed_session", lambda *a, **k: called.append("session"))
     with pytest.raises(terminal.TerminalError):
         terminal.open_device_terminal(
-            "PAGENT", {"transport": "telnet", "address": "192.0.2.20", "password": "S3NTINEL",
+            "LegacyRouter", {"transport": "telnet", "address": "192.0.2.20", "password": "S3NTINEL",
                        "jump_host_config": {"address": "192.0.2.10"}})
     with pytest.raises(terminal.TerminalError):
         terminal.open_bootstrap_terminal(
-            "PAGENT", {"transport": "telnet", "address": "192.0.2.20",
+            "LegacyRouter", {"transport": "telnet", "address": "192.0.2.20",
                        "jump_host_config": {"address": "192.0.2.10"}})
     assert called == []

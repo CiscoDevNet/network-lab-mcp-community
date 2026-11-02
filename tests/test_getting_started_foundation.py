@@ -61,7 +61,7 @@ def fresh_root(tmp_path):
     """Fresh initialization: copy the tracked template, as README instructs."""
     root = tmp_path / "lab"
     for sub in ("access-info", "topologies", "scenarios", "references"):
-        shutil.copytree(REPO_LAB / sub, root / sub, ignore=shutil.ignore_patterns("test_lab.yaml", "pagent*", "multi_flow*"))
+        shutil.copytree(REPO_LAB / sub, root / sub, ignore=shutil.ignore_patterns("test_lab.yaml", "legacyrouter*", "multi_flow*"))
     shutil.copy(REPO_LAB / "principles.yaml", root / "principles.yaml")
     shutil.copy(REPO_LAB / "settings.example.yaml", root / "settings.yaml")
     return root
@@ -212,7 +212,7 @@ EXISTING = {
     "active_access_info": "real_lab",
     "active_topology": "production_lab",
     "active_scenario": "existing_scenario",
-    "active_references": ["pagent_pkts", "custom_reference"],
+    "active_references": ["legacyrouter_pkts", "custom_reference"],
     "running_descriptions": {"scenario": {"existing_scenario": "mine"}},
 }
 
@@ -224,7 +224,7 @@ def test_existing_settings_not_redefaulted(tmp_path):
     settings = lab.read_settings(root)
     assert settings == EXISTING
     assert lab.get_active_scenario_name(settings) == "existing_scenario"
-    assert lab.get_active_reference_names(settings) == ["pagent_pkts", "custom_reference"]
+    assert lab.get_active_reference_names(settings) == ["legacyrouter_pkts", "custom_reference"]
     assert "getting_started" not in _running_text(root)
     assert "cisco_platform_guidance" not in _running_text(root)
     assert " mine" in _running_text(root)

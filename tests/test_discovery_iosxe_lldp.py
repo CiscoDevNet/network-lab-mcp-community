@@ -37,7 +37,7 @@ def _write_access_info(lab_root, devices):
 
 def test_iosxe_lldp_disabled_yields_zero_observations_cdp_still_usable(lab_root, monkeypatch):
     def fake_collect(device_id, cfg):
-        row = f"{'PAGENT':<17}{'Gi0/0/0/10':<18}{'144':<11}{'R':<12}{'Cisco 720':<12}Gig0/0"
+        row = f"{'LegacyRouter':<17}{'Gi0/0/0/10':<18}{'144':<11}{'R':<12}{'Cisco 720':<12}Gig0/0"
         return {
             "hostname": "SW1",
             "show_version": "x",
@@ -52,7 +52,7 @@ def test_iosxe_lldp_disabled_yields_zero_observations_cdp_still_usable(lab_root,
 
     assert result.observation_count == 0  # LLDP: disabled -> zero, not a failure
     assert result.cdp_observation_count == 1
-    assert {u.remote_device_id_raw for u in result.unresolved} == {"PAGENT"}
+    assert {u.remote_device_id_raw for u in result.unresolved} == {"LegacyRouter"}
 
 
 def test_iosxe_enabled_lldp_parses_via_the_unchanged_iosxr_parser(lab_root, monkeypatch):

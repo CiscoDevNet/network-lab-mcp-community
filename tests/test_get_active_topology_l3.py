@@ -24,7 +24,7 @@ def test_committed_l3_interfaces_are_visible_via_get_active_topology(lab_root, m
                     "type": "iosxr",
                     "interfaces": {"GigabitEthernet0/0/0/2": {"ipv4_address": "10.0.12.1", "vrf": "default"}},
                 },
-                "PAGENT": {
+                "LegacyRouter": {
                     "type": "ios",
                     "interfaces": {"GigabitEthernet0/0.2000": {"ipv4_address": "10.20.0.10", "vrf": "tgn1"}},
                 },
@@ -39,8 +39,8 @@ def test_committed_l3_interfaces_are_visible_via_get_active_topology(lab_root, m
     assert active["active_topology"] == "sample_lab"
     r1_interfaces = active["topology"]["devices"]["R1"]["interfaces"]
     assert r1_interfaces["GigabitEthernet0/0/0/2"] == {"ipv4_address": "10.0.12.1", "vrf": "default"}
-    assert active["topology"]["devices"]["PAGENT"]["type"] == "ios"
-    assert active["topology"]["devices"]["PAGENT"]["interfaces"]["GigabitEthernet0/0.2000"]["vrf"] == "tgn1"
+    assert active["topology"]["devices"]["LegacyRouter"]["type"] == "ios"
+    assert active["topology"]["devices"]["LegacyRouter"]["interfaces"]["GigabitEthernet0/0.2000"]["vrf"] == "tgn1"
 
 
 def test_get_active_topology_never_exposes_access_info_fields(lab_root, monkeypatch):

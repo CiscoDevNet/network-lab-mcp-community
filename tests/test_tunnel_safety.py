@@ -145,4 +145,4 @@ def test_discovery_refuses_telnet_via_jump_when_guard_off(monkeypatch):
     monkeypatch.setattr(terminal, "TELNET_VIA_JUMP_ENABLED", False)
     cfg = {"transport": "telnet", "address": "192.0.2.20", "jump_host_config": {"address": "192.0.2.10"}}
     with pytest.raises(terminal.TerminalError, match="not enabled"):
-        terminal.open_bootstrap_terminal("PAGENT", cfg)
+        terminal.open_bootstrap_terminal("LegacyRouter", cfg)

@@ -117,7 +117,7 @@ def test_interfaces_survive_write_and_load_round_trip(lab_root):
                     "BVI2000": {"ipv4_address": "10.20.0.253", "vrf": "VRF_ELAN_2000"},
                 },
             },
-            "PAGENT": {
+            "LegacyRouter": {
                 "type": "ios",
                 "interfaces": {
                     "GigabitEthernet0/0.2000": {"ipv4_address": "10.20.0.10", "vrf": "tgn1"},
@@ -134,8 +134,8 @@ def test_interfaces_survive_write_and_load_round_trip(lab_root):
         "vrf": "default",
     }
     assert reloaded["devices"]["R1"]["interfaces"]["BVI2000"]["vrf"] == "VRF_ELAN_2000"
-    assert reloaded["devices"]["PAGENT"]["type"] == "ios"
-    assert reloaded["devices"]["PAGENT"]["interfaces"]["GigabitEthernet0/0.2000"]["ipv4_address"] == "10.20.0.10"
+    assert reloaded["devices"]["LegacyRouter"]["type"] == "ios"
+    assert reloaded["devices"]["LegacyRouter"]["interfaces"]["GigabitEthernet0/0.2000"]["ipv4_address"] == "10.20.0.10"
 
 
 def test_existing_topology_without_interfaces_key_remains_valid_no_migration(lab_root):

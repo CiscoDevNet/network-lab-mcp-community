@@ -25,13 +25,13 @@ def test_cdp_short_hostname_ambiguous_collision_stays_unresolved():
 
 
 def test_cdp_exact_hostname_match_unaffected_by_case():
-    identity_map = {"PAGENT": "PAGENT"}
-    assert resolve_remote_identity("PAGENT", identity_map) == "PAGENT"
-    assert resolve_remote_identity("pagent", identity_map) == "PAGENT"
+    identity_map = {"LegacyRouter": "LegacyRouter"}
+    assert resolve_remote_identity("LegacyRouter", identity_map) == "LegacyRouter"
+    assert resolve_remote_identity("legacyrouter", identity_map) == "LegacyRouter"
 
 
 def test_unmanaged_cdp_neighbor_is_not_resolved_and_not_a_device():
-    identity_map = {"R1": "ASR9001-R1", "PAGENT": "PAGENT"}
+    identity_map = {"R1": "ASR9001-R1", "LegacyRouter": "LegacyRouter"}
     remote_id = resolve_remote_identity("labsw-a07.example.com", identity_map)
     assert remote_id is None
 
@@ -40,8 +40,8 @@ def test_resolve_remote_identity_is_source_agnostic():
     """The exact same resolution rule applies whether the observation came
     from LLDP or CDP -- resolve_remote_identity() never looks at
     `obs.source` at all (it isn't even passed the observation)."""
-    identity_map = {"PAGENT": "PAGENT"}
-    lldp_obs = NeighborObservation("R1", "Gi0/0/0/10", "PAGENT", "Gig0/0", source="lldp")
-    cdp_obs = NeighborObservation("R1", "Gi0/0/0/10", "PAGENT", "Gig0/0", source="cdp")
-    assert resolve_remote_identity(lldp_obs.remote_device_id_raw, identity_map) == "PAGENT"
-    assert resolve_remote_identity(cdp_obs.remote_device_id_raw, identity_map) == "PAGENT"
+    identity_map = {"LegacyRouter": "LegacyRouter"}
+    lldp_obs = NeighborObservation("R1", "Gi0/0/0/10", "LegacyRouter", "Gig0/0", source="lldp")
+    cdp_obs = NeighborObservation("R1", "Gi0/0/0/10", "LegacyRouter", "Gig0/0", source="cdp")
+    assert resolve_remote_identity(lldp_obs.remote_device_id_raw, identity_map) == "LegacyRouter"
+    assert resolve_remote_identity(cdp_obs.remote_device_id_raw, identity_map) == "LegacyRouter"

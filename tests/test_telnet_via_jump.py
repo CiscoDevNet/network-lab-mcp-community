@@ -128,12 +128,12 @@ class DeviceServer:
             c.sendall(b"\r\nPassword: ")
             pw = self._line(c)
             self.creds.append((user, pw))
-            c.sendall(b"\r\nPAGENT#")
+            c.sendall(b"\r\nLegacyRouter#")
             while True:
                 cmd = self._line(c)
                 if cmd == "quit":
                     return
-                c.sendall(f"\r\nout:{cmd}\r\nPAGENT#".encode())
+                c.sendall(f"\r\nout:{cmd}\r\nLegacyRouter#".encode())
         except OSError:
             pass
         finally:
@@ -180,7 +180,7 @@ def env(tmp_path, monkeypatch):
     yield e
     for s in terminal.list_device_sessions():
         terminal.close_device_terminal(s["device"])
-    for name in ("PAGENT", "PAGENT2", "ORPH"):
+    for name in ("LegacyRouter", "LegacyRouter2", "ORPH"):
         terminal._close_session(terminal.derive_discovery_session_name(name))
         terminal._kill_session_if_exists(terminal.derive_discovery_tunnel_session_name(name))
         terminal._close_session(terminal.derive_production_session_name(name))
@@ -194,18 +194,18 @@ def _sessions():
 
 
 def test_full_lifecycle(env):
-    result = terminal.open_device_terminal("PAGENT", _cfg())
-    assert result == {"device": "PAGENT", "session_name": "network-lab-device-PAGENT", "reused": False,
+    result = terminal.open_device_terminal("LegacyRouter", _cfg())
+    assert result == {"device": "LegacyRouter", "session_name": "network-lab-device-LegacyRouter", "reused": False,
                       "transport": "telnet"}
     assert env.read("jump_pw.txt").split() == [JUMP_PW]
     assert env.dev.creds == [(DEV_USER, DEV_PW)]
     # one logical session in list; the tunnel is internal
     assert terminal.list_device_sessions() == [
-        {"device": "PAGENT", "session_name": "network-lab-device-PAGENT", "state": "running"}]
-    assert terminal._session_exists("network-lab-tunnel-PAGENT")
-    terminal.send_to_device("PAGENT", "show version", None, True)
+        {"device": "LegacyRouter", "session_name": "network-lab-device-LegacyRouter", "state": "running"}]
+    assert terminal._session_exists("network-lab-tunnel-LegacyRouter")
+    terminal.send_to_device("LegacyRouter", "show version", None, True)
     time.sleep(1)
-    content = terminal.read_device("PAGENT")["content"]
+    content = terminal.read_device("LegacyRouter")["content"]
     assert "out:show version" in content
     for secret in (JUMP_PW, DEV_USER, DEV_PW):
         assert secret not in content
@@ -214,16 +214,16 @@ def test_full_lifecycle(env):
     assert "-N -T" in ssh_argv and "ExitOnForwardFailure=yes" in ssh_argv and "ControlPath=none" in ssh_argv
     assert "-L 127.0.0.1:" in ssh_argv and "StrictHostKeyChecking=yes" in ssh_argv
     assert tel_argv.startswith("-K -E 127.0.0.1 ")
-    closed = terminal.close_device_terminal("PAGENT")
+    closed = terminal.close_device_terminal("LegacyRouter")
     assert closed["closed"] is True and _sessions() == []
 
 
 def test_logs_do_not_contain_credentials(env, tmp_path):
-    terminal.open_device_terminal("PAGENT", _cfg())
-    terminal.send_to_device("PAGENT", "show clock", None, True)
+    terminal.open_device_terminal("LegacyRouter", _cfg())
+    terminal.send_to_device("LegacyRouter", "show clock", None, True)
     time.sleep(1)
-    terminal.close_device_terminal("PAGENT")
-    logs = list((tmp_path / "logs" / "terminal" / "PAGENT").glob("*.log"))
+    terminal.close_device_terminal("LegacyRouter")
+    logs = list((tmp_path / "logs" / "terminal" / "LegacyRouter").glob("*.log"))
     assert len(logs) == 2  # tunnel pane + device pane, both preserved
     blob = "".join(p.read_text(errors="replace") for p in logs)
     assert "Authenticated to" in blob and "out:show clock" in blob
@@ -234,7 +234,7 @@ def test_logs_do_not_contain_credentials(env, tmp_path):
 def test_disabled_guard_opens_nothing(env, monkeypatch):
     monkeypatch.setattr(terminal, "TELNET_VIA_JUMP_ENABLED", False)
     with pytest.raises(terminal.TerminalError, match="telnet via jump host is not enabled"):
-        terminal.open_device_terminal("PAGENT", _cfg())
+        terminal.open_device_terminal("LegacyRouter", _cfg())
     assert _sessions() == [] and env.read("ssh_argv.txt") == ""
 
 
@@ -243,14 +243,14 @@ def test_missing_telnet_client_starts_no_tunnel(env, monkeypatch):
         raise tunnel_safety.TunnelSafetyError("telnet client not found")
     monkeypatch.setattr(tunnel_safety, "resolve_telnet_client", missing)
     with pytest.raises(terminal.TerminalError, match="telnet client not found"):
-        terminal.open_device_terminal("PAGENT", _cfg())
+        terminal.open_device_terminal("LegacyRouter", _cfg())
     assert _sessions() == [] and env.read("ssh_argv.txt") == ""
 
 
 def test_host_key_failure(env):
     env.mode("hostkey")
     with pytest.raises(terminal.TerminalError, match="host key verification failed"):
-        terminal.open_device_terminal("PAGENT", _cfg())
+        terminal.open_device_terminal("LegacyRouter", _cfg())
     assert _sessions() == [] and env.dev.connections == 0
 
 
@@ -258,7 +258,7 @@ def test_jump_password_rejected_sent_once(env):
     cfg = _cfg()
     cfg["jump_host_config"]["password"] = "WRONG-SENTINEL"
     with pytest.raises(terminal.TerminalError, match="jump host authentication failed"):
-        terminal.open_device_terminal("PAGENT", cfg)
+        terminal.open_device_terminal("LegacyRouter", cfg)
     assert env.read("jump_pw.txt").split() == ["WRONG-SENTINEL"]
     assert _sessions() == [] and env.dev.connections == 0
 
@@ -267,13 +267,13 @@ def test_unattributable_jump_prompt_sends_nothing(env, tmp_path):
     cfg = _cfg()
     cfg["jump_host_config"]["username"] = "someone-else"
     with pytest.raises(terminal.TerminalError, match="cannot safely"):
-        terminal.open_device_terminal("PAGENT", cfg)
+        terminal.open_device_terminal("LegacyRouter", cfg)
     assert env.read("jump_pw.txt") == ""
 
 
 def test_port_conflict_retries_then_succeeds(env):
     env.mode("conflict2")
-    terminal.open_device_terminal("PAGENT", _cfg())
+    terminal.open_device_terminal("LegacyRouter", _cfg())
     assert int(env.read("launches.txt")) == 3
     assert env.dev.creds == [(DEV_USER, DEV_PW)]
 
@@ -281,7 +281,7 @@ def test_port_conflict_retries_then_succeeds(env):
 def test_port_conflict_gives_up_after_three(env):
     env.mode("conflict")
     with pytest.raises(terminal.TerminalError, match="port conflict"):
-        terminal.open_device_terminal("PAGENT", _cfg())
+        terminal.open_device_terminal("LegacyRouter", _cfg())
     assert int(env.read("launches.txt")) == 3 and _sessions() == []
 
 
@@ -301,7 +301,7 @@ def test_foreign_listener_is_not_trusted(env, monkeypatch):
     monkeypatch.setattr(terminal, "_TUNNEL_AUTH_TIMEOUT_SECONDS", 6)
     env.mode("nolisten")
     with pytest.raises(terminal.TerminalError, match="tunnel ownership could not be verified"):
-        terminal.open_device_terminal("PAGENT", _cfg())
+        terminal.open_device_terminal("LegacyRouter", _cfg())
     assert received == [] and _sessions() == []
     attacker.close()
 
@@ -315,55 +315,55 @@ def test_ownership_change_before_credentials_blocks_login(env, monkeypatch):
             calls["n"] += 1
         # from the second ownership proof on, the server side belongs to a stranger
         if calls["n"] >= 3:
-            out = out.replace(f"\np{terminal._verified_pane_pid('network-lab-tunnel-PAGENT')}\n", "\np999999\n")
+            out = out.replace(f"\np{terminal._verified_pane_pid('network-lab-tunnel-LegacyRouter')}\n", "\np999999\n")
         return out
 
     monkeypatch.setattr(tunnel_safety, "run_lsof", flaky)
     with pytest.raises(terminal.TerminalError, match="tunnel ownership could not be verified"):
-        terminal.open_device_terminal("PAGENT", _cfg())
+        terminal.open_device_terminal("LegacyRouter", _cfg())
     assert env.dev.creds == [] and _sessions() == []
 
 
 def test_target_unreachable(env):
     env.dev.behavior = "close"
     with pytest.raises(terminal.TerminalError, match="unreachable|ended|ownership"):
-        terminal.open_device_terminal("PAGENT", _cfg())
+        terminal.open_device_terminal("LegacyRouter", _cfg())
     assert env.dev.creds == [] and _sessions() == []
 
 
 def test_tunnel_death_refuses_send_and_lists_exited(env):
-    terminal.open_device_terminal("PAGENT", _cfg())
-    terminal._run(["kill-session", "-t", "network-lab-tunnel-PAGENT"])
+    terminal.open_device_terminal("LegacyRouter", _cfg())
+    terminal._run(["kill-session", "-t", "network-lab-tunnel-LegacyRouter"])
     # Either the tunnel check or (once telnet noticed the dropped TCP) the
     # dead device pane refuses the send; it is never delivered anywhere.
     with pytest.raises(terminal.TerminalError, match="tunnel ended|exited"):
-        terminal.send_to_device("PAGENT", "show version", None, True)
+        terminal.send_to_device("LegacyRouter", "show version", None, True)
     assert terminal.list_device_sessions()[0]["state"] == "exited"
-    terminal.close_device_terminal("PAGENT")
+    terminal.close_device_terminal("LegacyRouter")
     assert _sessions() == []
 
 
 def test_telnet_exit_reaps_tunnel_and_refuses_send(env):
-    terminal.open_device_terminal("PAGENT", _cfg())
-    terminal.send_to_device("PAGENT", "quit", None, True)
+    terminal.open_device_terminal("LegacyRouter", _cfg())
+    terminal.send_to_device("LegacyRouter", "quit", None, True)
     for _ in range(40):
-        if terminal._pane_state("network-lab-device-PAGENT") == "exited":
+        if terminal._pane_state("network-lab-device-LegacyRouter") == "exited":
             break
         time.sleep(0.25)
     assert terminal.list_device_sessions()[0]["state"] == "exited"
-    assert not terminal._session_exists("network-lab-tunnel-PAGENT")
-    assert "Connection closed" in terminal.read_device("PAGENT")["content"]
+    assert not terminal._session_exists("network-lab-tunnel-LegacyRouter")
+    assert "Connection closed" in terminal.read_device("LegacyRouter")["content"]
     with pytest.raises(terminal.TerminalError, match="exited"):
-        terminal.send_to_device("PAGENT", "show version", None, True)
+        terminal.send_to_device("LegacyRouter", "show version", None, True)
     # reconnect works and sends credentials again only because it is a new session
-    terminal.open_device_terminal("PAGENT", _cfg())
+    terminal.open_device_terminal("LegacyRouter", _cfg())
     assert len(env.dev.creds) == 2
 
 
 def test_reuse_after_restart_does_not_resend_credentials(env):
-    terminal.open_device_terminal("PAGENT", _cfg())
+    terminal.open_device_terminal("LegacyRouter", _cfg())
     terminal._session_locks.clear()  # a fresh MCP process has no in-memory state
-    again = terminal.open_device_terminal("PAGENT", _cfg())
+    again = terminal.open_device_terminal("LegacyRouter", _cfg())
     assert again["reused"] is True
     assert env.dev.creds == [(DEV_USER, DEV_PW)] and env.read("jump_pw.txt").split() == [JUMP_PW]
     assert int(env.read("launches.txt")) == 1
@@ -392,25 +392,25 @@ def test_two_devices_are_independent(env):
             errors.append(exc)
 
     # second device shares the same fake ssh/device; separate tunnels and ports
-    threads = [threading.Thread(target=run, args=(n,)) for n in ("PAGENT", "PAGENT2")]
+    threads = [threading.Thread(target=run, args=(n,)) for n in ("LegacyRouter", "LegacyRouter2")]
     [t.start() for t in threads]
     [t.join() for t in threads]
     assert not errors and len(results) == 2
-    assert {s["device"] for s in terminal.list_device_sessions()} == {"PAGENT", "PAGENT2"}
-    terminal.close_device_terminal("PAGENT")
-    assert terminal._tunnel_alive("network-lab-tunnel-PAGENT2")
-    terminal.send_to_device("PAGENT2", "show clock", None, True)
+    assert {s["device"] for s in terminal.list_device_sessions()} == {"LegacyRouter", "LegacyRouter2"}
+    terminal.close_device_terminal("LegacyRouter")
+    assert terminal._tunnel_alive("network-lab-tunnel-LegacyRouter2")
+    terminal.send_to_device("LegacyRouter2", "show clock", None, True)
     time.sleep(1)
-    assert "out:show clock" in terminal.read_device("PAGENT2")["content"]
+    assert "out:show clock" in terminal.read_device("LegacyRouter2")["content"]
     env.dev2.close()
 
 
 def test_tunnel_session_unreachable_from_terminal_send_path(env):
-    terminal.open_device_terminal("PAGENT", _cfg())
+    terminal.open_device_terminal("LegacyRouter", _cfg())
     # the public API only derives production names; a tunnel name is not a device
     with pytest.raises(terminal.TerminalError):
-        terminal.send_to_device("tunnel-PAGENT", "x", None, True)
-    assert "network-lab-tunnel-PAGENT" not in {s["session_name"] for s in terminal.list_device_sessions()}
+        terminal.send_to_device("tunnel-LegacyRouter", "x", None, True)
+    assert "network-lab-tunnel-LegacyRouter" not in {s["session_name"] for s in terminal.list_device_sessions()}
 
 
 # ---- Discovery uses the same connection foundation ----
@@ -420,32 +420,32 @@ def test_discovery_login_over_tunnel_and_cleanup(env):
     from network_lab_mcp import discovery
 
     cfg = _cfg()
-    hostname = discovery._login_ios_style("PAGENT", cfg)
-    assert hostname == "PAGENT"
+    hostname = discovery._login_ios_style("LegacyRouter", cfg)
+    assert hostname == "LegacyRouter"
     assert env.dev.creds == [(DEV_USER, DEV_PW)] and env.read("jump_pw.txt").split() == [JUMP_PW]
     # Discovery namespace only: no production session was created
     assert terminal.list_device_sessions() == []
-    assert terminal._session_exists("network-lab-discoverytunnel-PAGENT")
-    terminal.send_to_bootstrap("PAGENT", "show lldp neighbors", None, True)
+    assert terminal._session_exists("network-lab-discoverytunnel-LegacyRouter")
+    terminal.send_to_bootstrap("LegacyRouter", "show lldp neighbors", None, True)
     time.sleep(1)
-    assert "out:show lldp neighbors" in terminal.read_bootstrap("PAGENT")
-    assert terminal.close_bootstrap_terminal("PAGENT") is True
+    assert "out:show lldp neighbors" in terminal.read_bootstrap("LegacyRouter")
+    assert terminal.close_bootstrap_terminal("LegacyRouter") is True
     assert _sessions() == []
 
 
 def test_discovery_refused_without_guard_and_creates_nothing(env, monkeypatch):
     monkeypatch.setattr(terminal, "TELNET_VIA_JUMP_ENABLED", False)
     with pytest.raises(terminal.TerminalError, match="not enabled"):
-        terminal.open_bootstrap_terminal("PAGENT", _cfg())
+        terminal.open_bootstrap_terminal("LegacyRouter", _cfg())
     assert _sessions() == [] and env.read("ssh_argv.txt") == ""
 
 
 def test_discovery_and_production_do_not_interfere(env):
-    terminal.open_device_terminal("PAGENT", _cfg())
-    terminal.open_bootstrap_terminal("PAGENT", _cfg())
-    assert terminal._tunnel_alive("network-lab-tunnel-PAGENT")
-    assert terminal._tunnel_alive("network-lab-discoverytunnel-PAGENT")
-    terminal.close_bootstrap_terminal("PAGENT")
+    terminal.open_device_terminal("LegacyRouter", _cfg())
+    terminal.open_bootstrap_terminal("LegacyRouter", _cfg())
+    assert terminal._tunnel_alive("network-lab-tunnel-LegacyRouter")
+    assert terminal._tunnel_alive("network-lab-discoverytunnel-LegacyRouter")
+    terminal.close_bootstrap_terminal("LegacyRouter")
     assert terminal.list_device_sessions()[0]["state"] == "running"
-    terminal.close_device_terminal("PAGENT")
+    terminal.close_device_terminal("LegacyRouter")
     assert _sessions() == []

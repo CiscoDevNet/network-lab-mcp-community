@@ -108,16 +108,16 @@ def test_scenario_prefix_matching_nothing_still_shows_cr():
 
 
 def test_reference_exact_name_shows_cr():
-    ctx = make_ctx(reference_names=("pagent_pkts", "pagent_tgn", "sample"))
-    result = grammar.help("global", "reference pagent_pkts", ctx)
-    assert [line.token for line in result.lines] == ["pagent_pkts"]
+    ctx = make_ctx(reference_names=("legacyrouter_pkts", "legacyrouter_tgn", "sample"))
+    result = grammar.help("global", "reference legacyrouter_pkts", ctx)
+    assert [line.token for line in result.lines] == ["legacyrouter_pkts"]
     assert result.show_cr is True
 
 
 def test_reference_prefix_only_shows_candidates_and_cr():
-    ctx = make_ctx(reference_names=("pagent_pkts", "pagent_tgn", "sample"))
-    result = grammar.help("global", "reference pa", ctx)
-    assert [line.token for line in result.lines] == ["pagent_pkts", "pagent_tgn"]
+    ctx = make_ctx(reference_names=("legacyrouter_pkts", "legacyrouter_tgn", "sample"))
+    result = grammar.help("global", "reference le", ctx)
+    assert [line.token for line in result.lines] == ["legacyrouter_pkts", "legacyrouter_tgn"]
     assert result.show_cr is True
 
 

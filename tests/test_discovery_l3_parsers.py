@@ -170,7 +170,7 @@ def test_show_vrf_unrecognized_output_raises():
 # ---- LegacyRouter-style combined example ----
 
 
-def test_pagent_style_combination_resolves_vrf_per_interface_default_otherwise():
+def test_legacyrouter_style_combination_resolves_vrf_per_interface_default_otherwise():
     ip_brief = parse_ip_interface_brief(
         "\n".join(
             [

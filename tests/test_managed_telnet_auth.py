@@ -79,7 +79,7 @@ def _preamble() -> str:
     return 'echo "Trying 192.0.2.30..."\necho "Connected to 192.0.2.30."\necho "Escape character is \'^]\'."\necho\n'
 
 
-def _script_username_then_password_succeed(tmp_path, hostname: str = "PAGENT", name: str = "user_pass_ok.sh") -> list[str]:
+def _script_username_then_password_succeed(tmp_path, hostname: str = "LegacyRouter", name: str = "user_pass_ok.sh") -> list[str]:
     body = (
         _preamble()
         + 'printf "Username: "\n'
@@ -95,7 +95,7 @@ def _script_username_then_password_succeed(tmp_path, hostname: str = "PAGENT", n
     return _write_script(tmp_path, name, body)
 
 
-def _script_password_only_succeed(tmp_path, hostname: str = "PAGENT", name: str = "pass_only_ok.sh") -> list[str]:
+def _script_password_only_succeed(tmp_path, hostname: str = "LegacyRouter", name: str = "pass_only_ok.sh") -> list[str]:
     body = (
         _preamble()
         + "stty -echo\n"
@@ -145,7 +145,7 @@ def _script_prompt_then_hangs(tmp_path) -> list[str]:
     return _write_script(tmp_path, "prompt_then_hangs.sh", body)
 
 
-def _script_harmless(tmp_path, hostname: str = "PAGENT", name: str = "harmless.sh") -> list[str]:
+def _script_harmless(tmp_path, hostname: str = "LegacyRouter", name: str = "harmless.sh") -> list[str]:
     return _write_script(tmp_path, name, f"echo {hostname}#\nsleep 30\n")
 
 
@@ -193,10 +193,10 @@ def _track_sends(monkeypatch) -> list[str]:
 
 def test_username_then_password_flow_succeeds(monkeypatch, tmp_path):
     _monkeypatch_transport(monkeypatch, _script_username_then_password_succeed(tmp_path))
-    result = terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+    result = terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
     assert result["transport"] == "telnet"
-    snapshot = terminal.capture_device_terminal_view("PAGENT")
-    assert "PAGENT#" in snapshot.pane_text
+    snapshot = terminal.capture_device_terminal_view("LegacyRouter")
+    assert "LegacyRouter#" in snapshot.pane_text
     # The username is typed with normal (non-suppressed) echo -- exactly
     # like a human typing it at a real Username: prompt would see it too
     # -- only the *password* is typed under suppressed echo (`stty -echo`,
@@ -211,7 +211,7 @@ def test_username_then_password_flow_succeeds(monkeypatch, tmp_path):
 def test_username_and_password_are_each_sent_exactly_once(monkeypatch, tmp_path):
     _monkeypatch_transport(monkeypatch, _script_username_then_password_succeed(tmp_path))
     sent = _track_sends(monkeypatch)
-    terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+    terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
     assert sent.count(_SENTINEL_USERNAME) == 1
     assert sent.count(_SENTINEL_PASSWORD) == 1
 
@@ -224,7 +224,7 @@ def test_username_and_password_are_each_sent_exactly_once(monkeypatch, tmp_path)
 def test_password_only_flow_succeeds_without_sending_a_username(monkeypatch, tmp_path):
     _monkeypatch_transport(monkeypatch, _script_password_only_succeed(tmp_path))
     sent = _track_sends(monkeypatch)
-    result = terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+    result = terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
     assert result["transport"] == "telnet"
     assert sent.count(_SENTINEL_PASSWORD) == 1
     assert _SENTINEL_USERNAME not in sent
@@ -239,12 +239,12 @@ def test_missing_configured_username_fails_safely(monkeypatch, tmp_path):
     _monkeypatch_transport(monkeypatch, _script_username_then_password_succeed(tmp_path))
     sent = _track_sends(monkeypatch)
     with pytest.raises(terminal.TerminalError) as excinfo:
-        terminal.open_device_terminal("PAGENT", _NO_USERNAME_CONFIG)
+        terminal.open_device_terminal("LegacyRouter", _NO_USERNAME_CONFIG)
     assert "no username is configured" in str(excinfo.value)
     assert len(sent) == 0  # nothing was typed: the transport is the pane's own process, started directly
     assert _SENTINEL_USERNAME not in sent
     assert _SENTINEL_PASSWORD not in sent
-    assert "PAGENT" not in {s["device"] for s in terminal.list_device_sessions()}
+    assert "LegacyRouter" not in {s["device"] for s in terminal.list_device_sessions()}
 
 
 # ==========================================================================
@@ -256,10 +256,10 @@ def test_missing_configured_password_fails_safely(monkeypatch, tmp_path):
     _monkeypatch_transport(monkeypatch, _script_password_only_succeed(tmp_path))
     sent = _track_sends(monkeypatch)
     with pytest.raises(terminal.TerminalError) as excinfo:
-        terminal.open_device_terminal("PAGENT", _NO_PASSWORD_CONFIG)
+        terminal.open_device_terminal("LegacyRouter", _NO_PASSWORD_CONFIG)
     assert "no private password is configured" in str(excinfo.value)
     assert len(sent) == 0  # nothing was typed: the transport is the pane's own process, started directly
-    assert "PAGENT" not in {s["device"] for s in terminal.list_device_sessions()}
+    assert "LegacyRouter" not in {s["device"] for s in terminal.list_device_sessions()}
 
 
 # ==========================================================================
@@ -271,7 +271,7 @@ def test_repeated_password_prompt_fails_closed_without_resending(monkeypatch, tm
     _monkeypatch_transport(monkeypatch, _script_repeated_password(tmp_path))
     sent = _track_sends(monkeypatch)
     with pytest.raises(terminal.TerminalError, match="password rejected"):
-        terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+        terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
     assert sent.count(_SENTINEL_PASSWORD) == 1
 
 
@@ -283,10 +283,10 @@ def test_repeated_password_prompt_fails_closed_without_resending(monkeypatch, tm
 def test_explicit_login_failure_message(monkeypatch, tmp_path):
     _monkeypatch_transport(monkeypatch, _script_explicit_failure(tmp_path))
     with pytest.raises(terminal.TerminalError) as excinfo:
-        terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+        terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
     assert "telnet authentication failed" in str(excinfo.value).lower()
     assert _SENTINEL_PASSWORD not in str(excinfo.value)
-    assert "PAGENT" not in {s["device"] for s in terminal.list_device_sessions()}
+    assert "LegacyRouter" not in {s["device"] for s in terminal.list_device_sessions()}
 
 
 # ==========================================================================
@@ -298,7 +298,7 @@ def test_timeout_after_password_sent_fails_bounded(monkeypatch, tmp_path):
     _monkeypatch_transport(monkeypatch, _script_prompt_then_hangs(tmp_path))
     start = time.monotonic()
     with pytest.raises(terminal.TerminalError, match="timed out"):
-        terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+        terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
     assert time.monotonic() - start < 15  # bounded, well under the real 30s hang
     assert _SENTINEL_PASSWORD not in str(terminal.list_device_sessions())
 
@@ -309,7 +309,7 @@ def test_no_login_prompt_ever_appears_fails_bounded_and_leaves_session_usable(mo
     _authenticate_managed_telnet_session() does not raise in this case
     (there is nothing wrong to report), it simply stops watching."""
     _monkeypatch_transport(monkeypatch, _script_never_prompts(tmp_path))
-    result = terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+    result = terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
     assert result["transport"] == "telnet"
 
 
@@ -321,8 +321,8 @@ def test_no_login_prompt_ever_appears_fails_bounded_and_leaves_session_usable(mo
 def test_newly_created_session_closed_on_definitive_auth_failure(monkeypatch, tmp_path):
     _monkeypatch_transport(monkeypatch, _script_explicit_failure(tmp_path))
     with pytest.raises(terminal.TerminalError):
-        terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
-    assert "PAGENT" not in {s["device"] for s in terminal.list_device_sessions()}
+        terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
+    assert "LegacyRouter" not in {s["device"] for s in terminal.list_device_sessions()}
 
 
 def test_pre_existing_session_is_not_destroyed_by_a_later_failed_open(monkeypatch, tmp_path):
@@ -331,10 +331,10 @@ def test_pre_existing_session_is_not_destroyed_by_a_later_failed_open(monkeypatc
 
     _monkeypatch_transport(monkeypatch, _script_explicit_failure(tmp_path))
     with pytest.raises(terminal.TerminalError):
-        terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+        terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
 
     assert "R9" in {s["device"] for s in terminal.list_device_sessions()}
-    assert "PAGENT" not in {s["device"] for s in terminal.list_device_sessions()}
+    assert "LegacyRouter" not in {s["device"] for s in terminal.list_device_sessions()}
 
 
 # ==========================================================================
@@ -343,20 +343,20 @@ def test_pre_existing_session_is_not_destroyed_by_a_later_failed_open(monkeypatc
 
 
 def test_existing_authenticated_session_is_untouched(monkeypatch, tmp_path):
-    _monkeypatch_transport(monkeypatch, _script_harmless(tmp_path, "PAGENT"))
-    terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
-    baseline = terminal.capture_device_terminal_view("PAGENT").pane_text
+    _monkeypatch_transport(monkeypatch, _script_harmless(tmp_path, "LegacyRouter"))
+    terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
+    baseline = terminal.capture_device_terminal_view("LegacyRouter").pane_text
 
     sent = []
     monkeypatch.setattr(terminal, "_send_literal_text", lambda *a: sent.append(a[1]))
     monkeypatch.setattr(terminal, "_send_secret_text", lambda *a: sent.append(a[1]))
     monkeypatch.setattr(terminal, "_send_enter", lambda *a: sent.append("<enter>"))
 
-    result = terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+    result = terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
 
     assert result["reused"] is True
     assert sent == []
-    assert terminal.capture_device_terminal_view("PAGENT").pane_text == baseline
+    assert terminal.capture_device_terminal_view("LegacyRouter").pane_text == baseline
 
 
 def _create_bypassed(monkeypatch, tmp_path, script) -> None:
@@ -365,7 +365,7 @@ def _create_bypassed(monkeypatch, tmp_path, script) -> None:
     tests/test_managed_terminal_auth.py's own pattern for this."""
     _monkeypatch_transport(monkeypatch, script)
     monkeypatch.setattr(terminal, "_authenticate_managed_session", lambda *a, **k: None)
-    terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+    terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
     monkeypatch.undo()  # restore the real _authenticate_managed_session (and everything else)
 
 
@@ -379,11 +379,11 @@ def test_existing_session_at_username_prompt_resumes_and_completes(monkeypatch, 
     monkeypatch.setattr(terminal, "_MANAGED_LOGIN_TIMEOUT_SECONDS", 6)
     monkeypatch.setattr(terminal, "_MANAGED_AUTH_SETTLE_TIMEOUT_SECONDS", 6)
 
-    result = terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+    result = terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
     assert result["reused"] is True
     assert len(terminal.list_device_sessions()) == 1
-    snapshot = terminal.capture_device_terminal_view("PAGENT")
-    assert "PAGENT#" in snapshot.pane_text
+    snapshot = terminal.capture_device_terminal_view("LegacyRouter")
+    assert "LegacyRouter#" in snapshot.pane_text
     assert _SENTINEL_PASSWORD not in snapshot.pane_text  # username is normally echoed -- see the other test's comment
 
 
@@ -397,12 +397,12 @@ def test_existing_session_at_password_prompt_resumes_and_completes(monkeypatch, 
     monkeypatch.setattr(terminal, "_MANAGED_AUTH_SETTLE_TIMEOUT_SECONDS", 6)
     sent = _track_sends(monkeypatch)
 
-    result = terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+    result = terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
     assert result["reused"] is True
     assert len(terminal.list_device_sessions()) == 1
     assert sent.count(_SENTINEL_PASSWORD) == 1
-    snapshot = terminal.capture_device_terminal_view("PAGENT")
-    assert "PAGENT#" in snapshot.pane_text
+    snapshot = terminal.capture_device_terminal_view("LegacyRouter")
+    assert "LegacyRouter#" in snapshot.pane_text
 
 
 def test_ambiguous_existing_session_is_never_injected_into(monkeypatch, tmp_path):
@@ -415,7 +415,7 @@ def test_ambiguous_existing_session_is_never_injected_into(monkeypatch, tmp_path
     monkeypatch.setattr(terminal, "_MANAGED_AUTH_SETTLE_TIMEOUT_SECONDS", 6)
     sent = _track_sends(monkeypatch)
 
-    result = terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+    result = terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
     assert result["reused"] is True
     assert sent == []  # no credential injected into ambiguous output
 
@@ -450,7 +450,7 @@ def test_concurrent_same_device_open_sends_password_at_most_once(monkeypatch, tm
 
     def run():
         try:
-            results.append(terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG))
+            results.append(terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG))
         except Exception as exc:  # pragma: no cover - failure path
             errors.append(exc)
 
@@ -469,7 +469,7 @@ def test_concurrent_same_device_open_sends_password_at_most_once(monkeypatch, tm
 
 def test_ssh_and_telnet_open_overlap_without_credential_crosstalk(monkeypatch, tmp_path):
     barrier = threading.Barrier(2, timeout=15)
-    sent: dict[str, list[str]] = {"R1": [], "PAGENT": []}
+    sent: dict[str, list[str]] = {"R1": [], "LegacyRouter": []}
     sent_lock = threading.Lock()
     real_send = terminal._send_literal_text
     real_secret_send = terminal._send_secret_text
@@ -514,7 +514,7 @@ def test_ssh_and_telnet_open_overlap_without_credential_crosstalk(monkeypatch, t
         "r1.sh",
         'stty -echo\nprintf "r1-user@192.0.2.11'"'"'s password: "\nread x\nstty echo\necho\necho R1-OK\nsleep 5\n',
     )
-    telnet_script = _script_username_then_password_succeed(tmp_path, hostname="PAGENT", name="pagent.sh")
+    telnet_script = _script_username_then_password_succeed(tmp_path, hostname="LegacyRouter", name="legacyrouter.sh")
 
     def fake_transport(config, **kw):
         if config.get("transport") == "ssh":
@@ -526,16 +526,16 @@ def test_ssh_and_telnet_open_overlap_without_credential_crosstalk(monkeypatch, t
     ssh_config = {"transport": "ssh", "address": "192.0.2.11", "username": "r1-user", "password": "R1-ONLY-SECRET"}
 
     t1 = threading.Thread(target=lambda: terminal.open_device_terminal("R1", ssh_config))
-    t2 = threading.Thread(target=lambda: terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG))
+    t2 = threading.Thread(target=lambda: terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG))
     t1.start()
     t2.start()
     t1.join(timeout=15)
     t2.join(timeout=15)
 
-    assert set(entered) == {"network-lab-device-R1", "network-lab-device-PAGENT"}
+    assert set(entered) == {"network-lab-device-R1", "network-lab-device-LegacyRouter"}
     assert sent["R1"].count("R1-ONLY-SECRET") == 1
-    assert sent["PAGENT"].count(_SENTINEL_PASSWORD) == 1
-    assert "R1-ONLY-SECRET" not in sent["PAGENT"]
+    assert sent["LegacyRouter"].count(_SENTINEL_PASSWORD) == 1
+    assert "R1-ONLY-SECRET" not in sent["LegacyRouter"]
     assert _SENTINEL_PASSWORD not in sent["R1"]
 
 
@@ -617,7 +617,7 @@ def test_secrets_absent_from_mcp_tool_result(monkeypatch, tmp_path):
     monkeypatch.setattr(lab, "get_device", lambda device: ("sample_lab", _DIRECT_CONFIG))
 
     async def call():
-        return await mcp_server.mcp.call_tool("terminal_open", {"device": "PAGENT"})
+        return await mcp_server.mcp.call_tool("terminal_open", {"device": "LegacyRouter"})
 
     result = anyio.run(call)
     serialized = str(result)
@@ -628,7 +628,7 @@ def test_secrets_absent_from_mcp_tool_result(monkeypatch, tmp_path):
 def test_secrets_absent_from_exception_on_failure(monkeypatch, tmp_path):
     _monkeypatch_transport(monkeypatch, _script_explicit_failure(tmp_path))
     with pytest.raises(terminal.TerminalError) as excinfo:
-        terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+        terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
     assert _SENTINEL_USERNAME not in str(excinfo.value)
     assert _SENTINEL_PASSWORD not in str(excinfo.value)
     assert _SENTINEL_USERNAME not in repr(excinfo.value)
@@ -643,7 +643,7 @@ def test_secrets_absent_from_mcp_tool_error_on_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(lab, "get_device", lambda device: ("sample_lab", _DIRECT_CONFIG))
 
     async def call():
-        return await mcp_server.mcp.call_tool("terminal_open", {"device": "PAGENT"})
+        return await mcp_server.mcp.call_tool("terminal_open", {"device": "LegacyRouter"})
 
     with pytest.raises(ToolError) as excinfo:
         anyio.run(call)
@@ -654,7 +654,7 @@ def test_secrets_absent_from_mcp_tool_error_on_failure(monkeypatch, tmp_path):
 def test_secrets_absent_from_application_log(monkeypatch, tmp_path, caplog):
     _monkeypatch_transport(monkeypatch, _script_username_then_password_succeed(tmp_path))
     with caplog.at_level("DEBUG"):
-        terminal.open_device_terminal("PAGENT", _DIRECT_CONFIG)
+        terminal.open_device_terminal("LegacyRouter", _DIRECT_CONFIG)
     assert _SENTINEL_USERNAME not in caplog.text
     assert _SENTINEL_PASSWORD not in caplog.text
 
@@ -684,7 +684,7 @@ def test_combined_login_wait_pattern_matches_a_non_final_line():
     This is exactly what let the post-password "settle" wait in
     _authenticate_managed_telnet_session() time out even after the device
     had already reached its real prompt."""
-    text = "Username: someuser\nPassword:\nPAGENT#\nunrelated-shell-prompt$"
+    text = "Username: someuser\nPassword:\nLegacyRouter#\nunrelated-shell-prompt$"
     assert terminal._TELNET_MANAGED_LOGIN_WAIT_RE.search(text) is not None
 
 
@@ -696,5 +696,5 @@ def test_managed_ssh_combined_login_wait_pattern_matches_a_non_final_line():
 def test_discovery_combined_login_wait_pattern_matches_a_non_final_line():
     from network_lab_mcp import discovery
 
-    text = "Username: someuser\nPassword:\nPAGENT#\nunrelated-shell-prompt$"
+    text = "Username: someuser\nPassword:\nLegacyRouter#\nunrelated-shell-prompt$"
     assert discovery._IOS_STYLE_LOGIN_WAIT_RE.search(text) is not None

@@ -28,22 +28,22 @@ def test_same_link_seen_via_both_protocols_dedupes_to_one_link():
     from network_lab_mcp.discovery import reconcile_links
 
     resolved = [
-        (_lldp("R1", "Gi0/0/0/10", "Gig0/0"), "PAGENT"),
-        (_cdp("R1", "Gi0/0/0/10", "Gig0/0"), "PAGENT"),
+        (_lldp("R1", "Gi0/0/0/10", "Gig0/0"), "LegacyRouter"),
+        (_cdp("R1", "Gi0/0/0/10", "Gig0/0"), "LegacyRouter"),
     ]
     links, conflicts = reconcile_links(resolved)
     assert conflicts == []
     assert len(links) == 1
     assert links[0].a_device == "R1" and links[0].a_interface == "Gi0/0/0/10"
-    assert links[0].b_device == "PAGENT" and links[0].b_interface == "Gig0/0"
+    assert links[0].b_device == "LegacyRouter" and links[0].b_interface == "Gig0/0"
 
 
 def test_reciprocal_cdp_only_observations_collapse_into_one_link():
     from network_lab_mcp.discovery import reconcile_links
 
     resolved = [
-        (_cdp("R1", "Gi0/0/0/10", "Gig0/0"), "PAGENT"),
-        (_cdp("PAGENT", "Gig0/0", "Gi0/0/0/10"), "R1"),
+        (_cdp("R1", "Gi0/0/0/10", "Gig0/0"), "LegacyRouter"),
+        (_cdp("LegacyRouter", "Gig0/0", "Gi0/0/0/10"), "R1"),
     ]
     links, conflicts = reconcile_links(resolved)
     assert conflicts == []
@@ -55,7 +55,7 @@ def test_lldp_and_cdp_disagree_about_the_same_local_interface_is_a_conflict():
 
     resolved = [
         (_lldp("R1", "Gi0/0/0/10", "port-x"), "SW1"),
-        (_cdp("R1", "Gi0/0/0/10", "Gig0/0"), "PAGENT"),
+        (_cdp("R1", "Gi0/0/0/10", "Gig0/0"), "LegacyRouter"),
     ]
     links, conflicts = reconcile_links(resolved)
     assert links == []
@@ -73,8 +73,8 @@ def test_two_cdp_rows_disagreeing_about_one_local_interface_is_also_a_conflict()
     from network_lab_mcp.discovery import reconcile_links
 
     resolved = [
-        (_cdp("R1", "Gi0/0/0/10", "Gig0/0"), "PAGENT"),
-        (_cdp("R1", "Gi0/0/0/10", "Gig0/1"), "PAGENT"),
+        (_cdp("R1", "Gi0/0/0/10", "Gig0/0"), "LegacyRouter"),
+        (_cdp("R1", "Gi0/0/0/10", "Gig0/1"), "LegacyRouter"),
     ]
     links, conflicts = reconcile_links(resolved)
     assert links == []
@@ -86,7 +86,7 @@ def test_unrelated_link_is_unaffected_by_a_conflict_elsewhere():
 
     resolved = [
         (_lldp("R1", "Gi0/0/0/10", "port-x"), "SW1"),
-        (_cdp("R1", "Gi0/0/0/10", "Gig0/0"), "PAGENT"),
+        (_cdp("R1", "Gi0/0/0/10", "Gig0/0"), "LegacyRouter"),
         (_lldp("R1", "Gi0/0/0/2", "Gi0/0/0/2"), "R2"),
         (_lldp("R2", "Gi0/0/0/2", "Gi0/0/0/2"), "R1"),
     ]

@@ -31,14 +31,14 @@ def _write_access_info(lab_root, devices):
 def test_select_ios_targets_filters_by_normalized_type():
     access_data = {
         "devices": {
-            "PAGENT": {"type": "ios", "address": "192.0.2.30", "transport": "telnet"},
+            "LegacyRouter": {"type": "ios", "address": "192.0.2.30", "transport": "telnet"},
             "SW1": {"type": "iosxe", "address": "192.0.2.31"},
             "R1": {"type": "iosxr", "address": "192.0.2.11"},
         }
     }
     targets = discovery._select_ios_targets(access_data)
-    assert set(targets) == {"PAGENT"}
-    assert targets["PAGENT"]["transport"] == "telnet"
+    assert set(targets) == {"LegacyRouter"}
+    assert targets["LegacyRouter"]["transport"] == "telnet"
 
 
 def test_select_ios_targets_empty_when_none_present():
@@ -51,10 +51,10 @@ _IP_BRIEF_HEADER = "Interface              IP-Address      OK? Method Status    
 _VRF_HEADER = "  Name                             Default RD            Protocols   Interfaces"
 
 
-def _fake_ios_collect_pagent(device_id, cfg, include_l3=False):
+def _fake_ios_collect_legacyrouter(device_id, cfg, include_l3=False):
     row_r1 = f"{'ASR9001-R1':<17}{'Gig0/0':<18}{'137':<11}{'R':<12}{'ASR9K Ser':<12}Gi0/0/0/10"
     return {
-        "hostname": "PAGENT",
+        "hostname": "LegacyRouter",
         "show_version": "Cisco IOS Software, 7200 Software",
         "show_cdp_neighbors": f"{_CDP_HEADER}\n{row_r1}\n",
         "show_vrf": "\n".join(
@@ -77,8 +77,8 @@ def _fake_ios_collect_pagent(device_id, cfg, include_l3=False):
 
 
 def test_ios_only_definition_discovers_via_cdp(lab_root, monkeypatch):
-    _write_access_info(lab_root, {"PAGENT": {"type": "ios", "address": "192.0.2.30", "transport": "telnet"}})
-    monkeypatch.setattr(discovery, "_bootstrap_collect_ios", _fake_ios_collect_pagent)
+    _write_access_info(lab_root, {"LegacyRouter": {"type": "ios", "address": "192.0.2.30", "transport": "telnet"}})
+    monkeypatch.setattr(discovery, "_bootstrap_collect_ios", _fake_ios_collect_legacyrouter)
 
     result = discovery.discover_topology(lab_root)
 
@@ -86,7 +86,7 @@ def test_ios_only_definition_discovers_via_cdp(lab_root, monkeypatch):
     assert result.iosxr_target_count == 0
     assert result.iosxe_target_count == 0
     assert result.connected_count == 1
-    assert result.devices["PAGENT"]["type"] == "ios"
+    assert result.devices["LegacyRouter"]["type"] == "ios"
     # LegacyRouter's own CDP neighbor (ASR9001-R1) is not a managed device in
     # this definition -- stays unresolved, never auto-created.
     assert result.managed_links == []
@@ -94,12 +94,12 @@ def test_ios_only_definition_discovers_via_cdp(lab_root, monkeypatch):
 
 
 def test_ios_l3_enrichment_excludes_management_address_and_keeps_data_plane(lab_root, monkeypatch):
-    _write_access_info(lab_root, {"PAGENT": {"type": "ios", "address": "192.0.2.30", "transport": "telnet"}})
-    monkeypatch.setattr(discovery, "_bootstrap_collect_ios", _fake_ios_collect_pagent)
+    _write_access_info(lab_root, {"LegacyRouter": {"type": "ios", "address": "192.0.2.30", "transport": "telnet"}})
+    monkeypatch.setattr(discovery, "_bootstrap_collect_ios", _fake_ios_collect_legacyrouter)
 
     result = discovery.discover_topology(lab_root, include_l3=True)
 
-    interfaces = result.devices["PAGENT"]["interfaces"]
+    interfaces = result.devices["LegacyRouter"]["interfaces"]
     # FastEthernet0/0's address matches the access-info connection address
     # for LegacyRouter -- must never be copied into topology L3 data. At the raw
     # DiscoveryResult level this is an explicit `None` removal signal (see
@@ -112,8 +112,8 @@ def test_ios_l3_enrichment_excludes_management_address_and_keeps_data_plane(lab_
     assert result.l3_interface_count == 1
 
     devices = discovery.build_discovery_candidate(result, {})["devices"]
-    assert "FastEthernet0/0" not in devices["PAGENT"]["interfaces"]
-    assert devices["PAGENT"]["interfaces"]["GigabitEthernet0/0.2000"]["ipv4_address"] == "10.20.0.10"
+    assert "FastEthernet0/0" not in devices["LegacyRouter"]["interfaces"]
+    assert devices["LegacyRouter"]["interfaces"]["GigabitEthernet0/0.2000"]["ipv4_address"] == "10.20.0.10"
 
 
 def test_only_ios_collector_is_invoked_for_ios_targets(lab_root, monkeypatch):
@@ -121,7 +121,7 @@ def test_only_ios_collector_is_invoked_for_ios_targets(lab_root, monkeypatch):
 
     def fake_ios(device_id, cfg):
         calls.append(("ios", device_id))
-        return _fake_ios_collect_pagent(device_id, cfg)
+        return _fake_ios_collect_legacyrouter(device_id, cfg)
 
     def fake_iosxr(device_id, cfg):
         calls.append(("iosxr", device_id))
@@ -141,18 +141,18 @@ def test_only_ios_collector_is_invoked_for_ios_targets(lab_root, monkeypatch):
         lab_root,
         {
             "R1": {"type": "iosxr", "address": "192.0.2.11", "transport": "ssh"},
-            "PAGENT": {"type": "ios", "address": "192.0.2.30", "transport": "telnet"},
+            "LegacyRouter": {"type": "ios", "address": "192.0.2.30", "transport": "telnet"},
         },
     )
 
     discovery.discover_topology(lab_root)
 
-    assert ("ios", "PAGENT") in calls
+    assert ("ios", "LegacyRouter") in calls
     assert ("iosxr", "R1") in calls
     assert len(calls) == 2
 
 
-def test_pagent_as_classic_ios_resolves_cdp_links_to_managed_routers(lab_root, monkeypatch):
+def test_legacyrouter_as_classic_ios_resolves_cdp_links_to_managed_routers(lab_root, monkeypatch):
     """The LegacyRouter scenario, with LegacyRouter correctly typed `ios` instead of
     `iosxe`: R1/R2 (IOS XR) see LegacyRouter via
     CDP, LegacyRouter sees R1/R2 back via CDP -- both should resolve as
@@ -160,7 +160,7 @@ def test_pagent_as_classic_ios_resolves_cdp_links_to_managed_routers(lab_root, m
 
     def fake_iosxr_collect(device_id, cfg):
         port = "Gig0/0" if device_id == "R1" else "Gig0/1"
-        row = f"{'PAGENT':<17}{'Gi0/0/0/10':<18}{'144':<11}{'R':<12}{'Cisco 720':<12}{port}"
+        row = f"{'LegacyRouter':<17}{'Gi0/0/0/10':<18}{'144':<11}{'R':<12}{'Cisco 720':<12}{port}"
         return {
             "hostname": f"HOST-{device_id}",
             "show_version": "x",
@@ -176,7 +176,7 @@ def test_pagent_as_classic_ios_resolves_cdp_links_to_managed_routers(lab_root, m
         unmanaged = "labsw-a07.example.com"
         cont = f"{'':<17}{'Fas 0/0':<18}{'159':<11}{'S I':<12}{'WS-C2960X':<12}Gig 1/0/16"
         return {
-            "hostname": "PAGENT",
+            "hostname": "LegacyRouter",
             "show_version": "Cisco IOS Software, 7200 Software",
             "show_cdp_neighbors": f"{_CDP_HEADER}\n{row_r1}\n{row_r2}\n{unmanaged}\n{cont}\n",
             "show_vrf": _VRF_HEADER + "\n",
@@ -191,7 +191,7 @@ def test_pagent_as_classic_ios_resolves_cdp_links_to_managed_routers(lab_root, m
         {
             "R1": {"type": "iosxr", "address": "192.0.2.11", "transport": "ssh"},
             "R2": {"type": "iosxr", "address": "192.0.2.12", "transport": "ssh"},
-            "PAGENT": {"type": "ios", "address": "192.0.2.30", "transport": "telnet"},
+            "LegacyRouter": {"type": "ios", "address": "192.0.2.30", "transport": "telnet"},
         },
     )
 
@@ -202,8 +202,8 @@ def test_pagent_as_classic_ios_resolves_cdp_links_to_managed_routers(lab_root, m
         tuple(sorted(((link.a_device, link.a_interface), (link.b_device, link.b_interface))))
         for link in result.managed_links
     }
-    assert (("PAGENT", "Gig0/0"), ("R1", "Gi0/0/0/10")) in link_pairs
-    assert (("PAGENT", "Gig0/1"), ("R2", "Gi0/0/0/10")) in link_pairs
+    assert (("LegacyRouter", "Gig0/0"), ("R1", "Gi0/0/0/10")) in link_pairs
+    assert (("LegacyRouter", "Gig0/1"), ("R2", "Gi0/0/0/10")) in link_pairs
     unresolved_ids = {u.remote_device_id_raw for u in result.unresolved}
     assert "labsw-a07.example.com" in unresolved_ids
     assert "labsw-a07.example.com" not in result.devices

@@ -118,7 +118,7 @@ def test_real_iosxe_device_login_and_cdp_collection(device_id):
     # command having executed without raising (above) is what's asserted.
 
 
-@pytest.mark.parametrize("device_id", ["PAGENT"])
+@pytest.mark.parametrize("device_id", ["LegacyRouter"])
 def test_real_ios_device_login_and_cdp_collection(device_id):
     """Gated, optional: only meaningful if the selected access-info defines
     a classic IOS target (e.g. LegacyRouter). Skips (does not fail) if absent,

@@ -36,7 +36,7 @@ _DIRECT_CONFIG = {
 _USERNAME_CONFIG = {
     "transport": "ssh",
     "address": "192.0.2.31",
-    "username": "pagent-user",
+    "username": "legacyrouter-user",
     "password": _SENTINEL_PASSWORD,
 }
 
@@ -65,7 +65,7 @@ def _write_script(tmp_path, name: str, body: str) -> list[str]:
     return ["bash", str(path)]
 
 
-def _script_direct_password(tmp_path, hostname: str = "PAGENT") -> list[str]:
+def _script_direct_password(tmp_path, hostname: str = "LegacyRouter") -> list[str]:
     body = (
         'stty -echo\n'
         'printf "Password: "\n'
@@ -78,7 +78,7 @@ def _script_direct_password(tmp_path, hostname: str = "PAGENT") -> list[str]:
     return _write_script(tmp_path, "direct_password.sh", body)
 
 
-def _script_username_then_password(tmp_path, hostname: str = "PAGENT") -> list[str]:
+def _script_username_then_password(tmp_path, hostname: str = "LegacyRouter") -> list[str]:
     body = (
         'printf "Username: "\n'
         "read u\n"
@@ -97,7 +97,7 @@ def _script_never_prompts(tmp_path) -> list[str]:
     return _write_script(tmp_path, "never_prompts.sh", "echo booting...\nsleep 8\n")
 
 
-def _script_full_session(tmp_path, hostname: str = "PAGENT") -> list[str]:
+def _script_full_session(tmp_path, hostname: str = "LegacyRouter") -> list[str]:
     """Answers the password prompt once, then keeps echoing the exec
     prompt back after every subsequent command line -- enough to let a
     *whole* bootstrap collector (login + several `show` commands) run to
@@ -126,7 +126,7 @@ def _script_password_reject_if_empty(tmp_path) -> list[str]:
         "read x\n"
         "stty echo\n"
         "echo\n"
-        'if [ -z "$x" ]; then echo "%% Login invalid"; sleep 8; else echo PAGENT#; sleep 5; fi\n'
+        'if [ -z "$x" ]; then echo "%% Login invalid"; sleep 8; else echo LegacyRouter#; sleep 5; fi\n'
     )
     return _write_script(tmp_path, "password_reject_if_empty.sh", body)
 
@@ -138,17 +138,17 @@ def _monkeypatch_transport(monkeypatch, command: list[str], transport: str = "te
 def test_direct_password_login_reaches_exec_prompt(tmp_path, monkeypatch):
     _monkeypatch_transport(monkeypatch, _script_direct_password(tmp_path))
 
-    hostname = discovery._login_ios_style("PAGENT", _DIRECT_CONFIG)
+    hostname = discovery._login_ios_style("LegacyRouter", _DIRECT_CONFIG)
 
-    assert hostname == "PAGENT"
+    assert hostname == "LegacyRouter"
 
 
 def test_username_then_password_login_reaches_exec_prompt(tmp_path, monkeypatch):
     _monkeypatch_transport(monkeypatch, _script_username_then_password(tmp_path), transport="ssh")
 
-    hostname = discovery._login_ios_style("PAGENT", _USERNAME_CONFIG)
+    hostname = discovery._login_ios_style("LegacyRouter", _USERNAME_CONFIG)
 
-    assert hostname == "PAGENT"
+    assert hostname == "LegacyRouter"
 
 
 def test_username_prompt_without_configured_username_fails_closed(tmp_path, monkeypatch):
@@ -156,7 +156,7 @@ def test_username_prompt_without_configured_username_fails_closed(tmp_path, monk
     config = {"transport": "ssh", "address": "192.0.2.31", "password": _SENTINEL_PASSWORD}  # no username
 
     with pytest.raises(discovery.DiscoveryError, match="username"):
-        discovery._login_ios_style("PAGENT", config)
+        discovery._login_ios_style("LegacyRouter", config)
 
 
 def test_no_password_configured_is_rejected_by_the_device_and_fails_closed(tmp_path, monkeypatch):
@@ -164,7 +164,7 @@ def test_no_password_configured_is_rejected_by_the_device_and_fails_closed(tmp_p
     config = {"transport": "telnet", "address": "192.0.2.30"}  # no password
 
     with pytest.raises(terminal.TerminalError):
-        discovery._login_ios_style("PAGENT", config)
+        discovery._login_ios_style("LegacyRouter", config)
 
 
 def test_login_never_reaching_a_prompt_times_out_closed(tmp_path, monkeypatch):
@@ -176,14 +176,14 @@ def test_login_never_reaching_a_prompt_times_out_closed(tmp_path, monkeypatch):
     _monkeypatch_transport(monkeypatch, _script_never_prompts(tmp_path))
 
     with pytest.raises(terminal.TerminalError, match="Timed out"):
-        discovery._login_ios_style("PAGENT", _DIRECT_CONFIG)
+        discovery._login_ios_style("LegacyRouter", _DIRECT_CONFIG)
 
 
 def test_password_never_appears_in_the_raised_error(tmp_path, monkeypatch):
     _monkeypatch_transport(monkeypatch, _script_never_prompts(tmp_path))
 
     with pytest.raises(terminal.TerminalError) as exc_info:
-        discovery._login_ios_style("PAGENT", _DIRECT_CONFIG)
+        discovery._login_ios_style("LegacyRouter", _DIRECT_CONFIG)
 
     assert _SENTINEL_PASSWORD not in str(exc_info.value)
 
@@ -191,19 +191,19 @@ def test_password_never_appears_in_the_raised_error(tmp_path, monkeypatch):
 def test_bootstrap_collect_iosxe_converts_login_timeout_to_discovery_error(tmp_path, monkeypatch):
     _monkeypatch_transport(monkeypatch, _script_never_prompts(tmp_path))
 
-    with pytest.raises(discovery.DiscoveryError, match="PAGENT"):
-        discovery._bootstrap_collect_iosxe("PAGENT", _DIRECT_CONFIG)
+    with pytest.raises(discovery.DiscoveryError, match="LegacyRouter"):
+        discovery._bootstrap_collect_iosxe("LegacyRouter", _DIRECT_CONFIG)
 
 
 def test_bootstrap_collect_ios_uses_the_same_shared_login(tmp_path, monkeypatch):
     """Classic IOS reuses _login_ios_style() exactly like IOS
     XE does, proven end-to-end (login through every collected command)
     rather than just by code inspection."""
-    _monkeypatch_transport(monkeypatch, _script_full_session(tmp_path, hostname="PAGENT"))
+    _monkeypatch_transport(monkeypatch, _script_full_session(tmp_path, hostname="LegacyRouter"))
 
-    info = discovery._bootstrap_collect_ios("PAGENT", _DIRECT_CONFIG, include_l3=True)
+    info = discovery._bootstrap_collect_ios("LegacyRouter", _DIRECT_CONFIG, include_l3=True)
 
-    assert info["hostname"] == "PAGENT"
+    assert info["hostname"] == "LegacyRouter"
     assert "show_cdp_neighbors" in info
     assert "show_vrf" in info
     assert "show_ip_interface_brief" in info
@@ -212,5 +212,5 @@ def test_bootstrap_collect_ios_uses_the_same_shared_login(tmp_path, monkeypatch)
 def test_bootstrap_collect_ios_login_timeout_converts_to_discovery_error(tmp_path, monkeypatch):
     _monkeypatch_transport(monkeypatch, _script_never_prompts(tmp_path))
 
-    with pytest.raises(discovery.DiscoveryError, match="PAGENT"):
-        discovery._bootstrap_collect_ios("PAGENT", _DIRECT_CONFIG)
+    with pytest.raises(discovery.DiscoveryError, match="LegacyRouter"):
+        discovery._bootstrap_collect_ios("LegacyRouter", _DIRECT_CONFIG)
