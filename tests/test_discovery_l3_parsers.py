@@ -167,7 +167,7 @@ def test_show_vrf_unrecognized_output_raises():
         parse_show_vrf("% Invalid input detected at '^' marker.\n")
 
 
-# ---- PAGENT-style combined example ----
+# ---- LegacyRouter-style combined example ----
 
 
 def test_pagent_style_combination_resolves_vrf_per_interface_default_otherwise():

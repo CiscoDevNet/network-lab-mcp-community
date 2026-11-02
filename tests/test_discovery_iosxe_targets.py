@@ -4,8 +4,8 @@
 same convention as tests/test_discovery_parallel_collection.py and
 tests/test_discovery_workflow.py -- never a real network/tmux operation
 here). Covers: `_select_iosxe_targets()` in isolation, an IOS XE-only
-definition, a mixed IOS XR + IOS XE definition (the PAGENT scenario: R1/R2
-are IOS XR, PAGENT is IOS XE, CDP-only), and that `nxos`/`host` devices are
+definition, a mixed IOS XR + IOS XE definition (the LegacyRouter scenario: R1/R2
+are IOS XR, LegacyRouter is IOS XE, CDP-only), and that `nxos`/`host` devices are
 still silently skipped exactly as before."""
 
 from __future__ import annotations
@@ -93,18 +93,18 @@ def test_iosxe_only_definition_discovers_via_cdp(lab_root, monkeypatch):
     assert result.iosxe_target_count == 1
     assert result.connected_count == 1
     assert result.devices == {"PAGENT": {"type": "iosxe"}}
-    # PAGENT's own CDP neighbors (HOST-R1/-R2) are not managed devices
-    # here (only PAGENT itself is in this definition), so they stay
+    # LegacyRouter's own CDP neighbors (HOST-R1/-R2) are not managed devices
+    # here (only LegacyRouter itself is in this definition), so they stay
     # unresolved -- never auto-created as topology devices.
     assert result.managed_links == []
     assert {u.remote_device_id_raw for u in result.unresolved} == {"HOST-R1", "HOST-R2"}
 
 
 def test_mixed_iosxr_and_iosxe_definition_produces_expected_managed_links(lab_root, monkeypatch):
-    """The PAGENT scenario: R1 and R2 are IOS XR (LLDP+CDP-capable, but
-    only reachable here via CDP in this fixture), PAGENT is IOS XE
-    (CDP-only). R1 Gi0/0/0/10 <-> PAGENT Gig0/0 and R2 Gi0/0/0/10 <->
-    PAGENT Gig0/1 should both resolve as candidate links; an unmanaged
+    """The LegacyRouter scenario: R1 and R2 are IOS XR (LLDP+CDP-capable, but
+    only reachable here via CDP in this fixture), LegacyRouter is IOS XE
+    (CDP-only). R1 Gi0/0/0/10 <-> LegacyRouter Gig0/0 and R2 Gi0/0/0/10 <->
+    LegacyRouter Gig0/1 should both resolve as candidate links; an unmanaged
     neighbor stays unresolved and is never auto-created as a device."""
 
     def fake_iosxr_collect(device_id, cfg):

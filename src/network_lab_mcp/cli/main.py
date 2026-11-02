@@ -2474,7 +2474,7 @@ for _kind in cfgmod.RUNNING_COMMON_MODES.values():
 
 def _longest_common_prefix(candidates: list[str]) -> str:
     """Pure longest-common-prefix helper for the `tab` key binding's
-    multiple-candidate case (e.g. "pagent_pkts"/"pagent_tgn" -> "pagent_").
+    multiple-candidate case (e.g. "legacyrouter_pkts"/"legacyrouter_tgn" -> "legacyrouter_").
     Character-by-character, case-sensitive (matching every dynamic-argument
     identifier's own case sensitivity) -- never a path-aware comparison.
     Empty input (never actually reached, since the caller only calls this

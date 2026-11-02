@@ -6,7 +6,7 @@ Closes the last remaining transport inconsistency: SSH managed sessions
 and Discovery's own Telnet login (discovery._login_ios_style())
 already authenticate privately -- managed Telnet sessions did
 not, so a real Claude Code -> Network Lab MCP acceptance test against a
-real PAGENT-style device stopped at "Password:" and asked a human for the
+real LegacyRouter-style device stopped at "Password:" and asked a human for the
 credential. `_authenticate_managed_telnet_session()` (terminal.py) closes
 that gap, dispatched from the same `_authenticate_managed_session()` SSH
 authentication already uses, reusing `resolve_target_password_prompt()`
@@ -679,7 +679,7 @@ def test_combined_login_wait_pattern_matches_a_non_final_line():
     """Without re.MULTILINE re-applied on the *combined* pattern, `$` only
     anchors to the true end of the whole captured string -- so a match on
     a line that is not the literal last line (e.g. "Password:" here, with
-    "PAGENT#" and a later shell prompt following it) silently fails, even
+    "LegacyRouter#" and a later shell prompt following it) silently fails, even
     though the individual sub-patterns each carry their own re.MULTILINE.
     This is exactly what let the post-password "settle" wait in
     _authenticate_managed_telnet_session() time out even after the device

@@ -121,7 +121,7 @@ def test_real_iosxe_device_login_and_cdp_collection(device_id):
 @pytest.mark.parametrize("device_id", ["PAGENT"])
 def test_real_ios_device_login_and_cdp_collection(device_id):
     """Gated, optional: only meaningful if the selected access-info defines
-    a classic IOS target (e.g. PAGENT). Skips (does not fail) if absent,
+    a classic IOS target (e.g. LegacyRouter). Skips (does not fail) if absent,
     since classic IOS targets are not a hard real-lab prerequisite the way
     IOS XR ones are. Classic IOS has no LLDP support -- CDP only."""
     targets = _real_ios_targets()

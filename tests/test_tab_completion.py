@@ -8,7 +8,7 @@ prompt_toolkit session and a real PTY run through pyte) -- the real,
 reproduced bug is that Tab with more than one candidate never extended the
 buffer to the longest common prefix at all (e.g. "reference pa<TAB>" left
 the buffer completely unchanged at "reference pa" instead of advancing to
-"reference pagent_"), even though the ambiguous candidate list was always
+"reference legacyrouter_"), even though the ambiguous candidate list was always
 printed correctly. These tests cover the two pure functions factored out
 of the `tab` key binding to fix that (`_longest_common_prefix()`,
 `_tab_multi_candidate_extension()`), plus the full grammar.complete() ->
@@ -258,7 +258,7 @@ def _write_yaml(path, data) -> None:
 @pytest.fixture()
 def tab_flow_lab_root(tmp_path):
     """A lab_root using the exact overlapping-prefix names from the bug
-    report (pagent_pkts/pagent_tgn, multi_flow_path_validation/
+    report (legacyrouter_pkts/legacyrouter_tgn, multi_flow_path_validation/
     multi_flow_path_validation_failure_test) -- the shared `lab_root`
     fixture's own sample/failover_test names don't share a prefix, so they
     can't exercise the LCP-extension-vs-candidate-list distinction this

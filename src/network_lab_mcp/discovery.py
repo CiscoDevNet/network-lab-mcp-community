@@ -94,7 +94,7 @@ _LOGIN_WAIT_RE = re.compile(
     f"(?:{terminal.PASSWORD_PROMPT_RE.pattern})|(?:{_IOSXR_PROMPT_RE.pattern})", re.MULTILINE
 )
 
-# Classic-IOS-style exec prompt, e.g. "PAGENT#" or "PAGENT>" -- shared by
+# Classic-IOS-style exec prompt, e.g. "LegacyRouter#" or "LegacyRouter>" -- shared by
 # IOS XE *and* classic IOS (the same login/prompt shape applies
 # to both, so this is deliberately not named "_IOSXE_..."). Unlike IOS XR's
 # "RP/.../CPU0:hostname#" shape, this prompt *is* just the hostname, so the
@@ -687,7 +687,7 @@ def parse_cdp_neighbors(raw_text: str, local_device_id: str) -> list[NeighborObs
 
     Handles both real-world row shapes:
       - IOS XR-style, entirely on one line:
-        "PAGENT          Gi0/0/0/10       144     R          Cisco 720 Gi0/0"
+        "LegacyRouter    Gi0/0/0/10       144     R          Cisco 720 Gi0/0"
       - IOS/IOS XE-style, where a long/FQDN Device ID wraps onto its own
         line and the remaining fields follow on the *next* physical line:
         "external-switch.example.com"

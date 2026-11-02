@@ -166,7 +166,7 @@ def test_access_info_accepts_type_ios_over_ssh_or_telnet(lab_root, transport):
     """Classic Cisco IOS is a first-class type, with the same
     structural rules (credential/transport/port schema unchanged) as
     every other network-device type -- sanitized fake credentials only,
-    never real PAGENT access-info content."""
+    never real LegacyRouter access-info content."""
     data = {
         "name": "with_ios",
         "devices": {

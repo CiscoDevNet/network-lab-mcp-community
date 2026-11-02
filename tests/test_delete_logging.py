@@ -1145,7 +1145,7 @@ def test_active_normal_terminal_blocks_device_directory_message_is_dynamic_per_d
     """Same condition as above, a different device ID (DW2 -- one of this
     file's own reserved real-tmux writer-test device names, see
     _WRITER_TEST_DEVICE_IDS's own comment; never an unrelated name like
-    'PAGENT' that other test files also use for real tmux sessions on the
+    'LegacyRouter' that other test files also use for real tmux sessions on the
     same shared socket) -- proves the message text substitutes the device
     ID dynamically, not hard-coded."""
     _fake_transport(monkeypatch)

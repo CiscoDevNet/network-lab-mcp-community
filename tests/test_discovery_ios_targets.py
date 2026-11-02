@@ -87,7 +87,7 @@ def test_ios_only_definition_discovers_via_cdp(lab_root, monkeypatch):
     assert result.iosxe_target_count == 0
     assert result.connected_count == 1
     assert result.devices["PAGENT"]["type"] == "ios"
-    # PAGENT's own CDP neighbor (ASR9001-R1) is not a managed device in
+    # LegacyRouter's own CDP neighbor (ASR9001-R1) is not a managed device in
     # this definition -- stays unresolved, never auto-created.
     assert result.managed_links == []
     assert {u.remote_device_id_raw for u in result.unresolved} == {"ASR9001-R1"}
@@ -101,7 +101,7 @@ def test_ios_l3_enrichment_excludes_management_address_and_keeps_data_plane(lab_
 
     interfaces = result.devices["PAGENT"]["interfaces"]
     # FastEthernet0/0's address matches the access-info connection address
-    # for PAGENT -- must never be copied into topology L3 data. At the raw
+    # for LegacyRouter -- must never be copied into topology L3 data. At the raw
     # DiscoveryResult level this is an explicit `None` removal signal (see
     # _build_device_interface_fields()); build_discovery_candidate()
     # is what actually drops it from the merged candidate (covered by
@@ -153,9 +153,9 @@ def test_only_ios_collector_is_invoked_for_ios_targets(lab_root, monkeypatch):
 
 
 def test_pagent_as_classic_ios_resolves_cdp_links_to_managed_routers(lab_root, monkeypatch):
-    """The PAGENT scenario, with PAGENT correctly typed `ios` instead of
-    `iosxe`: R1/R2 (IOS XR) see PAGENT via
-    CDP, PAGENT sees R1/R2 back via CDP -- both should resolve as
+    """The LegacyRouter scenario, with LegacyRouter correctly typed `ios` instead of
+    `iosxe`: R1/R2 (IOS XR) see LegacyRouter via
+    CDP, LegacyRouter sees R1/R2 back via CDP -- both should resolve as
     candidate links, and an unmanaged CDP neighbor stays unresolved."""
 
     def fake_iosxr_collect(device_id, cfg):

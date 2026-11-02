@@ -1379,12 +1379,12 @@ def _authenticate_managed_ssh_session(
 # Discovery's own Telnet login (discovery._login_ios_style()) both
 # already authenticate privately -- managed Telnet sessions did not. A
 # real Claude Code -> Network Lab MCP acceptance test hit this
-# exact gap on a real PAGENT-style device: terminal_open() reached
+# exact gap on a real LegacyRouter-style device: terminal_open() reached
 # "Password:" over Telnet and simply stopped, leaving the AI to ask a
 # human for the password.
 #
 # Deliberately narrow, matching this project's real target (Cisco IOS-
-# style Telnet lab sessions, e.g. PAGENT): only an optional "Username:"
+# style Telnet lab sessions, e.g. LegacyRouter): only an optional "Username:"
 # prompt followed by "Password:" is ever answered, each at most once, and
 # only the shared IOS_STYLE_PROMPT_RE exec-prompt shape counts as having
 # reached a usable terminal -- not a generic interactive-login framework,
@@ -1521,7 +1521,7 @@ def _authenticate_managed_telnet_session(
 # --------------------------------------------------------------------------
 # Telnet over an SSH local port forward (logical session = tunnel + device)
 #
-# One logical Managed Terminal ("PAGENT") is two tmux sessions, each created
+# One logical Managed Terminal ("LegacyRouter") is two tmux sessions, each created
 # through _create_logged_session() so the disconnect-safe launch applies to both (read gate,
 # exec, remain-on-exit, pane identity, pipe-pane logging):
 #   network-lab-tunnel-<device>  `ssh -N -T -L 127.0.0.1:<port>:<host>:<port>`
