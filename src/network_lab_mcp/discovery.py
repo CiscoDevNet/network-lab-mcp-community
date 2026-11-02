@@ -60,7 +60,7 @@ import copy
 import re
 from dataclasses import dataclass, field
 
-from network_lab_mcp import lab, terminal
+from network_lab_mcp import hostkey_flow, lab, terminal
 
 LOGIN_TIMEOUT_SECONDS = 30
 COMMAND_TIMEOUT_SECONDS = 25
@@ -171,17 +171,97 @@ def _resolve_login_password(device_id: str, device_config: dict, prompt_line: st
     )
 
 
+# Set only by discover_topology(hostkeys=...) -- i.e. only by the interactive human CLI.
+_ACTIVE_HOSTKEYS: "hostkey_flow.Coordinator | None" = None
+
+
+def _open_bootstrap(device_id: str, device_config: dict) -> None:
+    """Open the bootstrap session; with a host-key coordinator active every
+    SSH hop runs under StrictHostKeyChecking=yes (keys were established
+    beforehand by the coordinator; nothing is ever auto-accepted)."""
+    co = _ACTIVE_HOSTKEYS
+    if co is not None and device_config.get("transport") == "ssh":
+        command = hostkey_flow.build_ssh_command(device_config, kh=co.known_hosts)
+        terminal.open_bootstrap_terminal(device_id, device_config, ssh_command=command)
+    else:
+        terminal.open_bootstrap_terminal(device_id, device_config)
+
+
+def _wait_first(device_id: str, device_config: dict, wait_re: re.Pattern) -> str:
+    try:
+        return terminal.wait_for_bootstrap_pattern(device_id, wait_re, LOGIN_TIMEOUT_SECONDS)
+    except terminal.TerminalError:
+        _raise_if_host_key_failure(device_id, device_config)
+        raise
+
+
+def _raise_if_host_key_failure(device_id: str, device_config: dict) -> None:
+    try:
+        text = terminal.read_bootstrap(device_id)
+    except terminal.TerminalError:
+        return
+    changed = hostkey_flow.detect_changed(text)
+    if changed is not None:
+        hops = {(h.host, h.port): h for h in hostkey_flow.hops_for(device_config)}
+        hop = hops.get(changed) if changed != ("", 0) else next(
+            (h for h in hostkey_flow.hops_for(device_config) if h.role == "target"), None)
+        if hop is None:
+            raise DiscoveryError(f"Device '{device_id}': an SSH host key changed on an unexpected host; nothing was sent.")
+        err = hostkey_flow.HostKeyChanged(device_id, hop.role, hop.host, hop.port)
+        err.device_config = device_config
+        raise err
+    if hostkey_flow.detect_verification_failure(text):
+        raise DiscoveryError(
+            f"Device '{device_id}': SSH host key verification failed (the key is not registered or not usable); "
+            "no credentials were sent and no host key was registered. Run `discover topology` from an "
+            "interactive terminal to approve a new key, or register it manually with ssh."
+        )
+
+
+def _require_trusted_hops(device_id: str) -> None:
+    """With the host-key coordinator active, no credential is sent unless
+    every hop of the device is trusted (also guaranteed structurally by
+    StrictHostKeyChecking=yes on every hop)."""
+    if _ACTIVE_HOSTKEYS is None:
+        return
+    try:
+        _ACTIVE_HOSTKEYS.require_trusted(device_id)
+    except hostkey_flow.HostKeyError as exc:
+        raise DiscoveryError(str(exc)) from None
+
+
+def _answer_jump_stage(device_id: str, device_config: dict, text: str, prompt_re: re.Pattern) -> str:
+    """For a ProxyJump device, answer the jump-server password prompt (once,
+    via terminal's shared stage logic) and return the pane text to continue
+    the target stage with. No-op for direct connections."""
+    if not device_config.get("jump_host_config"):
+        return text
+    last_line = _last_nonblank_line(text)
+    if not terminal.PASSWORD_PROMPT_RE.search(last_line):
+        return text
+    _require_trusted_hops(device_id)
+    try:
+        text, last_line = terminal.authenticate_bootstrap_jump_stage(device_id, device_config, text, last_line)
+    except terminal.TerminalError as exc:
+        raise DiscoveryError(str(exc)) from None
+    if not last_line:  # no further prompt: e.g. key-based target authentication
+        text = terminal.wait_for_bootstrap_pattern(device_id, prompt_re, LOGIN_TIMEOUT_SECONDS)
+    return text
+
+
 def _login(device_id: str, device_config: dict) -> str:
     """Open the bootstrap session, answer at most one password prompt, and
     return the resolved hostname once the IOS XR prompt is seen. Does not
-    automate a host-key confirmation prompt (see
-    terminal._build_transport_command()'s `accept_new_host_keys`, which
-    avoids that prompt outright instead)."""
-    terminal.open_bootstrap_terminal(device_id, device_config)
-    text = terminal.wait_for_bootstrap_pattern(device_id, _LOGIN_WAIT_RE, LOGIN_TIMEOUT_SECONDS)
+    automate a host-key confirmation prompt: every SSH hop runs with
+    StrictHostKeyChecking=yes (terminal._build_transport_command()), so an
+    unknown or changed key stops Discovery before any credential is sent."""
+    _open_bootstrap(device_id, device_config)
+    text = _wait_first(device_id, device_config, _LOGIN_WAIT_RE)
+    text = _answer_jump_stage(device_id, device_config, text, _IOSXR_PROMPT_RE)
     last_line = _last_nonblank_line(text)
     if terminal.PASSWORD_PROMPT_RE.search(last_line):
         password = _resolve_login_password(device_id, device_config, last_line)
+        _require_trusted_hops(device_id)
         terminal.send_secret_to_bootstrap(device_id, password)
         text = terminal.wait_for_bootstrap_pattern(device_id, _IOSXR_PROMPT_RE, LOGIN_TIMEOUT_SECONDS)
     match = _IOSXR_PROMPT_RE.search(_last_nonblank_line(text))
@@ -207,8 +287,9 @@ def _login_ios_style(device_id: str, device_config: dict) -> str:
 
     Also answers at most one optional "Username:" prompt, which only some
     IOS/IOS XE login configurations show before "Password:"."""
-    terminal.open_bootstrap_terminal(device_id, device_config)
-    text = terminal.wait_for_bootstrap_pattern(device_id, _IOS_STYLE_LOGIN_WAIT_RE, LOGIN_TIMEOUT_SECONDS)
+    _open_bootstrap(device_id, device_config)
+    text = _wait_first(device_id, device_config, _IOS_STYLE_LOGIN_WAIT_RE)
+    text = _answer_jump_stage(device_id, device_config, text, _IOS_STYLE_PROMPT_RE)
     last_line = _last_nonblank_line(text)
     if _USERNAME_PROMPT_RE.search(last_line):
         username = device_config.get("username")
@@ -217,6 +298,7 @@ def _login_ios_style(device_id: str, device_config: dict) -> str:
                 f"Device '{device_id}': a username prompt appeared but no username is configured in "
                 "the active access-info definition."
             )
+        _require_trusted_hops(device_id)
         terminal.send_secret_to_bootstrap(device_id, str(username))
         text = terminal.wait_for_bootstrap_pattern(
             device_id, _IOS_STYLE_LOGIN_WAIT_RE, LOGIN_TIMEOUT_SECONDS, baseline_text=text
@@ -224,6 +306,7 @@ def _login_ios_style(device_id: str, device_config: dict) -> str:
         last_line = _last_nonblank_line(text)
     if terminal.PASSWORD_PROMPT_RE.search(last_line):
         password = _resolve_login_password(device_id, device_config, last_line)
+        _require_trusted_hops(device_id)
         terminal.send_secret_to_bootstrap(device_id, password)
         text = terminal.wait_for_bootstrap_pattern(device_id, _IOS_STYLE_PROMPT_RE, LOGIN_TIMEOUT_SECONDS)
     match = _IOS_STYLE_PROMPT_RE.search(_last_nonblank_line(text))
@@ -1172,7 +1255,7 @@ def _select_ios_targets(access_data: dict) -> dict[str, dict]:
 _PROTOCOL_STATUS_LABELS = ("LLDP disabled", "LLDP unsupported", "CDP disabled", "CDP unsupported")
 
 
-def discover_topology(lab_root=None, include_l3: bool = False) -> DiscoveryResult:
+def discover_topology(lab_root=None, include_l3: bool = False, hostkeys=None) -> DiscoveryResult:
     """Run the full Discovery flow against committed running-config's
     selected access-info and return an in-memory DiscoveryResult.
 
@@ -1217,6 +1300,13 @@ def discover_topology(lab_root=None, include_l3: bool = False) -> DiscoveryResul
     # and no candidate/topology state is touched until every result has
     # been collected below.
     collect_kwargs = {"include_l3": True} if include_l3 else {}
+    global _ACTIVE_HOSTKEYS
+    if hostkeys is not None:
+        try:
+            hostkeys.prepare(all_targets)
+        except hostkey_flow.HostKeyError as exc:
+            raise DiscoveryError(str(exc)) from None
+    _ACTIVE_HOSTKEYS = hostkeys
     worker_count = min(len(all_targets), DISCOVERY_MAX_WORKERS)
     futures: dict[str, concurrent.futures.Future] = {}
     try:
@@ -1243,6 +1333,7 @@ def discover_topology(lab_root=None, include_l3: bool = False) -> DiscoveryResul
         # in flight, exactly like the previous sequential loop's own
         # try/finally guarantee.
     finally:
+        _ACTIVE_HOSTKEYS = None
         for device_id in all_targets:
             terminal.close_bootstrap_terminal(device_id)
 
@@ -1259,7 +1350,7 @@ def discover_topology(lab_root=None, include_l3: bool = False) -> DiscoveryResul
     for device_id in all_targets:
         try:
             collected[device_id] = futures[device_id].result()
-        except DiscoveryError:
+        except (DiscoveryError, hostkey_flow.HostKeyChanged):
             raise
         except Exception as exc:
             # A worker crash (not a DiscoveryError) is a bug, not an

@@ -137,7 +137,7 @@ def _script_explicit_failure(tmp_path) -> list[str]:
 
 
 def _script_never_prompts(tmp_path) -> list[str]:
-    return _write_script(tmp_path, "never_prompts.sh", _preamble() + "sleep 5\n")
+    return _write_script(tmp_path, "never_prompts.sh", _preamble() + "sleep 30\n")
 
 
 def _script_prompt_then_hangs(tmp_path) -> list[str]:
@@ -146,7 +146,7 @@ def _script_prompt_then_hangs(tmp_path) -> list[str]:
 
 
 def _script_harmless(tmp_path, hostname: str = "PAGENT", name: str = "harmless.sh") -> list[str]:
-    return _write_script(tmp_path, name, f"echo {hostname}#\nsleep 5\n")
+    return _write_script(tmp_path, name, f"echo {hostname}#\nsleep 30\n")
 
 
 def _script_ambiguous_output(tmp_path) -> list[str]:
@@ -241,7 +241,7 @@ def test_missing_configured_username_fails_safely(monkeypatch, tmp_path):
     with pytest.raises(terminal.TerminalError) as excinfo:
         terminal.open_device_terminal("PAGENT", _NO_USERNAME_CONFIG)
     assert "no username is configured" in str(excinfo.value)
-    assert len(sent) == 1  # only the fake telnet command itself was ever typed in
+    assert len(sent) == 0  # nothing was typed: the transport is the pane's own process, started directly
     assert _SENTINEL_USERNAME not in sent
     assert _SENTINEL_PASSWORD not in sent
     assert "PAGENT" not in {s["device"] for s in terminal.list_device_sessions()}
@@ -258,7 +258,7 @@ def test_missing_configured_password_fails_safely(monkeypatch, tmp_path):
     with pytest.raises(terminal.TerminalError) as excinfo:
         terminal.open_device_terminal("PAGENT", _NO_PASSWORD_CONFIG)
     assert "no private password is configured" in str(excinfo.value)
-    assert len(sent) == 1  # only the fake telnet command itself was ever typed in
+    assert len(sent) == 0  # nothing was typed: the transport is the pane's own process, started directly
     assert "PAGENT" not in {s["device"] for s in terminal.list_device_sessions()}
 
 

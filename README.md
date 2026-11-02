@@ -12,7 +12,7 @@ Network Lab MCP connects an MCP-capable AI client to real network lab devices th
   <img src="docs/images/vibe-coding-vs-vibe-networking.webp" alt="From Vibe Coding to Vibe Networking: human intent, AI-assisted execution, verification, and an operational network lab" width="100%">
 </p>
 
-[Watch the demo](https://youtu.be/ILkW7yuU1Y4) · [Why it exists](#why-network-lab-mcp) · [How it works](#how-it-works) · [Configuration model](#configuration-model) · [Quick Start](#quick-start) · [Documentation](#documentation)
+[Watch the demo](https://youtu.be/ILkW7yuU1Y4) · [Why it exists](#why-network-lab-mcp) · [How it works](#how-it-works) · [Configuration model](#configuration-model) · [Quick Start](#quick-start) · [SSH jump servers](#ssh-jump-server-support) · [Documentation](#documentation)
 
 ## Why Network Lab MCP?
 
@@ -24,6 +24,8 @@ That is the motivation behind Network Lab MCP: **delegate the investigation, not
 
 The project explores a concept I call **Vibe Networking**, inspired by Vibe Coding: express the network objective in natural language, let an AI agent plan and execute work in a real lab, inspect what actually happened, and iterate. It is a direction for AI-assisted engineering, **not a claim of unrestricted or fully autonomous production-network operation**.
 
+Network Lab MCP provides a lightweight **AI network engineer layer** for lab environments, designed to make the most of an AI client's reasoning capabilities while retaining observable, controlled device access.
+
 ## What you can do
 
 - **Investigate and troubleshoot:** inspect live device state across a lab, correlate observations, and collect command evidence.
@@ -32,6 +34,7 @@ The project explores a concept I call **Vibe Networking**, inspired by Vibe Codi
 - **Validate resilience and traffic:** observe planned failures, traffic behavior, protocol convergence, and service continuity using available lab instruments and evidence.
 - **Reuse engineering knowledge:** guide repeated work with Scenarios and References rather than repeating every instruction from scratch.
 - **Watch AI activity:** monitor terminal output live and inspect session transcripts instead of treating the AI as a black box.
+- **Work from your local workstation:** use SSH ProxyJump for SSH devices and SSH local port forwarding for legacy Telnet-only devices, without running Network Lab MCP on the jump server.
 
 Network Lab MCP is **not** a network-engineering reasoning model, a fixed test-script library, or a production network automation platform. An external AI client supplies the reasoning and decides which tool or command to use next.
 
@@ -48,6 +51,14 @@ Network Lab MCP is **not** a network-engineering reasoning model, a fixed test-s
 5. **Evidence and review:** the AI analyzes device outputs and reports findings; the engineer can observe terminals and approves changes to managed definitions through the human CLI.
 
 > **Safety boundary:** the candidate/commit model protects Network Lab MCP's *managed lab definitions and selections*. It does **not** automatically make device CLI commands read-only or require human approval before every command sent by an AI client. Configure client permissions and use an isolated lab accordingly.
+
+### Built on Proven Tools
+
+Network Lab MCP follows a lightweight, composable design: **reuse established tools for network connectivity and terminal management, and build the AI-oriented engineering layer on top**. Rather than implementing its own SSH or Telnet stack or terminal-session manager, it orchestrates **OpenSSH**, **tmux**, and a local **Telnet client** where legacy access is required.
+
+OpenSSH handles SSH transport and authentication; tmux provides persistent, observable terminal sessions; and Telnet supports legacy lab devices. Network Lab MCP adds logical device resolution, private connection handling, session lifecycle and safety checks, topology discovery, and reusable engineering context. The AI client supplies reasoning; the engineer retains operational judgment and control.
+
+This approach avoids reinventing mature protocols, but still requires careful integration around SSH host keys, jump-hop behavior, terminal ownership, and failure handling. See [Connection architecture](docs/connection_architecture.md) for the internal design and trade-offs.
 
 ### A deliberately small MCP interface
 
@@ -109,51 +120,191 @@ The demo is a concrete lab example, not a guarantee that every device, test inst
 
 ## Quick Start
 
-### Requirements
+Choose your platform:
 
-- Linux, Python **3.10+**, `tmux`, and an OpenSSH client
-- A `telnet` client only if lab devices require Telnet
-- An MCP-capable AI client, such as **Claude Code** or **Codex CLI**
+- [macOS — step-by-step installation](#macos-installation)
+- [Linux — installation](#linux-installation)
+- [Register with Claude Code or Codex](#register-the-mcp-server)
+- [First connection and troubleshooting](#first-use-and-troubleshooting)
 
-macOS may work but is not formally validated. Native Windows is not supported; WSL2 is not formally validated.
+Network Lab MCP currently uses a **local editable installation**. Keep the repository checkout: its local `lab/` directory is part of the operational model. A non-editable wheel/package-index install is not the supported deployment model.
 
-### 1. Install from a local checkout
+### macOS installation
+
+The following steps are designed for engineers who are familiar with network CLI tools but may be new to Python virtual environments, MCP, or Claude Code. Run the shell commands in **macOS Terminal**, not inside the `network-lab#` CLI.
+
+**Requirements**
+
+| Component | Why it is needed |
+|---|---|
+| macOS | Local workstation running Network Lab MCP |
+| Python 3.10+ | Network Lab MCP runtime; a supported Python 3.13 environment was used during validation |
+| Git | Clone the source repository |
+| `tmux` | Managed terminal sessions and observable command output |
+| OpenSSH client (`ssh`) | Direct SSH, ProxyJump, and SSH tunnels |
+| Vim (`vim`) | Default editor for Topology, Scenario, and Reference definitions; normally included with macOS |
+| Claude Code | AI client used in the macOS E2E validation; install and sign in separately |
+| `telnet` client | **Only** for direct Telnet or legacy Telnet-only devices via an SSH tunnel |
+
+Homebrew is a convenient way to install missing prerequisites; it is not itself part of Network Lab MCP. See [brew.sh](https://brew.sh/) for installation instructions. See the [Claude Code setup guide](https://docs.anthropic.com/en/docs/claude-code/setup) for its supported installation procedure.
+
+**Step 1 — Inspect what is already installed**
 
 ```bash
+uname -s                     # Expected: Darwin
+python3 --version            # Must be Python 3.10 or newer
+command -v git
+command -v tmux
+command -v ssh
+command -v claude
+```
+
+If any command is missing, install that dependency first. If Homebrew is available, a typical setup for Git, Python, and tmux is:
+
+```bash
+brew install git python tmux
+```
+
+OpenSSH is normally available on macOS; check `command -v ssh` rather than assuming a particular installation path. Install Claude Code separately using its official instructions. Do not expect `pip install -e .` to install Claude Code, tmux, OpenSSH, or Telnet.
+
+**Text editor:** Network Lab MCP uses `$VISUAL`, then `$EDITOR`, then `vim` for its `edit` command. Vim is normally included with macOS, so additional installation is usually unnecessary. Check with `command -v vim`; if you prefer another editor, set `VISUAL` or `EDITOR` in the environment that launches the Network Lab CLI. Access-info remains editable through structured CLI commands rather than the external editor.
+
+For a Telnet-only lab device, **also** check:
+
+```bash
+command -v telnet
+telnet --help    # Option syntax varies by client; consult its own help/man page
+```
+
+Some macOS installations do not include a Telnet client. Install a compatible client using a trusted package source if needed. **Before using Telnet over SSH**, confirm that the installed client supports the options required by your Network Lab MCP version (including `-K` and `-E` where used by the implementation). Package names, executable locations, and supported options vary; do not assume that `/usr/local/bin/telnet` exists on every Mac. If you only need SSH devices, Telnet is optional.
+
+**Step 2 — Clone the project**
+
+```bash
+cd ~
+git clone https://github.com/CiscoDevNet/network-lab-mcp-community.git
+cd network-lab-mcp
+```
+
+You may choose a different directory. Keep a note of its **absolute path**; the MCP registration will use it. The example below uses `~/network-lab-mcp` only because the clone command above creates that directory.
+
+**Step 3 — Create the Python environment and install**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+```
+
+The `(.venv)` shell prefix is a useful indication that the virtual environment is active. A venv keeps Network Lab MCP's Python dependencies separate from other projects. Every new Terminal window used for `./run_cli.sh` should activate this venv first, or use its Python executable explicitly.
+
+**Step 4 — Check the installation**
+
+```bash
+python --version
+python -m pip show network-lab-mcp
+test -x .venv/bin/network-lab-mcp && echo 'MCP executable found'
+command -v tmux
+```
+
+If a Python environment was upgraded or moved, recreate the virtual environment and register the new executable path as needed. Do not move the repository after registering the MCP server without updating Claude Code's command path.
+
+**Step 5 — Initialize the local running configuration**
+
+```bash
+if [ ! -e lab/settings.yaml ]; then
+  cp lab/settings.example.yaml lab/settings.yaml
+fi
+```
+
+This deliberately **does not overwrite** an existing `lab/settings.yaml`. The checked-in `sample_lab` definitions use fictional documentation addresses: they let you inspect the configuration model but are **not real reachable devices**. Real lab access requires a private access-info definition and matching logical device IDs in the selected topology.
+
+**Step 6 — Start the human CLI**
+
+```bash
+./run_cli.sh
+```
+
+Then type commands **inside** the Network Lab CLI:
+
+```text
+network-lab# help
+network-lab# show version
+network-lab# show running-config
+network-lab# configure
+network-lab(config)# show running-config
+```
+
+`./run_cli.sh` launches the **human configuration CLI**, not the MCP stdio server. A working CLI does not, by itself, prove that a real network device can be reached. Do not share `show running-config` from an access-info definition: it can display real passwords in plaintext.
+
+**Step 7 — Register and verify the MCP server**
+
+Follow [Register the MCP server](#register-the-mcp-server). **User scope is recommended for personal macOS installation**, because Claude Code often runs from a working directory other than the Network Lab MCP source tree.
+
+**Step 8 — Test from a separate working directory**
+
+```bash
+mkdir -p ~/network-lab-workspace
+cd ~/network-lab-workspace
+claude
+```
+
+Inside Claude Code, use `/mcp` and confirm that `network-lab` is connected. Start with a safe request, such as **“Use Network Lab MCP to show the active topology; do not connect to devices or change any configuration.”** After configuring a permitted lab, proceed to read-only device commands.
+
+### Linux installation
+
+Linux remains supported. Install Python 3.10+, Git, tmux, and OpenSSH through your distribution's package manager. Install Telnet only if your lab requires it. The example below is for a Debian/Ubuntu-style system:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git python3 python3-venv python3-pip tmux openssh-client
+
 git clone https://github.com/CiscoDevNet/network-lab-mcp-community.git
 cd network-lab-mcp
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+python -m pip install -e .
+
+if [ ! -e lab/settings.yaml ]; then
+  cp lab/settings.example.yaml lab/settings.yaml
+fi
+
+./run_cli.sh
 ```
 
-This project currently uses a **local editable installation**; the repository-local `lab/` directory is part of its operational model. Non-editable wheel or package-index installation is not supported.
+Use the registration instructions below for your AI client. The newly added macOS SSH jump-server workflows have not been revalidated end-to-end on every Linux environment.
 
-### 2. Initialize local selections
+### Register the MCP server
 
-```bash
-cp lab/settings.example.yaml lab/settings.yaml
-```
+For a **local stdio MCP server**, register the absolute path to `.venv/bin/network-lab-mcp`. **Do not register `run_cli.sh`**: it is the interactive human CLI, not the MCP server entry point.
 
-The checked-in sample is fictional and uses documentation-only addresses. To connect to a real lab, create private connection definitions and select the appropriate definitions through the CLI. Never commit real credentials or sensitive lab details to a public repository.
+**Claude Code — recommended user scope**
 
-### 3. Register the MCP server
-
-Use the **absolute path** to the executable inside this repository's virtual environment, replacing `/path/to/network-lab-mcp` below.
-
-**Claude Code** — user scope:
+From the Network Lab MCP repository directory:
 
 ```bash
-claude mcp add network-lab -s user -- \
-  /path/to/network-lab-mcp/.venv/bin/network-lab-mcp
+# Run from the repository checkout, after creating .venv.
+claude mcp add --scope user network-lab -- \
+  "$(pwd)/.venv/bin/network-lab-mcp"
+
 claude mcp list
 ```
 
-**Codex CLI**:
+Expected result (the path varies):
+
+```text
+network-lab: /absolute/path/to/network-lab-mcp/.venv/bin/network-lab-mcp - ✔ Connected
+```
+
+`--scope user` makes this MCP registration available to Claude Code across your working directories. A **project/local-scoped** registration can work in the repository directory yet be invisible from another workspace — a common source of confusion. Do not register another entry blindly if one with the same name already exists; first inspect its scope and executable path. An unrelated MCP server reporting `Failed to connect` does not necessarily prevent `network-lab` from connecting.
+
+Restart an already-running Claude Code session after changing MCP configuration; changes may not appear in the current session. In Claude Code, use `/mcp` to confirm the server is loaded. The seven Network Lab MCP tools should then be available to the AI client.
+
+**Codex CLI**
 
 ```bash
 codex mcp add network-lab -- \
-  /path/to/network-lab-mcp/.venv/bin/network-lab-mcp
+  /absolute/path/to/network-lab-mcp/.venv/bin/network-lab-mcp
 codex mcp list
 ```
 
@@ -161,41 +312,124 @@ For a local stdio server, Codex may show `Auth: Unsupported`; device authenticat
 
 ```toml
 [mcp_servers.network-lab]
-command = "/path/to/network-lab-mcp/.venv/bin/network-lab-mcp"
+command = "/absolute/path/to/network-lab-mcp/.venv/bin/network-lab-mcp"
 default_tools_approval_mode = "approve"
 ```
 
 Restart Codex after changing its configuration. AI-client configuration and approval options may differ by client version.
 
-### 4. Start the human CLI
+### First use and troubleshooting
 
-```bash
-./run_cli.sh
-```
+**Separate the three layers when diagnosing a problem:**
 
-Useful first commands:
+1. **Installation:** can the human CLI start with `./run_cli.sh`?
+2. **MCP registration:** does `claude mcp list` show `network-lab ... ✔ Connected`, and does `/mcp` show it in the current Claude Code session?
+3. **Device access:** are the correct *active* access-info and topology selected, and can the allowed device actually be reached?
 
-```text
-help
-help claude
-show version
-show running-config
-configure
-```
+| Symptom | Check / resolution |
+|---|---|
+| `python3` is too old or virtual environment fails | Install a supported Python 3.10+ interpreter, recreate `.venv`, and reinstall. |
+| `tmux` not found | Install tmux, verify `command -v tmux`, then restart the CLI/MCP client as appropriate. |
+| `telnet client not found` | Install a compatible local Telnet client and verify the supported options; SSH-only use does not require it. |
+| `network-lab-mcp` executable missing | Activate the correct venv and run `python -m pip install -e .` in the checkout. |
+| `network-lab` missing from `claude mcp list` | Register at **user scope** with the absolute executable path; verify the active Claude Code configuration. |
+| Works from the source checkout but not another directory | The server was likely registered in project/local scope. Check its scope; user scope is normally preferable for workstation use. |
+| `network-lab ... Failed to connect` | Check that the executable exists, the venv is intact, and the registration points to the current checkout. Avoid printing environment variables containing secrets. |
+| `/mcp` does not show a newly added server | Start a new Claude Code session after updating registration. |
+| `Device 'Router1' is not present in access-info` | The active topology and active access-info have different device inventories. Add an authorized connection definition or select the intended definitions **in the human CLI**; never guess credentials. |
+| Discovery connects but produces zero managed links | Check whether observed neighbors are actually registered as managed devices. Unresolved LLDP/CDP neighbors do not become guessed topology links. |
+| Jump-host password prompt is rejected | Check the running version, private access-info selection, prompt/host identity, and authentication configuration. Do not disable fail-closed checks to force access. |
+| Host key verification failed | The key of the jump server or target is not registered or has changed. Verify its identity through a trusted channel, then register it with `discover topology` from an interactive terminal (or manually with `ssh`). Managed terminals never register keys. **Never use `StrictHostKeyChecking=no` as a workaround.** |
 
-### 5. Start your AI client
+**Important: topology and access-info are independently selected.** A topology can contain `Router2` while the selected access-info only contains `Router1` and `LegacyRouter`. In that case, opening `Router2` must fail rather than discovering or guessing its credentials. Discovery can create a topology *definition* without automatically making it the active topology. The second selection/commit step matters; see the example below.
 
-The task workspace can be **outside** the Network Lab MCP repository:
+**First safe AI request:**
 
-```bash
-cd ~/work/my-lab-task
-claude
-# or: codex
-```
+> Use Network Lab MCP to inspect the currently active topology and execution instructions. Report the logical device inventory. Do not open terminal sessions or make changes.
 
-Start with a bounded task, such as reviewing the active topology and reporting what can be verified without changing device configuration.
+**First authorized read-only device request:**
+
+> Use Network Lab MCP tools only. Open a managed terminal to `Router1`, run `show version`, read the response, and close only the session you created. Do not execute configuration commands or reveal credentials.
 
 > **Permissions:** keep the AI client's normal approval controls enabled, particularly for device configuration and destructive operations. Bypass/never-ask modes are appropriate only when explicitly chosen for a fully controlled, isolated lab; they bypass client-side confirmation and are not prerequisites for using Network Lab MCP.
+
+## SSH Jump Server Support
+
+Network Lab MCP can access **both modern SSH-enabled network devices and legacy Telnet-only devices through an SSH jump server**, directly from a local workstation. The two transport methods are deliberately distinct:
+
+| Target device | Connection method | Local requirement | Jump-server requirement |
+|---|---|---|---|
+| SSH-enabled router | **OpenSSH ProxyJump** | OpenSSH | SSH server and reachability to target SSH |
+| Legacy Telnet-only device | **SSH local port forwarding + local Telnet client** | OpenSSH **and** Telnet client | SSH server and reachability to target Telnet port |
+
+**No Network Lab MCP installation and no Telnet client are required on the jump server.** Network Lab MCP runs on the local workstation; it selects the connection method from the private Access-info definition. A single Access-info can describe both kinds of devices.
+
+```text
+Local macOS workstation
+  Claude Code ── MCP ── Network Lab MCP
+                           |
+                           +── SSH ProxyJump ──────> jump1 ── SSH ──> Router1
+                           |
+                           +── SSH -L 127.0.0.1 ──> jump1 ── Telnet ──> LegacyRouter
+                               + local telnet client
+```
+
+The second path is **not** SSH ProxyJump to a Telnet device. It uses SSH local port forwarding (a tunnel between the workstation and the jump server), followed by Telnet over the jump server's network path to the legacy device. The Mac's local forwarded port binds to `127.0.0.1`, not a public interface.
+
+### Example private Access-info
+
+The following is **illustrative only**, with RFC 5737 documentation addresses and no real credentials. Use the human CLI to create a private Access-info definition; actual authentication fields remain local and must never be committed to a public repository.
+
+```text
+access-info example_lab
+ jump-host jump1
+  type host
+  address 192.0.2.10
+  transport ssh
+  port 22
+  username jumpuser
+ !
+ device Router1
+  type iosxr
+  address 192.0.2.20
+  transport ssh
+  port 22
+  username labuser
+  jump-host jump1
+ !
+ device LegacyRouter
+  type ios
+  address 192.0.2.30
+  transport telnet
+  port 23
+  username labuser
+  jump-host jump1
+ !
+```
+
+Add the credentials through the private configuration workflow when needed. This example is not a claim that those documentation-only addresses are reachable. The active topology must also use the exact logical device IDs `Router1` and `LegacyRouter` for AI terminal access.
+
+### SSH host keys in `discover topology` (human CLI only)
+
+When you run `discover topology` from an interactive terminal, Network Lab MCP manages SSH host keys for every SSH hop (the target and, for ProxyJump, the jump server):
+
+- **Already registered and matching:** nothing is asked; Discovery continues.
+- **Not registered:** you are asked for the expected key type (`ED25519`, `ECDSA` or `RSA`) and its `SHA256:` fingerprint, obtained from the device console or another trusted source (for a jump server, run `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` there; ECDSA and RSA host keys also exist). Only if the key the host actually presents is exactly that key does OpenSSH register it.
+- **Changed:** the connection stops. You may choose to review replacement: the new key is verified on a throw-away copy of `known_hosts`, a backup of the old file is saved, only that host's entries are removed, and the new key is registered after a second exact match.
+
+This is available only in the human CLI. Without an interactive terminal, `discover topology` is strict: an unknown or changed key stops it and nothing is registered. MCP tools and managed terminals cannot approve, remove or update host keys; they verify every SSH hop strictly (target and jump server) and refuse unknown or changed keys. See [SECURITY.md](SECURITY.md) and [docs/cli_reference.md](docs/cli_reference.md).
+
+### Validation and security status
+
+On **November 2, 2026**, macOS real-lab E2E checks succeeded for an SSH-enabled IOS XR device and a legacy Telnet-only IOS device, both through an SSH jump server: managed terminal open, authentication, read-only `show` commands, response retrieval, simultaneous sessions, independent closure, and final cleanup. Discovery also connected through both methods and collected LLDP/CDP observations. This is **specific observed coverage**, not a claim that all macOS/Telnet/OpenSSH combinations, unexpected disconnects, or restart/fault conditions have been tested.
+
+- The **local workstation ↔ jump server** SSH connection is encrypted.
+- The **jump server ↔ legacy Telnet-only device** path carries **unencrypted Telnet** traffic; use only an authorized, protected lab/management network and account for this risk.
+- Local port forwarding through `127.0.0.1` is not a process-level access-control boundary.
+- Private device and jump-server passwords are resolved internally; they must not be put in AI prompts, published logs, or repository examples.
+- SSH host-key verification must remain enabled. Unknown/mismatched host keys require deliberate verification, not automatic bypass.
+
+**Not yet validated in a real lab:** that E2E check predates the SSH host-key management and the strict per-hop `ProxyCommand` described above. Those were tested against isolated loopback OpenSSH servers and fakes only. Registration and replacement of host keys, jump-server password authentication during registration, updating a real `known_hosts`, and Linux have **not** been exercised against real routers or a real jump server; repeat the managed-terminal and Discovery checks before relying on them.
 
 ## Example: discovering and selecting a topology
 
@@ -288,8 +522,8 @@ See [SECURITY.md](SECURITY.md) for the complete trust model and vulnerability re
 - **Private credentials:** no MCP tool exposes `access-info`. Terminal connections resolve credentials internally from the selected private definition.
 - **Local CLI visibility:** `show configuration` and `show running-config` can display access-info passwords **in plaintext** for human lab use. Do not share that output.
 - **Raw device output:** terminal results and logs are not universal secret-redaction mechanisms. Remote device echoes and output can contain sensitive information.
-- **SSH/Telnet:** SSH key/agent and password authentication are supported; classic IOS-style Telnet authentication is lab-only because Telnet is unencrypted.
-- **Jump hosts:** one OpenSSH ProxyJump hop is supported; multi-hop chains are not.
+- **SSH/Telnet:** SSH key/agent and password authentication are supported; classic IOS-style Telnet authentication is lab-only because Telnet is unencrypted over the target leg.
+- **Jump hosts:** one SSH jump hop is supported; ProxyJump is for SSH targets, while Telnet targets use SSH local port forwarding. Multi-hop chains are not supported.
 - **Change control:** candidate/commit applies to local definition editing. Sending a configuration command to a real device through a terminal is a separate operation governed by the AI client's permissions and your lab procedures.
 - **Repository hygiene:** `.gitignore` excludes common local operational data but is not a substitute for reviewing every change before publishing.
 
@@ -301,8 +535,10 @@ See [SECURITY.md](SECURITY.md) for the complete trust model and vulnerability re
 - L3 enrichment records directly observed IPv4 address and VRF information, not an inferred routed topology.
 - Editable checkout required; no standard non-editable/wheel installation.
 - `access-info` is edited through structured CLI commands, not the external YAML editor.
-- OpenSSH ProxyJump is limited to a single hop.
-- Scenario/Reference schemas are intentionally flexible; only `topology <name>` asks for confirmation on a case-only near-duplicate; on case-insensitive filesystems (default macOS) a case-only alias of an existing definition is refused for every definition kind. macOS behavior is verified for the unit-test suite only, not for MCP connection, tmux device sessions or Discovery.
+- SSH jump-server support is limited to one hop; Telnet-through-jump requires a compatible local Telnet client.
+- Host keys must be registered before use: managed terminals refuse unknown or changed keys. Registration and replacement exist only in the interactive `discover topology`, and are disabled for Telnet-over-SSH tunnels (register the jump-server key manually). Legacy `ssh-rsa` (SHA-1) host keys are not supported.
+- Scenario/Reference schemas are intentionally flexible; only `topology <name>` asks for confirmation on a case-only near-duplicate; on case-insensitive filesystems (default macOS) a case-only alias of an existing definition is refused for every definition kind.
+- The November 2026 macOS E2E check covers specific SSH and Telnet lab paths, not all disconnect/fault/restart scenarios, operating-system releases, or device types; newly added jump workflows have not been fully revalidated on Ubuntu.
 - Full cross-vendor operation and all forms of autonomous deployment are not claimed or validated.
 
 ## Project structure
@@ -331,6 +567,7 @@ network-lab-mcp/
 │   │   ├── vibe-coding-vs-vibe-networking.webp
 │   │   └── network-lab-mcp-configuration-model.webp
 │   ├── architecture.md
+│   ├── connection_architecture.md
 │   ├── mcp_tools.md
 │   ├── cli_reference.md
 │   └── scenario_format.md
@@ -350,6 +587,7 @@ Avoid `--showlocals` when tests could access real credentials.
 ## Documentation
 
 - [Architecture and configuration model](docs/architecture.md)
+- [Connection architecture: OpenSSH, tmux, and Telnet](docs/connection_architecture.md)
 - [MCP tool contract](docs/mcp_tools.md)
 - [Human CLI reference](docs/cli_reference.md)
 - [Scenario and Reference format](docs/scenario_format.md)

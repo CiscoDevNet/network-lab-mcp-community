@@ -281,3 +281,32 @@ def fake_editor(tmp_path: Path):
         return script
 
     return make
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _real_user_ssh_area_untouched():
+    """Metadata-only (stat) check that the whole test session never changed
+    the real user's ~/.ssh or ~/.ssh/known_hosts. Contents are never read."""
+    from network_lab_mcp import ssh_isolation
+
+    before = ssh_isolation.snapshot_real_ssh_area()
+    yield
+    assert ssh_isolation.snapshot_real_ssh_area() == before, "real ~/.ssh metadata changed during tests"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_orphan_sshd_after_session(tmp_path_factory):
+    """After the whole session no loopback sshd started from this session's
+    temporary root may remain (only this session's own processes are considered)."""
+    yield
+    root = str(tmp_path_factory.getbasetemp())
+    import subprocess as _sp
+
+    out = _sp.run(["ps", "-axo", "pid,command"], capture_output=True, text=True).stdout
+    leftovers = [ln for ln in out.splitlines() if "sshiso/etc/sshd_" in ln and root in ln]
+    for ln in leftovers:  # reap (only ours: the command line carries this session's temp root), then fail
+        try:
+            os.kill(int(ln.split()[0]), 15)
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+    assert not leftovers, f"orphan sshd left by tests: {len(leftovers)}"

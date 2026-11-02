@@ -195,10 +195,17 @@ authentication are supported.
   not by itself guarantee that a host key was verified by a human. Pre-populate
   `known_hosts` for lab devices if you want to avoid trust-on-first-use
   decisions being made through the terminal.
-- **Topology discovery:** the Discovery bootstrap login uses
-  `StrictHostKeyChecking=accept-new`, which records a new host key on first
-  contact (trust on first use) and rejects a changed one. Use it only on lab
-  networks where that is acceptable.
+- **Topology discovery:** Discovery never uses `accept-new` or any other
+  trust-on-first-use mode. Every SSH hop runs with `StrictHostKeyChecking=yes`;
+  a new key can only be registered by the human CLI after the operator approved
+  the expected key type and SHA256 fingerprint (section 11a). A non-interactive
+  run stops on an unknown or changed key and changes nothing.
+- **Managed terminals:** every SSH hop (target and jump host) uses
+  `StrictHostKeyChecking=yes` and `UpdateHostKeys=no`, so an unknown or changed
+  key ends the connection instead of showing a `yes/no` prompt that could be
+  answered through `terminal_send`. The managed terminal never registers,
+  removes or replaces host keys; register keys with the human CLI
+  (`discover topology`) or a manual `ssh` first.
 - Do not weaken SSH settings to make Network Lab MCP work.
 
 ## 10. Telnet
@@ -213,13 +220,130 @@ risk is understood and accepted.
 ## 11. Jump hosts
 
 A device may reference one jump host from the same access-info definition,
-connected with OpenSSH `-J`. Multi-hop chains are not supported, and a device
+connected through OpenSSH with an explicit per-hop
+`-o ProxyCommand=ssh ... -W %h:%p` child (not `-J`, see below). Multi-hop chains are not supported, and a device
 using a jump host must use SSH.
 
 Jump-host authentication is expected to be non-interactive (key or agent). A
 password prompt from the jump host is not answered automatically, and a prompt
 that cannot be attributed to the target or the jump host fails closed. Jump
 host entries are part of private access-info and are not returned over MCP.
+
+### Disconnect safety and the jump-host boundary
+
+When an SSH/Telnet connection ends (exit, idle timeout, network failure, a
+failed connection attempt), input sent afterwards through `terminal_send`
+must never be executed by a local shell. A managed session's transport is
+the pane's main process, so no local shell remains; the session becomes an
+`exited` pane that `terminal_send` refuses. This protects the machine running
+Network Lab MCP.
+
+The guarantee holds for the connections Network Lab MCP starts: direct SSH,
+Telnet, and the single-hop OpenSSH `-J` ProxyJump, where the jump host only
+forwards the connection and no interactive jump-host shell exists. It does
+**not** cover a nested connection started from an interactive shell on a
+jump host (for example `ssh jump` and then `ssh router`): if the inner
+connection ended, input could reach the jump host's shell. That form is not
+supported. A future form could start the inner connection with
+`exec ssh ...` / `exec telnet ...` on the jump host so that no shell remains.
+Custom `ProxyCommand` or `ssh` wrapper settings in the operator's own
+`~/.ssh/config` are outside this guarantee.
+
+### Jump-server authentication (SSH ProxyJump)
+
+- A jump-host password prompt is answered by Network Lab MCP only when a
+  jump-host password is configured, the prompt names exactly the configured
+  jump user and address (`user@host's password:` or `(user@host) Password:`),
+  and the two hops are distinguishable. Aliases, mismatching users, bare
+  `Password:` prompts and identical user/host on both hops fail closed.
+- Each hop's password is sent at most once; a re-prompt is
+  `jump host authentication failed`. The pane and process state are
+  re-verified immediately before sending. This reduces, but cannot eliminate,
+  the window between prompt detection and sending.
+- The ssh command always gets `-o StrictHostKeyChecking=yes` for the target
+  **and** for the jump hop (inside the ProxyCommand child): unknown or changed
+  host keys fail instead of being accepted, whatever the user's `ssh_config`
+  says. Verified with OpenSSH 10.3 on loopback: with `-J` the jump hop does
+  **not** inherit a command-line `StrictHostKeyChecking` (it still prompted),
+  which is why `-J` is no longer used.
+- Discovery answers the jump-host prompt through the same stage logic (`terminal.authenticate_bootstrap_jump_stage`), once per hop, with the same attribution and re-prompt fail-closed rules. Discovery uses `StrictHostKeyChecking=yes` on every hop, so an unknown or changed key fails Discovery. The jump-host prompt logic was verified against local fakes and the host-key behaviour against loopback OpenSSH; real routers and a real jump server are unverified.
+- Access-info address, port and username are validated at commit and again
+  when the argv is built; unsafe values never reach ssh/telnet.
+
+### Telnet via jump host (SSH local port forward)
+
+`transport: telnet` with `jump-host` runs as one logical Managed Terminal made
+of two tmux sessions, both created through the Option C launch path (read
+gate, `exec`, remain-on-exit, pane identity, pipe-pane logging):
+
+- tunnel session `network-lab-tunnel-<device>`: `ssh -N -T -o ExitOnForwardFailure=yes
+  -o ForwardAgent=no -o ForwardX11=no -o PermitLocalCommand=no
+  -o StrictHostKeyChecking=yes -o ControlMaster=no -o ControlPath=none
+  -o LogLevel=VERBOSE -o ServerAliveInterval=15 -o ServerAliveCountMax=3
+  -L 127.0.0.1:<dynamic-port>:<device>:<port> <jump>`. It is internal: no MCP
+  tool derives its name, `terminal_list` never shows it, `terminal_send`
+  cannot reach it. The 15 s x 3 keepalive (about 45 s) ends a silently dead
+  tunnel without being so tight that a slow link drops it.
+- device session `network-lab-device-<device>`: the telnet client, resolved once
+  to an absolute path (`telnet client not found` before any tunnel starts),
+  run as `<abs telnet> -K -E 127.0.0.1 <port>` (no auto-login, no escape).
+
+Order of events: jump password answered once on the tunnel pane (prompt must
+name the configured jump user and address, the pane is re-verified right
+before sending) -> *ready* only when the pane is alive, OpenSSH logged
+`Authenticated to ...`, and the managed ssh pid is the sole owner of the
+`127.0.0.1:<port>` listener -> telnet starts -> an `lsof -nP -F` snapshot must
+show exactly one ESTABLISHED connection from the telnet pid to the port whose
+server side is owned by the managed ssh pid -> the same 4-tuple and owners must
+verify again immediately before the username and again before the password.
+Any lsof failure, parse failure, missing/duplicate socket, foreign owner or
+changed 4-tuple sends nothing and closes both sessions. `ControlMaster=no`
+plus `ControlPath=none` means a foreign ControlMaster cannot own the listener.
+A port conflict (explicit bind error only) is retried on a new port up to 3
+times; each retry is a new ssh and answers the jump password once again.
+
+Lifecycle: the telnet client ending closes the tunnel (lazily, on the next
+list/read/send/open); a dead tunnel makes `terminal_send` refuse and
+`terminal_list` report `exited`; `terminal_close` closes the device session and
+then the tunnel session by their derived names, and refuses a tunnel session
+whose recorded pane identity cannot be verified. After an MCP restart the tmux
+options (pane id/pid, tunnel port, tunnel session name) allow reuse of a
+healthy logical session after re-verifying ownership; a tunnel session without a
+matching device session is an orphan that is neither reused nor deleted
+automatically (`terminal_close` is the explicit way out).
+
+The runtime guard is the code constant `terminal.TELNET_VIA_JUMP_ENABLED`
+(True since the safety tests in `tests/test_telnet_via_jump.py` pass). No
+environment variable, YAML, CLI command or MCP argument reads or changes it.
+Set it to False to disable the path again; Direct SSH, ProxyJump and direct
+Telnet are unaffected. Discovery uses the same code with its own namespaces
+(`network-lab-discovery-*`, `network-lab-discoverytunnel-*`) and never reuses a
+session.
+
+Not verified against real software (only Fakes were used): OpenSSH's actual
+prompt text and `Authenticated to` log line at LogLevel=VERBOSE, whether
+real `lsof` behaviour
+for `ssh -L` listeners, the macOS telnet client's option negotiation
+(`-K`, NEW-ENVIRON), and real devices. Treat this as a CONDITIONAL GO until a
+separately authorised test against a local throwaway sshd.
+
+Residual risks: Telnet is plaintext between the jump host and the device;
+loopback is not per-process access control (any local process can connect, and
+the ownership proofs narrow but cannot eliminate the window between a proof
+and the next keystroke); lsof snapshots are not atomic; a tunnel left running
+after a crash holds a loopback port and a jump-host connection until closed;
+the tunnel pane's log lives in the device's log directory as a separate file.
+
+## 11a. SSH host-key approval and recovery (`discover topology`)
+
+- **Human only.** Approval, removal and replacement of host keys exist only in the interactive human CLI. MCP tools and managed terminals have no code path to them (tested).
+- **Independent verification.** The expected key type and `SHA256:` fingerprint must come from a trusted channel other than the connection being verified. A key is registered only if the presented key matches exactly; OpenSSH writes the entry itself.
+- **Keys before credentials.** Registration connections disable authentication on the hop under test. Credential-carrying Discovery connections run `StrictHostKeyChecking=yes` on every hop. Approvals are in-memory, scoped, expiring (900 s) and single-use.
+- **Registration connections and jump passwords.** A registration connection may send a *jump host* password only through the Stage B attribution logic, at most once per connection, never when the prompt cannot be attributed to the jump hop, and never again after a re-prompt or failure for the same jump host in the same run. Their total is capped at `min(40, 2 x (devices behind a password-authenticated jump host) + 6)`. The target's credentials are never sent on a registration connection.
+- **known_hosts changes under concurrency.** Before removal the file is re-checked (size, mtime, inode, hash, symlink, owner, permissions). The backup is never written back wholesale: if the file changed in a way that cannot be explained by removing exactly the target host's lines, nothing is repaired automatically and the backup path is shown for manual recovery. Entries other programs add in the meantime are preserved.
+- **Stops without automatic recovery.** A presented key whose type or fingerprint differs from the approved one, certificate-authority/revoked markers, shared or pattern host entries, and an unreadable or symlinked `known_hosts` stop the operation and change nothing.
+- **Replacement** verifies the new key on a copy first, backs up `known_hosts` (to a `0700` directory, files `0600`; contains other hosts' keys; never auto-deleted; may or may not be excluded from your own backup/sync tools), removes exactly one host's entries and registers the new key after a second exact match. `GlobalKnownHostsFile` is never modified.
+- **Residual risks.** A TTY does not prove a human is typing: an AI or script able to drive your terminal (PTY automation) can approve; keep the human CLI out of the AI's reach. Concurrent modification of `known_hosts` by other programs is detected on a best-effort basis (fail closed), not prevented. Legacy `ssh-rsa` (SHA-1) host keys are not supported. SSH features not handled (certificates/`@cert-authority`, `KnownHostsCommand`, DNS-based host keys, shared or pattern host entries) fail closed or fall back to manual recovery. (Fixed in Step 5.3.3a: managed terminals now verify the jump hop strictly too.) Telnet-over-SSH-tunnel host-key registration and replacement are disabled. Verified only against isolated local OpenSSH servers, not against real routers or a real jump server.
 
 ## 12. Candidate / commit boundary
 

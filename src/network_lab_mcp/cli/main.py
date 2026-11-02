@@ -1268,7 +1268,10 @@ def render_help_claude() -> str:
             "  1. Install Network Lab MCP into an activated Python environment",
             "     (see README.md, \"Quick Start\").",
             "  2. Register it once, using the absolute path of the installed executable:",
-            "       claude mcp add network-lab -s user -- /path/to/network-lab-mcp/.venv/bin/network-lab-mcp",
+            "       claude mcp add --scope user network-lab -- \\",
+            "         /absolute/path/to/network-lab-mcp/.venv/bin/network-lab-mcp",
+            "     From the repository root you can use \"$(pwd)/.venv/bin/network-lab-mcp\"",
+            "     as the executable path. Do not register run_cli.sh (the human CLI).",
             "  3. Start Claude Code from your own task workspace (not this",
             "     repository) once Network Lab MCP has been configured and",
             "     committed.",
@@ -1965,15 +1968,47 @@ def render_discovery_summary(result: "discovery.DiscoveryResult") -> str:
     return "\n".join(lines)
 
 
+def _make_hostkey_coordinator():
+    """Interactive human CLI only: a host-key coordinator that reads approvals
+    from the controlling terminal. Returns None when no safe interactive
+    terminal exists (then Discovery keeps its previous non-interactive
+    behaviour and no approval/removal of any host key is possible)."""
+    from network_lab_mcp import hostkey_approval, hostkey_flow
+
+    try:
+        channel = hostkey_approval.DevTtyChannel()
+    except hostkey_approval.ApprovalError:
+        return None
+    return hostkey_flow.Coordinator(channel)
+
+
 def _run_discover_topology(session: cfgmod.CliSession, include_l3: bool) -> None:
+    from network_lab_mcp import hostkey_flow
+
     target_name = discovery.resolve_default_topology_name(session.lab_root)
     ok, message = session.check_discovery_allowed(target_name)
     if not ok:
         print(f"% {message}")
         return
     print(f"Discovering topology from access-info '{target_name}'...")
+    coordinator = _make_hostkey_coordinator()
     try:
-        result = discovery.discover_topology(session.lab_root, include_l3=include_l3)
+        recoveries = 0
+        while True:
+            try:
+                extra = {"hostkeys": coordinator} if coordinator is not None else {}
+                result = discovery.discover_topology(session.lab_root, include_l3=include_l3, **extra)
+                break
+            except hostkey_flow.HostKeyChanged as changed:
+                recoveries += 1
+                if coordinator is None or recoveries > 3 or not coordinator.recover_changed(
+                    changed, changed.device_config
+                ):
+                    raise discovery.DiscoveryError(
+                        f"{changed}\nNo host key was changed. Verify the new key through a trusted channel, or "
+                        "run `discover topology` again from an interactive terminal to review replacement."
+                    ) from None
+                print("Re-running discovery with the replaced host key...")
         removed_devices, removed_links = session.discovery_removals(result)
         # Everything that can fail has run; only now is the candidate
         # replaced (apply validates before it touches any session state).
@@ -1984,8 +2019,13 @@ def _run_discover_topology(session: cfgmod.CliSession, include_l3: bool) -> None
             for link in removed_links:
                 print(f"  link   {link}")
         session.apply_discovery_result(result)
+    except hostkey_flow.HostKeyError as exc:
+        raise discovery.DiscoveryError(f"{exc}\n% Topology candidate not updated.") from None
     except (discovery.DiscoveryError, lab.LabConfigError) as exc:
         raise discovery.DiscoveryError(f"{exc}\n% Topology candidate not updated.") from exc
+    finally:
+        if coordinator is not None:
+            coordinator.channel.close()
     print(render_discovery_summary(result))
 
 

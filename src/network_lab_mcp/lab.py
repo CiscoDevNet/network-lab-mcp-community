@@ -31,7 +31,7 @@ from typing import Any, Optional
 
 import yaml
 
-from network_lab_mcp import terminal
+from network_lab_mcp import connection_safety, terminal
 
 
 class LabConfigError(Exception):
@@ -583,9 +583,11 @@ def validate_jump_hosts(context_label: str, jump_hosts: dict) -> None:
 
 
 def validate_device_jump_host_references(context_label: str, devices: dict, jump_hosts: dict) -> None:
-    """A device's optional 'jump_host' must name an existing jump host, and
-    single-hop OpenSSH ProxyJump requires the device's own transport to be
-    ssh too -- a telnet device can never use a jump host."""
+    """A device's optional 'jump_host' must name an existing jump host.
+    ssh devices use OpenSSH ProxyJump; telnet devices are accepted at commit
+    time too (SSH local port forwarding), but whether that path may actually
+    run is a separate runtime guard in terminal.py
+    (TELNET_VIA_JUMP_ENABLED), never decided by configuration."""
     for device_name, device in devices.items():
         device = device or {}
         jump_host_ref = device.get("jump_host")
@@ -595,11 +597,16 @@ def validate_device_jump_host_references(context_label: str, devices: dict, jump
             raise LabConfigError(
                 f"{context_label} device '{device_name}' references unknown jump host '{jump_host_ref}'."
             )
-        raw_transport = device.get("transport")
-        if raw_transport and str(raw_transport).lower() != "ssh":
-            raise LabConfigError(
-                f"{context_label} device '{device_name}' uses jump_host but transport is not 'ssh'."
-            )
+
+
+def validate_connection_values(context_label: str, devices: dict, jump_hosts: dict) -> None:
+    """Reject address/port/username values that are unsafe in ssh/telnet argv."""
+    for kind, entries in (("device", devices), ("jump host", jump_hosts)):
+        for entry_name, entry in entries.items():
+            try:
+                connection_safety.validate_endpoint(entry or {}, f"{context_label} {kind} '{entry_name}'")
+            except connection_safety.UnsafeConnectionValue as exc:
+                raise LabConfigError(str(exc)) from None
 
 
 def validate_access_info_data(name: str, data: Any) -> None:
@@ -624,6 +631,7 @@ def validate_access_info_data(name: str, data: Any) -> None:
     jump_hosts = data.get("jump_hosts") or {}
     validate_jump_hosts(f"Access information '{name}'", jump_hosts)
     validate_device_jump_host_references(f"Access information '{name}'", devices, jump_hosts)
+    validate_connection_values(f"Access information '{name}'", devices, jump_hosts)
 
 
 def load_access_info(name: str, lab_root: Path | None = None) -> dict:

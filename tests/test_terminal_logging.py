@@ -112,7 +112,10 @@ def test_logging_attached_before_earliest_immediate_output(isolated_logs, monkey
     monkeypatch.setattr(
         terminal, "_build_transport_command", lambda config, **kw: ("ssh", ["echo", "IMMEDIATE-BANNER"])
     )
-    terminal.open_device_terminal("R9", {"transport": "ssh", "address": "192.0.2.1"})
+    # The transport ends at once, so the open itself reports "connection
+    # ended" -- but the banner must still have been logged.
+    with pytest.raises(terminal.TerminalError, match="connection ended"):
+        terminal.open_device_terminal("R9", {"transport": "ssh", "address": "192.0.2.1"})
 
     log_dir = isolated_logs / "R9"
     assert _wait_until(lambda: log_dir.is_dir() and any(log_dir.iterdir()))
@@ -173,7 +176,8 @@ def test_failed_connection_cleanup_remains_correct(isolated_logs, monkeypatch):
     must not leave a broken session/log state; close_device_terminal()
     still cleanly reports closed=True."""
     monkeypatch.setattr(terminal, "_build_transport_command", lambda config, **kw: ("ssh", ["false"]))
-    terminal.open_device_terminal("R9", {"transport": "ssh", "address": "192.0.2.1"})
+    with pytest.raises(terminal.TerminalError, match="exit status 1"):
+        terminal.open_device_terminal("R9", {"transport": "ssh", "address": "192.0.2.1"})
 
     log_dir = isolated_logs / "R9"
     assert _wait_until(lambda: log_dir.is_dir() and any(log_dir.iterdir()))

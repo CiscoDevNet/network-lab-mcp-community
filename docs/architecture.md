@@ -231,7 +231,7 @@ MCP private access resolver
   |       no  -> nothing to attach
   |
   v
-tmux / native OpenSSH (direct, or -J ProxyJump if jump_host_config is set) / telnet
+tmux / native OpenSSH (direct, or per-hop ProxyCommand jump if jump_host_config is set) / telnet
   |
   v
 Device (optionally via one jump host)
@@ -269,8 +269,11 @@ edit recency, or alphabetical order.
 
 A device's optional `jump_host` field names one jump host, within the same
 access-info definition, that `terminal.py` connects through using native
-OpenSSH's own `-J` option (`ssh -J jump-user@jump-host:jump-port -p
-port user@target`) instead of a direct connection —
+OpenSSH with an explicit per-hop ProxyCommand child (`ssh -o
+StrictHostKeyChecking=yes -o ProxyCommand="ssh -o StrictHostKeyChecking=yes -W
+%h:%p -p jump-port jump-user@jump-host" -p port user@target`; `-J` is not used
+because its child does not inherit a command-line `StrictHostKeyChecking`)
+instead of a direct connection —
 `terminal._build_transport_command()` builds this argv (list-based, never
 `shell=True`, never a password) purely from the resolved device/jump-host
 dicts, with no shell-hop automation: OpenSSH itself tunnels the second SSH
@@ -298,6 +301,10 @@ unset (already allowed), there is nothing to compare and resolution
 proceeds normally. Credential values are never included in this error.
 
 ## Terminal architecture
+
+For a focused explanation of how OpenSSH, tmux and the Telnet client are composed
+(direct SSH, jump server, SSH tunnel for Telnet, host-key trust), see
+[Connection architecture](connection_architecture.md).
 
 Terminal sessions are managed with tmux, using a dedicated named socket
 (`tmux -L network-lab-mcp ...`) so that Network Lab MCP never interferes with
@@ -355,12 +362,12 @@ against a selected access-info device by logical ID, with no
 active-topology membership check at all — unlike `terminal_open()`, which
 requires the device to be in the active topology. This is intentional and
 does not weaken `terminal_open()`'s own restriction, which is a completely
-separate code path. The one difference passed to `_build_transport_command()`
-for Discovery is `accept_new_host_keys=True` (`ssh -o
-StrictHostKeyChecking=accept-new`): Discovery is unattended, with no human
-to answer an interactive host-key confirmation prompt, so it avoids that
-prompt outright for a genuinely new host key, rather than automating the
-confirmation. It never bypasses a *changed*-host-key failure
+separate code path. Discovery passes no host-key option to
+`_build_transport_command()` that managed terminals do not get: both use
+`StrictHostKeyChecking=yes` on every hop (the former `accept-new` mode was
+removed in Step 5.3.3a). A genuinely new host key therefore stops an unattended
+run; the human CLI registers it beforehand (see "SSH host-key management").
+It never bypasses a *changed*-host-key failure
 (`StrictHostKeyChecking=no`/`UserKnownHostsFile=/dev/null` are never used)
 — that remains a hard failure the operator must resolve themselves (e.g.
 `ssh-keygen -R <address>`) after independently verifying the new
@@ -561,13 +568,48 @@ remains the durable historical-evidence SSOT, unaffected by any of this --
 the monitor never creates a log, never touches `pipe-pane`, and never
 writes captured pane text anywhere but the local terminal.
 
+### Managed session launch and disconnect safety
+
+A managed session (production, and Discovery's private bootstrap) never
+leaves a local shell behind. The pane's main process is a fixed `/bin/sh -c`
+launch wrapper that waits on a start gate (`read`) and then `exec`s the
+transport (`ssh`/`telnet`), with the transport command passed to tmux as
+separate argv words -- never typed into a shell and never re-parsed. When the
+transport ends the pane has no process left, and tmux keeps it as a dead pane
+(`remain-on-exit`), so input sent later has nowhere to execute.
+
+Startup order is fixed: `remain-on-exit` is already on server-wide and is set
+again on the new window; the pane is created blocked on the gate; its pane id
+(recorded as tmux window options `@nlm_pane_id`/`@nlm_pane_pid`) and a
+`pipe-pane` log are set up and verified; only then is the gate released and
+`@nlm_gate` set to `open`. A transport that fails at once is therefore logged
+and kept as an exited pane. Every way out of the wrapper other than a
+successful `exec` (missing command, gate EOF, SIGHUP, `exec` failure) exits
+non-zero.
+
+`terminal_send()` adds an independent second check: it addresses the pane by
+the recorded pane id (never the session name), and refuses an exited pane, an
+identity mismatch, a pane whose gate is not open, or an unknown state. This
+check alone cannot close a check-then-send race -- the structure above is the
+guarantee; the check gives clear errors. `terminal_open()` replaces an exited
+session (its transcript is already in the pipe-pane log) instead of reusing
+it, and reports a connection that ended before login completed as an error.
+
+**Scope.** This guarantee covers the single-hop OpenSSH ProxyJump (an explicit
+`ProxyCommand ssh -W` child, no shell on the jump host) and
+direct SSH/Telnet that Network Lab MCP starts: no interactive shell exists on
+the jump host. It does not cover a nested design in which a shell on a jump
+host starts the second connection -- when the inner connection ended, that
+shell would remain. That form is not supported (see
+[SECURITY.md](../SECURITY.md#11-jump-hosts)).
+
 ### Persistent terminal session logging
 
 Every device session -- production and Discovery's private bootstrap
 sessions alike -- is logged via tmux's own `pipe-pane` mechanism
 (`tmux pipe-pane -o -t <session> 'cat >> <logfile>'`), started right after
-the session is first created (never on reuse, since the pipe stays
-attached for the pane's whole lifetime). This is the only logging
+the session is first created and *before* its transport starts (never on
+reuse, since the pipe stays attached for the pane's whole lifetime). This is the only logging
 mechanism: nothing here re-renders or duplicates pane content into a
 second application log, and `terminal_send()`'s payload is never logged
 separately from what the pane/log itself already shows. tmux's pane
@@ -765,10 +807,13 @@ callers -- never two independently-written password-prompt parsers:
   OpenSSH's prompt text and only answers when it confidently matches the
   target device's own address; a prompt that matches the jump host's
   address, or that cannot be confidently attributed to either hop, fails
-  closed instead of guessing. This is a deliberately **bounded ProxyJump
-  limitation**: jump-host authentication must be non-interactive (key/
-  agent-based) for both Discovery and managed `terminal_open()` alike --
-  neither one will ever answer a jump host's own password prompt.
+  closed instead of guessing. The jump hop's own prompt is handled by a
+  separate stage (`terminal._authenticate_jump_stage`, shared by managed
+  `terminal_open()` and Discovery via `authenticate_bootstrap_jump_stage`):
+  it answers only a prompt whose user and address equal the configured jump
+  user and address, only when a jump password is configured, only once, and
+  re-prompts fail closed. Without a configured jump password the jump prompt
+  still fails closed. Verified with fakes only, not real OpenSSH.
 
 **Telnet reuses this same function unchanged, with no telnet-specific code
 at all.** Telnet has no client-side host-wrapping prompt text (unlike
@@ -776,7 +821,9 @@ OpenSSH's `"<user>@<host>'s password:"`), so on its own this function's
 `SSH_HOP_PASSWORD_PROMPT_RE` attribution wouldn't apply -- but it doesn't
 need to: the access-info schema's own jump-host validation requires
 `transport: ssh` for any device that references a `jump_host`, so a telnet
-device can structurally never have one. That means
+device can structurally never have one. (Since then `telnet` + `jump-host` may be
+committed; that case is handled by the tunnel flow below, which strips
+`jump_host_config` before this function sees the Telnet prompts.) That means
 `resolve_target_password_prompt()`'s very first check -- "no
 `jump_host_config` -> unambiguous, answer with the target's own configured
 password" -- already handles a telnet password prompt correctly, without
@@ -1599,7 +1646,7 @@ call, with no MCP server restart.
 
 ### Credential boundary summary
 
-The full detail lives in README.md's ["Security model"](../README.md#security-model)
+The full detail lives in README.md's ["Security and operational boundaries"](../README.md#security-and-operational-boundaries)
 and in "Device access resolution"/"Managed-terminal private authentication"
 above; in one place, the properties that hold everywhere in this project:
 
@@ -1688,8 +1735,8 @@ deliberately excludes:
 - External-editor support for access-info (structured CLI editing only).
 - Multi-hop SSH jump chains: a jump host cannot itself reference another
   jump host; single-hop OpenSSH ProxyJump only.
-- A shell-hop automation/state machine for ProxyJump: OpenSSH's own `-J`
-  option is used directly, so there is nothing to automate.
+- A shell-hop automation/state machine for ProxyJump: OpenSSH's own
+  `ProxyCommand ... -W` child is used directly, so there is nothing to automate.
 - A generic cross-file consistency framework: the topology/access-info
   `device.type` check is a narrow, single-purpose comparison at resolution
   time, not a general validation framework.
@@ -1709,3 +1756,40 @@ because it was merely deferred.
 ### Name-less running selection submodes (access-info, topology, scenario, reference)
 
 `config-running-<kind>` (internal modes `running_<kind>_common`, listed in `cfgmod.RUNNING_COMMON_MODES`, built by `cli/grammar.py::_build_running_common_root(kind)` and wired by `main.py::_register_running_common_handlers(kind)`) are selection-only submodes entered by the bare keyword under `config-running`. Selection calls `select_access_info` / `select_topology` / `set_scenario` / `select_reference_idempotent` and unselection `clear_access_info_selection` / `clear_topology_selection` / `clear_scenario_selection` / `remove_reference` -- the same `settings_candidate` mutations as the parent/named commands; a topology/scenario candidate may be unselected but `commit()`'s existing "missing a valid active topology/scenario" validation rejects it. The text below describes the access-info case; the others are identical apart from the selection method. It reuses `CliSession.select_access_info()` (the same Selection `access-info <name>` performs before entering its named submode) and the existing `settings_candidate` / dirty tracking; no new state, and it is intentionally not in `RUNNING_ENTRY_MODES`, so no description handler can reach it (`description` is not in its grammar; its `no <name>` is a selection removal handled by `h_running_access_info_common_no`, which exact-matches the candidate selection and then calls the same `h_running_access_info_remove` as `config-running# no access-info`; Help/Tab names come from `CliContext.candidate_access_info_names`, rebuilt from the candidate on every call). Fixed keywords take precedence over definition names (`_match_literal`: case-insensitive, unique-prefix); same-named definitions stay selectable through `access-info <name>`. In pasted blocks, `!` exits `running` / this submode only after a command that ran inside the section (`execute_input_block`). Provisional: only access-info has it.
+
+
+## SSH ProxyJump jump-server login and the Telnet-via-jump guard
+
+`_build_transport_command` is the single builder of ssh/telnet argv. It
+validates address/port/username (`connection_safety.py`), emits the jump hop as
+one `-o ProxyCommand=` argv element (shell-quoted child, no credentials), always
+adds `StrictHostKeyChecking=yes`/`UpdateHostKeys=no` to both hops, and refuses telnet + jump host with
+`telnet via jump host is not enabled`. Managed ssh login runs two stages
+(jump hop, then target), each answered at most once, with prompt attribution
+by user and address and a pre-send pane re-check. `tunnel_safety.py` holds
+the Telnet-tunnel helpers (client pinning, loopback port, lsof-F ownership proofs) used by
+`terminal._open_telnet_via_jump`, which builds the tunnel and device sessions described in SECURITY.md.
+`_build_transport_command` itself still refuses telnet + jump host: only the tunnel flow may open it.
+
+
+## SSH host-key management (human CLI `discover topology`)
+
+**Entry point.** Only the interactive human CLI creates a `hostkey_flow.Coordinator` (`cli/main.py`). The MCP server and `terminal.py` never import `hostkey_approval`, `hostkey_flow` or `hostkey_store`; tests enforce this.
+
+**Registration state.** For each hop `ssh-keygen -F` (through the pinned binary) classifies the entry in the selected `known_hosts` (and read-only `GlobalKnownHostsFile`) as `UNKNOWN_CANDIDATE`, `REGISTERED_UNVERIFIED` or `UNDETERMINED` (unreadable file, marker such as `@cert-authority`, unsupported key type -> fail closed). A registered entry is never trusted by that check alone: the real connection runs `StrictHostKeyChecking=yes`.
+
+**Establish before credentials.** An unknown key is first established by a *registration connection*: a pty `ssh` with `StrictHostKeyChecking=ask`, `HostKeyAlgorithms` restricted to the approved key type, and every authentication method disabled on the hop under test (`PreferredAuthentications=none`, ...). The approved `SHA256:` fingerprint is typed at most once, only when host, port, algorithm and fingerprint of the prompt all equal the approval. OpenSSH itself writes the key. Afterwards `ssh-keygen -F` must show exactly the approved fingerprint. For a target behind a jump host the jump hop runs strict and may only receive its own password through the Stage B attribution logic. Discovery workers then always run strict on every hop; no host key is ever auto-accepted on a credential-carrying connection.
+
+**Per-hop options.** `-J` does not propagate command-line `-o StrictHostKeyChecking` to the jump hop (observed with OpenSSH 10.3: the jump hop still prompted). Host-key-managed Discovery therefore builds `-o ProxyCommand=<ssh ... -W %h:%p jump>` with explicit per-hop `StrictHostKeyChecking`, `UserKnownHostsFile`, `UpdateHostKeys=no`, `CheckHostIP=no`, `VerifyHostKeyDNS=no`. Managed terminals use the same per-hop ProxyCommand structure (Step 5.3.3a). Other user ssh_config settings (identity, algorithms, ports) still apply because no `-F` is used; command-line `-o` wins over them.
+
+**CHANGED recovery.** Detected from OpenSSH's strict-checking message in the pane. Flow: choose replacement -> expected key -> probe on a throw-away `0600` copy in a `0700` directory from which only the target's entries were removed (jump key stays trusted) -> final confirmation -> verify `known_hosts` unchanged since inspection -> own backup -> `ssh-keygen -R` of exactly that identifier (refused for shared host fields, wildcards, markers; result must equal the original minus exactly the matched lines, otherwise restored) -> second registration connection against the real file -> re-run Discovery.
+
+**State machines.** `HostKeyState` (PENDING, REGISTERED_UNVERIFIED, VERIFIED, APPROVED, TRUSTED, FAILED) and `AuthState` per hop; `Hop.advance_auth` refuses authentication unless the hop is trusted.
+
+**Locking.** A per-file in-process lock plus `flock` (lock file in the product state directory, not beside `known_hosts`) serialize registration and removal. Modification by other processes is detected by size/mtime/inode/hash comparison and fails closed.
+
+**Test isolation.** `ssh_isolation.py` provides a typed `SshRuntime` that tests install through a private import-only hook. It selects absolute `ssh`/`ssh-keygen`/`sshd`/`tmux` paths and forces every OpenSSH process (including those started inside tmux panes and ProxyCommand children) through a wrapper script that validates argv and ssh config against an allow-list and rebuilds a minimal environment before `execve`. It is not controllable from environment variables, YAML, CLI or MCP; without it the real binaries are used.
+
+**Connection kinds.** Direct SSH: target hop. ProxyJump: jump and target hops, independently. Telnet over SSH forwarding: jump hop only, and only if already registered (registration/replacement disabled). Direct Telnet: none.
+
+**Step 5.3.3a hardening.** (1) No `accept-new` anywhere: non-interactive Discovery is strict and changes nothing. (2) Managed terminals verify target **and** jump hop strictly (ProxyCommand child). (3) The jump password in registration connections follows Stage B attribution, once per connection, with a deterministic budget `min(40, 2 x N + 6)` (N = devices behind a password jump host) and a per-jump-host stop after the first failure. (4) State machine: the integration choice is *both*: `Coordinator.require_trusted` is checked by Discovery before any username/password/jump-password send (every hop must be REGISTERED_UNVERIFIED or TRUSTED), and the strict connection itself makes a credential prompt impossible before the key is verified (integration-tested with real OpenSSH). (5) known_hosts removal re-checks the file immediately before `ssh-keygen -R`, never restores the backup wholesale, and stops for manual recovery when the result cannot be explained. (6) Test infrastructure records every wrapper decision in a sandbox audit log (no argv content) and reaps only the sshd processes the test run itself started.
