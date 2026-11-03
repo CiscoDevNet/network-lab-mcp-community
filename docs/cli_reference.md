@@ -1795,6 +1795,30 @@ committed definition -> candidate data -> secure temp .yaml file
   is scoped to that one editor invocation only — no vimrc is touched.
   Neovim (`nvim`) and any `vi` that can't be positively confirmed as real
   Vim are left completely alone.
+- **UTF-8 Safe Editor Launch**: before the temp file is created, `edit`
+  verifies that the environment *the editor child will receive* resolves to a
+  UTF-8 locale on macOS and Linux. The check is made by the C library, not by
+  the locale name: an isolated Python child (cwd `/`, stdin `/dev/null`,
+  `-X utf8=0 -S` plus `-P` on Python 3.11+, `PYTHONUTF8=0`,
+  `PYTHONCOERCECLOCALE=0`, only `LANG`/`LC_*`/locale-path/runtime variables)
+  runs `setlocale(LC_ALL, "")` (every category, so an invalid `LANG` fails
+  even when `LC_CTYPE` is valid) and reads `nl_langinfo(CODESET)`; only the
+  exact token `NLM_CODESET=UTF-8` counts as success. Limits: 3 s per check,
+  10 s in total.
+  - Already UTF-8: the environment is left unchanged.
+  - Otherwise the first libc-verified candidate is applied as `LC_ALL` **in
+    the editor child's environment only** (language/region-derived
+    `*.UTF-8`, `en_US.UTF-8`, `C.UTF-8`, `en_US.utf8`, `C.utf8`, `UTF-8`),
+    and the final environment is verified again. `LANG`, `LC_CTYPE`, and the
+    other `LC_*` are not edited, and `LC_ALL` also affects the editor's message
+    language, date/number formats, and collation.
+  - No UTF-8 locale can be verified: the editor is not launched and the
+    candidate, committed files, and CLI mode are untouched.
+  - This process's environment and your shell/Vim configuration are never
+    modified, and nothing is cached. The terminal emulator must also use UTF-8
+    encoding for Japanese text to display correctly (this tool cannot check that).
+  - The edited temp file is read as UTF-8 (a BOM is tolerated and dropped;
+    invalid UTF-8 is rejected with an error and the candidate is not updated).
 - **Temp file**: a securely created, uniquely named `.yaml` file (never a
   predictable fixed name), removed after the editor exits — on every path,
   including an error.

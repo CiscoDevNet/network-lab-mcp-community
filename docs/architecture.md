@@ -1613,7 +1613,13 @@ paste mode (`-c "set paste"`) appended if, and only if, its executable is
 positively confirmed to be real Vim (never guessed from a `vim`/`vi`/`nvim`
 name alone, never added to Neovim, and coexisting with any `-c` option the
 operator already supplied) — see `editor._is_confirmed_vim()`'s own
-docstring for the exact, subprocess-free detection rule. It then opens the
+docstring for the exact, subprocess-free detection rule. UTF-8 Safe Editor Launch (`cli/utf8_locale.py`) runs first: a copy of the
+environment is verified by an isolated Python child using libc
+`setlocale(LC_ALL, "")` + `CODESET` (fixed cwd `/`, stdin `/dev/null`, fixed
+ASCII success token, 3 s per check / 10 s total) and, when it is not UTF-8,
+`LC_ALL` is set to a verified UTF-8 locale in that copy only, then verified
+again; if that is impossible the editor is not launched. The parent's
+environment is never changed. It then opens the
 current definition candidate in a secure, unique `.yaml` temporary file
 (never the committed file itself), and on a clean editor exit parses and
 minimally validates the result (valid YAML, root is a mapping) before

@@ -167,7 +167,7 @@ brew install git python tmux
 
 OpenSSH is normally available on macOS; check `command -v ssh` rather than assuming a particular installation path. Install Claude Code separately using its official instructions. Do not expect `pip install -e .` to install Claude Code, tmux, OpenSSH, or Telnet.
 
-**Text editor:** Network Lab MCP uses `$VISUAL`, then `$EDITOR`, then `vim` for its `edit` command. Vim is normally included with macOS, so additional installation is usually unnecessary. Check with `command -v vim`; if you prefer another editor, set `VISUAL` or `EDITOR` in the environment that launches the Network Lab CLI. Access-info remains editable through structured CLI commands rather than the external editor.
+**Text editor:** Network Lab MCP uses `$VISUAL`, then `$EDITOR`, then `vim` for its `edit` command. Vim is normally included with macOS, so additional installation is usually unnecessary. Check with `command -v vim`; if you prefer another editor, set `VISUAL` or `EDITOR` in the environment that launches the Network Lab CLI. Access-info remains editable through structured CLI commands rather than the external editor. Before launching it, `edit` verifies (via the C library) that the editor's environment is UTF-8 and, if not, sets `LC_ALL` to a verified UTF-8 locale for the editor process only; it refuses to launch otherwise. Your terminal emulator must also use UTF-8 for Japanese text to display correctly. See [docs/cli_reference.md](docs/cli_reference.md#external-yaml-editor).
 
 For a Telnet-only lab device, **also** check:
 

@@ -33,6 +33,8 @@ from typing import Any
 
 import yaml
 
+from network_lab_mcp.cli import utf8_locale
+
 
 class EditorError(Exception):
     """A clear, user-facing error from launching or reading the external editor."""
@@ -198,6 +200,13 @@ def edit_yaml_candidate(data: Any, topology: bool = False) -> dict:
     result, or a non-mapping root. The temporary file is removed on every
     path, including exceptions."""
     command = resolve_editor_command()
+    # UTF-8 Safe Editor Launch: verify (and if needed repair, via LC_ALL) the
+    # editor child's own environment before any temp file exists. A copy is
+    # used; this process's os.environ is never changed.
+    try:
+        editor_env = utf8_locale.prepare_editor_env(os.environ.copy())
+    except utf8_locale.UnavailableUTF8Locale as exc:
+        raise EditorError(str(exc)) from exc
     fd, path_str = tempfile.mkstemp(suffix=".yaml", prefix="network-lab-mcp-")
     path = Path(path_str)
     try:
@@ -208,7 +217,7 @@ def edit_yaml_candidate(data: Any, topology: bool = False) -> dict:
                 yaml.safe_dump(data, handle, sort_keys=False, default_flow_style=False, allow_unicode=True)
 
         try:
-            result = subprocess.run([*command, str(path)])
+            result = subprocess.run([*command, str(path)], env=editor_env)
         except OSError as exc:
             mapped = _launch_error(command[0], exc)
             if mapped is exc:
@@ -220,7 +229,14 @@ def edit_yaml_candidate(data: Any, topology: bool = False) -> dict:
                 f"Editor exited with a non-zero status ({result.returncode}). Candidate was not updated."
             )
 
-        text = path.read_text(encoding="utf-8")
+        try:
+            # utf-8-sig: a BOM added by an editor is tolerated on read and
+            # never written back (the candidate is parsed data).
+            text = path.read_bytes().decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            raise EditorError(
+                "Edited content is not valid UTF-8. Candidate was not updated."
+            ) from exc
         try:
             parsed = yaml.safe_load(text)
         except yaml.YAMLError as exc:

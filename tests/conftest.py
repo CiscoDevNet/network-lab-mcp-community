@@ -298,6 +298,16 @@ def lab_root(tmp_path: Path) -> Path:
     return root
 
 
+@pytest.fixture(autouse=True)
+def _utf8_locale_validation_stub(monkeypatch):
+    """Keep editor tests independent of the host locale: the real libc check
+    is exercised only by the UTF-8 locale test modules, which override this
+    fixture by name."""
+    from network_lab_mcp.cli import utf8_locale
+
+    monkeypatch.setattr(utf8_locale, "validate_utf8_locale", lambda env, timeout=3.0: utf8_locale.LocaleCheck(True, "ok"))
+
+
 @pytest.fixture()
 def fake_editor(tmp_path: Path):
     """Build a small, deterministic stand-in for an interactive editor, so
