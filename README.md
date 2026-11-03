@@ -124,6 +124,7 @@ Choose your platform:
 
 - [macOS — step-by-step installation](#macos-installation)
 - [Linux — installation](#linux-installation)
+- [Windows 11 — WSL2 installation](#windows-11--wsl2-installation)
 - [Register with Claude Code or Codex](#register-the-mcp-server)
 - [First connection and troubleshooting](#first-use-and-troubleshooting)
 
@@ -182,7 +183,7 @@ Some macOS installations do not include a Telnet client. Install a compatible cl
 
 ```bash
 cd ~
-git clone https://github.com/CiscoDevNet/network-lab-mcp-community.git
+git clone https://github.com/CiscoDevNet/network-lab-mcp-community.git network-lab-mcp
 cd network-lab-mcp
 ```
 
@@ -259,7 +260,7 @@ Linux remains supported. Install Python 3.10+, Git, tmux, and OpenSSH through yo
 sudo apt-get update
 sudo apt-get install -y git python3 python3-venv python3-pip tmux openssh-client
 
-git clone https://github.com/CiscoDevNet/network-lab-mcp-community.git
+git clone https://github.com/CiscoDevNet/network-lab-mcp-community.git network-lab-mcp
 cd network-lab-mcp
 python3 -m venv .venv
 source .venv/bin/activate
@@ -272,7 +273,114 @@ fi
 ./run_cli.sh
 ```
 
-Use the registration instructions below for your AI client. The newly added macOS SSH jump-server workflows have not been revalidated end-to-end on every Linux environment.
+Use the registration instructions below for your AI client. Linux behavior depends on the distribution, OpenSSH and Telnet clients, and network configuration; see the tested Windows/WSL2 case below for additional coverage.
+
+### Windows 11 / WSL2 installation
+
+**Network Lab MCP runs inside Linux under WSL2, not as a native Windows application.** Install Claude Code and Network Lab MCP in the **same Ubuntu distribution**, and run all Linux commands below inside the Ubuntu terminal. These steps were validated on **Windows 11 Enterprise + WSL2 + Ubuntu 26.04.1 LTS**, with Python 3.14.4, Claude Code 2.1.317, and Network Lab MCP 0.3.0. This is a tested configuration, not a claim that every Windows/WSL release or enterprise network works identically.
+
+**Step 1 — Install and select a WSL2 Ubuntu distribution**
+
+In **Windows PowerShell**, run:
+
+```powershell
+wsl --install -d Ubuntu
+wsl --list --verbose
+```
+
+Complete Ubuntu's first-run username/password setup; Windows may require a reboot. If you have multiple WSL distributions, explicitly choose the one you want with `wsl -d Ubuntu` (using the exact name shown by `wsl --list --verbose`). `wsl --set-default Ubuntu` is optional. Each distribution has its **own** home directory, packages, and virtual environments; changing distributions can make a previously installed `.venv` appear missing. Do **not** unregister a distribution to fix a Python error: `wsl --unregister <distribution>` permanently removes its data.
+
+**Step 2 — Install prerequisites in Ubuntu**
+
+```bash
+sudo apt update
+sudo apt install -y git python3 python3-venv python3-pip tmux openssh-client vim
+# Only if your lab requires Telnet or Telnet-over-SSH:
+sudo apt install -y telnet
+
+python3 --version
+command -v tmux
+command -v ssh
+```
+
+**Step 3 — Clone and install Network Lab MCP in the Linux filesystem**
+
+Use a path under `~/`, **not** `/mnt/c/`, for predictable Linux permissions and filesystem performance.
+
+```bash
+mkdir -p ~/tools
+cd ~/tools
+git clone https://github.com/CiscoDevNet/network-lab-mcp-community.git
+cd network-lab-mcp-community
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e .
+python -m pip show network-lab-mcp
+```
+
+If `ensurepip is not available`, install the `python3-venv` package matching the Ubuntu Python interpreter, then recreate the incomplete `.venv`. Activate `.venv` before running `./run_cli.sh` in a new shell.
+
+**Step 4 — Initialize and verify the human CLI**
+
+```bash
+if [ ! -e lab/settings.yaml ]; then
+  cp lab/settings.example.yaml lab/settings.yaml
+fi
+./run_cli.sh
+```
+
+In the Network Lab CLI, run `show version` and `show running-config`, then `exit`. The example configuration uses fictional addresses and **cannot** be used to reach actual routers. Do not publish real Access-info output: local CLI commands can show passwords in plaintext.
+
+**Step 5 — Install Claude Code in the same Ubuntu distribution**
+
+Follow the [official Claude Code setup documentation](https://docs.anthropic.com/en/docs/claude-code/setup). For the native Linux installer used in this validation:
+
+```bash
+curl -fsSL https://claude.ai/install.sh | bash
+# Only if ~/.local/bin is not already in your PATH:
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+claude --version
+claude doctor
+claude auth login
+```
+
+An eligible Claude Code account or API setup is required. Register the server from the Network Lab MCP checkout (see [Register the MCP server](#register-the-mcp-server)):
+
+```bash
+cd ~/tools/network-lab-mcp-community
+claude mcp add --scope user network-lab -- \
+  "$(pwd)/.venv/bin/network-lab-mcp"
+claude mcp list
+```
+
+Expect `network-lab: ... - ✔ Connected`. Launch `claude` and use `/mcp` to verify the tools are loaded. A first safe prompt is: *“Use Network Lab MCP to read the active topology and execution instructions; do not connect to devices or change settings.”* `lab/settings.yaml` must exist or these MCP calls will report `Local settings file not found`.
+
+**Step 6 — Check WSL2 network reachability before real-device access**
+
+A Windows host may reach an SSH jump server while Ubuntu in WSL2 times out. Check the **same authorized target and TCP port** separately:
+
+```powershell
+# Windows PowerShell
+Test-NetConnection <jump-host-address> -Port 22
+```
+
+```bash
+# Ubuntu in WSL2 (install netcat-openbsd if nc is missing)
+nc -vz -w 5 <jump-host-address> 22
+```
+
+If Windows succeeds but WSL2 times out, Windows 11's **mirrored networking** may help, especially with corporate VPN/routed networks. Review existing settings and your organization's policy before editing `%USERPROFILE%\.wslconfig` in Windows:
+
+```ini
+[wsl2]
+networkingMode=mirrored
+dnsTunneling=true
+```
+
+Then run `wsl --shutdown` in Windows PowerShell, restart Ubuntu, and repeat the WSL2 TCP test. This is a **troubleshooting option, not an installation prerequisite**; VPN/security-software behavior varies. Do not disable the firewall or SSH host-key checking to make a connection succeed. See [Microsoft WSL networking documentation](https://learn.microsoft.com/en-us/windows/wsl/networking).
+
+**Real-lab validation (November 3, 2026).** With network reachability restored, the Windows/WSL2 setup successfully connected via Claude Code and the seven MCP tools; auto-registered first-use SSH host keys (TOFU); discovered LLDP/CDP neighbors; and opened managed terminals through an SSH jump server to an IOS XR router (**ProxyJump**) and a Telnet-only IOS device (**SSH local port forwarding + local Telnet client**). Read-only commands, two simultaneous device sessions, and session reuse were verified. This **does not** establish universal device/OS compatibility. Long CLI output could pause at a `--More--` pager (full-output collection was not demonstrated); `monitor terminal` and failure/restart recovery were **not** validated in this Windows test. For sensitive data handling and Telnet plaintext risk, see [Security and operational boundaries](#security-and-operational-boundaries).
 
 ### Register the MCP server
 
@@ -365,7 +473,7 @@ Network Lab MCP can access **both modern SSH-enabled network devices and legacy 
 **No Network Lab MCP installation and no Telnet client are required on the jump server.** Network Lab MCP runs on the local workstation; it selects the connection method from the private Access-info definition. A single Access-info can describe both kinds of devices.
 
 ```text
-Local macOS workstation
+Local workstation (macOS, Linux, or Windows/WSL2)
   Claude Code ── MCP ── Network Lab MCP
                            |
                            +── SSH ProxyJump ──────> jump1 ── SSH ──> Router1
@@ -374,7 +482,7 @@ Local macOS workstation
                                + local telnet client
 ```
 
-The second path is **not** SSH ProxyJump to a Telnet device. It uses SSH local port forwarding (a tunnel between the workstation and the jump server), followed by Telnet over the jump server's network path to the legacy device. The Mac's local forwarded port binds to `127.0.0.1`, not a public interface.
+The second path is **not** SSH ProxyJump to a Telnet device. It uses SSH local port forwarding (a tunnel between the workstation and the jump server), followed by Telnet over the jump server's network path to the legacy device. The local forwarded port binds to `127.0.0.1`, not a public interface.
 
 ### Example private Access-info
 
@@ -437,7 +545,7 @@ On **November 2, 2026**, macOS real-lab E2E checks succeeded for an SSH-enabled 
 
 **Lab TOFU, validated on macOS in a real lab:** Topology Discovery through an SSH jump server reached 9 of 9 devices (including a Telnet-only device) with 7 first-use host keys registered automatically (ED25519, RSA and ECDSA) and no manual key input; a second run needed no new registration and gave the same results. In short: no manual host-key approval on first use, already-known hosts are not registered again, and a changed registered key is refused (replacement only by a human in the CLI). Details: [CHANGELOG](CHANGELOG.md) and [SECURITY.md](SECURITY.md) section 11a.
 
-**Not yet validated:** the jump server's own first-use registration, refusal and CLI re-registration of a changed real-device key, effects of the authentication-free probe on AAA (failed-login counters, TACACS+/RADIUS, `login block-for`, source blocking), Linux, legacy SSH algorithms on real devices, and all SSH authentication methods and failure patterns. Additional verification is needed before relying on them.
+**Not yet validated across all environments:** the jump server's own first-use registration and changed-key replacement flows on real devices, effects of the authentication-free probe on AAA (failed-login counters, TACACS+/RADIUS, `login block-for`, source blocking), legacy SSH algorithms on real devices, and all SSH authentication methods and failure patterns. Windows/WSL2 real-lab coverage is described in [Windows 11 / WSL2 installation](#windows-11--wsl2-installation); this does not validate other Linux distributions. Additional verification is needed before relying on them.
 
 ## Example: discovering and selecting a topology
 
@@ -546,7 +654,7 @@ See [SECURITY.md](SECURITY.md) for the complete trust model and vulnerability re
 - SSH jump-server support is limited to one hop; Telnet-through-jump requires a compatible local Telnet client.
 - Host keys of unregistered hops are registered on first use (TOFU, product known_hosts); changed or other-type keys are refused by managed terminals and replaced only by a human in the interactive `discover topology`. For Telnet over an SSH tunnel only the jump server's key applies. Legacy `ssh-rsa` (SHA-1) host keys are never enabled automatically (enable them for that host in your own ssh_config); the first key of a device cannot be verified independently (TOFU limit).
 - Scenario/Reference schemas are intentionally flexible; only `topology <name>` asks for confirmation on a case-only near-duplicate; on case-insensitive filesystems (default macOS) a case-only alias of an existing definition is refused for every definition kind.
-- The November 2026 macOS E2E check covers specific SSH and Telnet lab paths, not all disconnect/fault/restart scenarios, operating-system releases, or device types; newly added jump workflows have not been fully revalidated on Ubuntu.
+- The November 2026 macOS and Windows/WSL2 real-lab E2E checks cover specific SSH and Telnet lab paths, not all disconnect/fault/restart scenarios, operating-system releases, or device types. Other Linux environments remain unverified for these exact jump workflows.
 - Full cross-vendor operation and all forms of autonomous deployment are not claimed or validated.
 
 ## Project structure
