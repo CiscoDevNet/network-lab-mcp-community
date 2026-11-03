@@ -339,7 +339,7 @@ Restart Codex after changing its configuration. AI-client configuration and appr
 | `Device 'Router1' is not present in access-info` | The active topology and active access-info have different device inventories. Add an authorized connection definition or select the intended definitions **in the human CLI**; never guess credentials. |
 | Discovery connects but produces zero managed links | Check whether observed neighbors are actually registered as managed devices. Unresolved LLDP/CDP neighbors do not become guessed topology links. |
 | Jump-host password prompt is rejected | Check the running version, private access-info selection, prompt/host identity, and authentication configuration. Do not disable fail-closed checks to force access. |
-| Host key verification failed | The key of the jump server or target is not registered or has changed. Verify its identity through a trusted channel, then register it with `discover topology` from an interactive terminal (or manually with `ssh`). Managed terminals never register keys. **Never use `StrictHostKeyChecking=no` as a workaround.** |
+| Host key verification failed | A first-use key is registered automatically, so this means the key of the jump server or target **changed** (or is of another type than the registered one) or could not be registered (`TOFU_*` error). Verify the new key through a trusted channel, then review the replacement with `discover topology` from an interactive terminal (a key in your own `~/.ssh/known_hosts`: `ssh-keygen -R`). Managed terminals never replace keys. **Never use `StrictHostKeyChecking=no` as a workaround.** |
 
 **Important: topology and access-info are independently selected.** A topology can contain `Router2` while the selected access-info only contains `Router1` and `LegacyRouter`. In that case, opening `Router2` must fail rather than discovering or guessing its credentials. Discovery can create a topology *definition* without automatically making it the active topology. The second selection/commit step matters; see the example below.
 
@@ -409,15 +409,21 @@ access-info example_lab
 
 Add the credentials through the private configuration workflow when needed. This example is not a claim that those documentation-only addresses are reachable. The active topology must also use the exact logical device IDs `Router1` and `LegacyRouter` for AI terminal access.
 
-### SSH host keys in `discover topology` (human CLI only)
+### SSH host keys: lab TOFU (trust on first use)
 
-When you run `discover topology` from an interactive terminal, Network Lab MCP manages SSH host keys for every SSH hop (the target and, for ProxyJump, the jump server):
+You do not type anything for a new device. The first time an SSH hop (the device and, for ProxyJump, the jump server) is used and **no known_hosts file has an entry for it**, Network Lab MCP registers its host key automatically, for `discover topology` and for managed terminals alike:
 
-- **Already registered and matching:** nothing is asked; Discovery continues.
-- **Not registered:** you are asked for the expected key type (`ED25519`, `ECDSA` or `RSA`) and its `SHA256:` fingerprint, obtained from the device console or another trusted source (for a jump server, run `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` there; ECDSA and RSA host keys also exist). Only if the key the host actually presents is exactly that key does OpenSSH register it.
-- **Changed:** the connection stops. You may choose to review replacement: the new key is verified on a throw-away copy of `known_hosts`, a backup of the old file is saved, only that host's entries are removed, and the new key is registered after a second exact match.
+1. An authentication-free OpenSSH probe (dummy user `nlm-hostkey-probe`, no password, no key, no multiplexing, a temporary known_hosts) records the key the device presents.
+2. The key is saved in the **product's own known_hosts** (macOS `~/Library/Application Support/Network Lab MCP/ssh/known_hosts`, Linux `~/.local/state/network-lab-mcp/ssh/known_hosts`) and read back, **before any credential is sent**.
+3. The real connection then runs with `StrictHostKeyChecking=yes` on every hop. Your own `~/.ssh/known_hosts` is read but never modified.
 
-This is available only in the human CLI. Without an interactive terminal, `discover topology` is strict: an unknown or changed key stops it and nothing is registered. MCP tools and managed terminals cannot approve, remove or update host keys; they verify every SSH hop strictly (target and jump server) and refuse unknown or changed keys. See [SECURITY.md](SECURITY.md) and [docs/cli_reference.md](docs/cli_reference.md).
+The CLI prints `SSH host key automatically accepted (TOFU):` with the device, hop and SHA256 fingerprint; every registration is also logged to `logs/hostkey-tofu.log`.
+
+- **Already registered (any known_hosts):** nothing is probed, nothing is asked.
+- **Changed key, or a different key type than the registered one:** the connection is refused before any credential is sent. A key is **never** replaced automatically and MCP/managed terminals cannot replace it. In an interactive terminal, `discover topology` offers a review: it shows the old and new fingerprints and asks `Replace the trusted host key? [yes/no] (default: no):` on the controlling terminal. A key that lives in your own `~/.ssh/known_hosts` is never edited; the CLI prints the `ssh-keygen -R` command for you to run.
+- **TOFU limit:** the first key cannot be verified independently; someone in the middle of the *first* connection would be trusted. Register keys manually if your lab network is not trusted.
+- **Effect on the device:** the probe is one failed-looking login for a user that does not exist. Some devices count that, ask AAA, or block the source address. That has **not been tested on real equipment**; if a device cannot be probed, register its key once with a manual `ssh`.
+- Details: [SECURITY.md](SECURITY.md) (section 11a) and [docs/cli_reference.md](docs/cli_reference.md).
 
 ### Validation and security status
 
@@ -427,9 +433,11 @@ On **November 2, 2026**, macOS real-lab E2E checks succeeded for an SSH-enabled 
 - The **jump server ↔ legacy Telnet-only device** path carries **unencrypted Telnet** traffic; use only an authorized, protected lab/management network and account for this risk.
 - Local port forwarding through `127.0.0.1` is not a process-level access-control boundary.
 - Private device and jump-server passwords are resolved internally; they must not be put in AI prompts, published logs, or repository examples.
-- SSH host-key verification must remain enabled. Unknown/mismatched host keys require deliberate verification, not automatic bypass.
+- SSH host-key verification must remain enabled. First-use keys are registered automatically (TOFU, see above); a changed or other-type key is refused and can only be replaced by a human in the CLI.
 
-**Not yet validated in a real lab:** that E2E check predates the SSH host-key management and the strict per-hop `ProxyCommand` described above. Those were tested against isolated loopback OpenSSH servers and fakes only. Registration and replacement of host keys, jump-server password authentication during registration, updating a real `known_hosts`, and Linux have **not** been exercised against real routers or a real jump server; repeat the managed-terminal and Discovery checks before relying on them.
+**Lab TOFU, validated on macOS in a real lab:** Topology Discovery through an SSH jump server reached 9 of 9 devices (including a Telnet-only device) with 7 first-use host keys registered automatically (ED25519, RSA and ECDSA) and no manual key input; a second run needed no new registration and gave the same results. In short: no manual host-key approval on first use, already-known hosts are not registered again, and a changed registered key is refused (replacement only by a human in the CLI). Details: [CHANGELOG](CHANGELOG.md) and [SECURITY.md](SECURITY.md) section 11a.
+
+**Not yet validated:** the jump server's own first-use registration, refusal and CLI re-registration of a changed real-device key, effects of the authentication-free probe on AAA (failed-login counters, TACACS+/RADIUS, `login block-for`, source blocking), Linux, legacy SSH algorithms on real devices, and all SSH authentication methods and failure patterns. Additional verification is needed before relying on them.
 
 ## Example: discovering and selecting a topology
 
@@ -536,7 +544,7 @@ See [SECURITY.md](SECURITY.md) for the complete trust model and vulnerability re
 - Editable checkout required; no standard non-editable/wheel installation.
 - `access-info` is edited through structured CLI commands, not the external YAML editor.
 - SSH jump-server support is limited to one hop; Telnet-through-jump requires a compatible local Telnet client.
-- Host keys must be registered before use: managed terminals refuse unknown or changed keys. Registration and replacement exist only in the interactive `discover topology`, and are disabled for Telnet-over-SSH tunnels (register the jump-server key manually). Legacy `ssh-rsa` (SHA-1) host keys are not supported.
+- Host keys of unregistered hops are registered on first use (TOFU, product known_hosts); changed or other-type keys are refused by managed terminals and replaced only by a human in the interactive `discover topology`. For Telnet over an SSH tunnel only the jump server's key applies. Legacy `ssh-rsa` (SHA-1) host keys are never enabled automatically (enable them for that host in your own ssh_config); the first key of a device cannot be verified independently (TOFU limit).
 - Scenario/Reference schemas are intentionally flexible; only `topology <name>` asks for confirmation on a case-only near-duplicate; on case-insensitive filesystems (default macOS) a case-only alias of an existing definition is refused for every definition kind.
 - The November 2026 macOS E2E check covers specific SSH and Telnet lab paths, not all disconnect/fault/restart scenarios, operating-system releases, or device types; newly added jump workflows have not been fully revalidated on Ubuntu.
 - Full cross-vendor operation and all forms of autonomous deployment are not claimed or validated.

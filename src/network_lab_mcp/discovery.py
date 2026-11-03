@@ -181,7 +181,7 @@ def _open_bootstrap(device_id: str, device_config: dict) -> None:
     beforehand by the coordinator; nothing is ever auto-accepted)."""
     co = _ACTIVE_HOSTKEYS
     if co is not None and device_config.get("transport") == "ssh":
-        command = hostkey_flow.build_ssh_command(device_config, kh=co.known_hosts)
+        command = hostkey_flow.build_ssh_command(device_config, files=co.strict_files())
         terminal.open_bootstrap_terminal(device_id, device_config, ssh_command=command)
     else:
         terminal.open_bootstrap_terminal(device_id, device_config)
@@ -210,11 +210,16 @@ def _raise_if_host_key_failure(device_id: str, device_config: dict) -> None:
         err = hostkey_flow.HostKeyChanged(device_id, hop.role, hop.host, hop.port)
         err.device_config = device_config
         raise err
+    known = hostkey_flow.tofu.classify_ssh_failure(text)
+    if known is not None and known[0] in (hostkey_flow.tofu.HOST_KEY_ALGORITHM_MISMATCH, hostkey_flow.tofu.SSH_KEX_MISMATCH):
+        raise DiscoveryError(
+            f"Device '{device_id}': [{known[0]}] {known[1]}. The host key was registered (if it was new) but the "
+            "connection failed during algorithm negotiation; no credentials were sent."
+        )
     if hostkey_flow.detect_verification_failure(text):
         raise DiscoveryError(
             f"Device '{device_id}': SSH host key verification failed (the key is not registered or not usable); "
-            "no credentials were sent and no host key was registered. Run `discover topology` from an "
-            "interactive terminal to approve a new key, or register it manually with ssh."
+            "no credentials were sent. Re-run `discover topology`, or register the key manually with ssh."
         )
 
 

@@ -88,6 +88,10 @@ class SshRuntime:
     global_known_hosts: str
     ssh_config: str
     identity: str
+    # Product-owned known_hosts (the only file TOFU registration writes);
+    # `known_hosts` above stands in for the user's own file and is read-only
+    # for the product.
+    product_known_hosts: str = ""
 
     @property
     def bin_dir(self) -> str:
@@ -150,7 +154,7 @@ def validate_runtime(rt: SshRuntime) -> None:
         raise IsolationViolation("sandbox is inside the real user's SSH area")
     for name in ("ssh", "ssh_keygen", "sshd", "tmux"):
         check_executable(getattr(rt, name), what=name)
-    for name in ("known_hosts", "global_known_hosts", "ssh_config", "identity"):
+    for name in ("known_hosts", "global_known_hosts", "ssh_config", "identity", "product_known_hosts"):
         check_sandbox_path(getattr(rt, name), sandbox, what=name)
 
 
@@ -181,14 +185,37 @@ _SSH_CONFIG_ALLOWED = {
     "kbdinteractiveauthentication", "gssapiauthentication", "numberofpasswordprompts",
     "proxyjump", "connecttimeout", "loglevel", "serveraliveinterval", "serveralivecountmax",
     "forwardagent", "forwardx11", "permitlocalcommand", "controlmaster", "controlpath",
-    "compression", "hashknownhosts", "addkeystoagent", "requesttty",
+    "compression", "hashknownhosts", "addkeystoagent", "requesttty", "sessiontype", "controlpersist",
 }
 _SSH_CONFIG_PATH_KEYS = {"identityfile", "userknownhostsfile", "globalknownhostsfile"}
 _SSH_CONFIG_FIXED = {
     "forwardagent": {"no"}, "forwardx11": {"no"}, "permitlocalcommand": {"no"},
     "controlmaster": {"no"}, "identityagent": {"none"}, "identitiesonly": {"yes"},
-    "controlpath": {"none"}, "updatehostkeys": {"no", "yes"},
+    "controlpath": {"none"}, "updatehostkeys": {"no", "yes"}, "controlpersist": {"no"},
+    "sessiontype": {"none"},
 }
+# Values accepted for a security-relevant `-o` on the command line. The probe
+# and the strict connection state these explicitly; nothing else is accepted.
+_CLI_FIXED = {
+    "controlmaster": {"no"}, "controlpath": {"none"}, "controlpersist": {"no"}, "permitlocalcommand": {"no"},
+    "sessiontype": {"none"}, "stricthostkeychecking": {"yes", "accept-new"}, "hashknownhosts": {"no"},
+    "checkhostip": {"no"}, "verifyhostkeydns": {"no"}, "updatehostkeys": {"no"}, "batchmode": {"yes", "no"},
+    "preferredauthentications": {"none"}, "pubkeyauthentication": {"no"}, "passwordauthentication": {"no"},
+    "kbdinteractiveauthentication": {"no"}, "gssapiauthentication": {"no"}, "numberofpasswordprompts": {"0"},
+    "hostbasedauthentication": {"no"},
+}
+
+
+def _known_hosts_values(value: str) -> list[str]:
+    """`UserKnownHostsFile` takes one or more whitespace-separated, optionally
+    double-quoted paths."""
+    try:
+        parts = shlex.split(value)
+    except ValueError:
+        raise IsolationViolation("ssh: UserKnownHostsFile is not parseable") from None
+    if not parts:
+        raise IsolationViolation("ssh: UserKnownHostsFile is empty")
+    return parts
 _JUMP_RE = re.compile(r"^[A-Za-z0-9_.@:\[\]-]+(,[A-Za-z0-9_.@:\[\]-]+)*$")
 
 
@@ -211,11 +238,14 @@ def validate_ssh_config_text(text: str, rt: SshRuntime) -> None:
         key, value = _split_directive(line)
         if key not in _SSH_CONFIG_ALLOWED:
             raise IsolationViolation(f"ssh_config: directive '{key}' is not allowed")
-        if _BAD_PATH_CHARS.search(value) and key in _SSH_CONFIG_PATH_KEYS:
+        if _BAD_PATH_CHARS.search(value.replace('"', "")) and key in _SSH_CONFIG_PATH_KEYS:
             raise IsolationViolation(f"ssh_config: '{key}' value contains an expansion character")
         if key in _SSH_CONFIG_PATH_KEYS:
             if key == "identityfile" and value == "none":
                 pass
+            elif key == "userknownhostsfile":
+                for path in _known_hosts_values(value):
+                    check_sandbox_path(path, rt.sandbox, what=key)
             else:
                 check_sandbox_path(value, rt.sandbox, what=key)
         if key == "identityfile" and value not in ("none", rt.identity):
@@ -246,8 +276,8 @@ def validate_ssh_config_text(text: str, rt: SshRuntime) -> None:
 _FORBIDDEN_O_KEYS = {
     "include", "match", "localcommand", "knownhostscommand", "remotecommand",
     "localforward", "remoteforward", "dynamicforward", "identityfile", "certificatefile",
-    "controlpath", "securitykeyprovider", "pkcs11provider", "xauthlocation", "sendenv", "setenv",
-    "permitlocalcommand", "tunnel", "forwardagent",
+    "securitykeyprovider", "pkcs11provider", "xauthlocation", "sendenv", "setenv",
+    "tunnel", "forwardagent",
 }
 
 
@@ -330,10 +360,13 @@ def validate_ssh_argv(args: list[str], rt: SshRuntime, depth: int = 0) -> None:
         if k == "proxycommand":
             _validate_proxycommand(value, rt, depth)
             continue
-        if k in _FORBIDDEN_O_KEYS or k not in _SSH_CONFIG_ALLOWED:
+        if k in _FORBIDDEN_O_KEYS or (k not in _SSH_CONFIG_ALLOWED and k not in _CLI_FIXED):
             raise IsolationViolation(f"ssh: '-o {k}' is not allowed")
+        if k in _CLI_FIXED and value.strip().strip('"').lower() not in _CLI_FIXED[k]:
+            raise IsolationViolation(f"ssh: '-o {k}' has a forbidden value")
         if k == "userknownhostsfile":
-            check_sandbox_path(value.strip(), rt.sandbox, what="ssh -o UserKnownHostsFile")
+            for path in _known_hosts_values(value):
+                check_sandbox_path(path, rt.sandbox, what="ssh -o UserKnownHostsFile")
         if k == "globalknownhostsfile" and value.strip() != rt.global_known_hosts:
             raise IsolationViolation("ssh: GlobalKnownHostsFile must be the injected file")
         if k in ("identityagent", ) and value.strip().lower() != "none":
@@ -473,6 +506,7 @@ def create_sandbox(
         global_known_hosts=os.path.join(sandbox, "global_known_hosts"),
         ssh_config=os.path.join(sandbox, "ssh_config"),
         identity=os.path.join(sandbox, "identity"),
+        product_known_hosts=os.path.join(sandbox, "product_known_hosts"),
     )
     with open(rt.policy_file, "w", encoding="utf-8") as fh:
         json.dump(asdict(rt), fh)
@@ -493,7 +527,7 @@ def default_ssh_config(rt: SshRuntime, extra: str = "") -> str:
     """The only ssh_config shape the harness generates."""
     return (
         "Host *\n"
-        f"  UserKnownHostsFile {rt.known_hosts}\n"
+        f'  UserKnownHostsFile "{rt.product_known_hosts}" "{rt.known_hosts}"\n'
         f"  GlobalKnownHostsFile {rt.global_known_hosts}\n"
         f"  IdentityFile {rt.identity}\n"
         "  IdentitiesOnly yes\n"
@@ -509,11 +543,14 @@ def default_ssh_config(rt: SshRuntime, extra: str = "") -> str:
 
 
 def required_ssh_args(rt: SshRuntime, known_hosts: str | None = None) -> list[str]:
-    """`known_hosts` may name another sandbox file (e.g. a probe copy); the
-    first -o occurrence wins in OpenSSH, so it must be the one emitted here."""
+    """`known_hosts` may name another sandbox file (e.g. a probe's temporary
+    file); the first -o occurrence wins in OpenSSH, so it must be the one
+    emitted here. By default both the product file and the (stand-in) user
+    file are consulted."""
+    files = f'"{known_hosts}"' if known_hosts else f'"{rt.product_known_hosts}" "{rt.known_hosts}"'
     return [
         "-F", rt.ssh_config,
-        "-o", f"UserKnownHostsFile={known_hosts or rt.known_hosts}",
+        "-o", f"UserKnownHostsFile={files}",
         "-o", f"GlobalKnownHostsFile={rt.global_known_hosts}",
         "-o", "IdentityAgent=none",
         "-o", "IdentitiesOnly=yes",

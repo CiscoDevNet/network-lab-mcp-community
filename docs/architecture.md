@@ -364,9 +364,9 @@ requires the device to be in the active topology. This is intentional and
 does not weaken `terminal_open()`'s own restriction, which is a completely
 separate code path. Discovery passes no host-key option to
 `_build_transport_command()` that managed terminals do not get: both use
-`StrictHostKeyChecking=yes` on every hop (the former `accept-new` mode was
-removed). A genuinely new host key therefore stops an unattended
-run; the human CLI registers it beforehand (see "SSH host-key management").
+`StrictHostKeyChecking=yes` on every hop. A genuinely new host key is
+registered *before* that connection by lab TOFU (see "SSH host-key
+management"); the credential-carrying connection itself never accepts a key.
 It never bypasses a *changed*-host-key failure
 (`StrictHostKeyChecking=no`/`UserKnownHostsFile=/dev/null` are never used)
 — that remains a hard failure the operator must resolve themselves (e.g.
@@ -1008,7 +1008,7 @@ Known limitation: the IOS XR CDP parser remains lenient (shared with IOS XE
 and IOS): unrecognized CDP output yields zero CDP observations rather than
 an error. This was already the case and is not changed here. IOS XE/IOS
 behavior is untouched. The feature is CLI-only; MCP tools do not run
-Discovery, so no MCP contract changed. Not verified against a real lab.
+Discovery, so no MCP contract changed. A macOS real-lab run through an SSH jump server is summarized in [SECURITY.md](../SECURITY.md) section 11a; other platforms and failure patterns are not verified.
 
 ### Identity resolution is bounded and fails closed
 
@@ -1763,7 +1763,7 @@ because it was merely deferred.
 `_build_transport_command` is the single builder of ssh/telnet argv. It
 validates address/port/username (`connection_safety.py`), emits the jump hop as
 one `-o ProxyCommand=` argv element (shell-quoted child, no credentials), always
-adds `StrictHostKeyChecking=yes`/`UpdateHostKeys=no` to both hops, and refuses telnet + jump host with
+adds `StrictHostKeyChecking=yes`/`UpdateHostKeys=no`/`ControlMaster=no`/`ControlPath=none` and the product + user `UserKnownHostsFile` to both hops, and refuses telnet + jump host with
 `telnet via jump host is not enabled`. Managed ssh login runs two stages
 (jump hop, then target), each answered at most once, with prompt attribution
 by user and address and a pre-send pane re-check. `tunnel_safety.py` holds
@@ -1772,24 +1772,24 @@ the Telnet-tunnel helpers (client pinning, loopback port, lsof-F ownership proof
 `_build_transport_command` itself still refuses telnet + jump host: only the tunnel flow may open it.
 
 
-## SSH host-key management (human CLI `discover topology`)
+## SSH host-key management (lab TOFU; human-only replacement)
 
-**Entry point.** Only the interactive human CLI creates a `hostkey_flow.Coordinator` (`cli/main.py`). The MCP server and `terminal.py` never import `hostkey_approval`, `hostkey_flow` or `hostkey_store`; tests enforce this.
+**Modules.** `hostkey_tofu.py` (first-use registration; the only host-key module `terminal.py` imports), `hostkey_flow.py` (Discovery `Coordinator`, replacement review; human CLI and Discovery only), `hostkey_store.py` (known_hosts classification, lock, backup, single-host removal), `hostkey_approval.py` (`/dev/tty` channel, in-memory approvals). A test asserts that `hostkey_tofu` contains no removal, backup, approval or TTY code and that MCP/terminal code cannot reach the others.
 
-**Registration state.** For each hop `ssh-keygen -F` (through the pinned binary) classifies the entry in the selected `known_hosts` (and read-only `GlobalKnownHostsFile`) as `UNKNOWN_CANDIDATE`, `REGISTERED_UNVERIFIED` or `UNDETERMINED` (unreadable file, marker such as `@cert-authority`, unsupported key type -> fail closed). A registered entry is never trusted by that check alone: the real connection runs `StrictHostKeyChecking=yes`.
+**Pre-register, then strict connect.** For each hop of a device (`hops_for`: jump first, then target; for Telnet over a jump only the jump), derived only from the access-info device config:
+1. `classify` consults the product known_hosts, the user's known_hosts and the global file with `ssh-keygen -F` (pinned binary). Any entry = registered (no probe). An unreadable/symlinked/unsupported file = `UNDETERMINED` -> fail closed.
+2. Unknown -> under the product lock (`KnownHostsLock`: in-process lock + `flock` on a dedicated lock file in a `locks` directory next to the product file, waiting up to 90 s) the state is re-checked, then **one probe**: `build_probe_command` = the OpenSSH client, `-N -T`, dummy user `nlm-hostkey-probe`, `StrictHostKeyChecking=accept-new`, `UserKnownHostsFile=<temporary file>`, every authentication method but `none` off, `IdentityAgent=none`, `BatchMode=yes`, `ControlMaster=no`, `ControlPath=none`, `ControlPersist=no`, `HashKnownHosts=no`, `CheckHostIP=no`, `VerifyHostKeyDNS=no`, `UpdateHostKeys=no`, `SessionType=none`, `PermitLocalCommand=no`, `ConnectTimeout`, `LogLevel=VERBOSE`. It runs on a pty (a jump password prompt must be answerable) with an overall deadline; success is judged from the temporary file after the process was ended, never from the exit status. `read_probe_file` accepts exactly one complete, unhashed entry for the expected identifier with a supported type, a consistent blob, and a fingerprint cross-checked with `ssh-keygen -l`. An `Authenticated to <host>` line on the probe or a confirmation prompt aborts it. The temporary directory and the process are always cleaned up.
+3. `append_entry` writes one line (`O_APPEND`, `O_NOFOLLOW`, single write, `fsync` of file and directory; directory `0700`, file `0600`, owner/type/symlink checks) and `verify_registered` re-reads through `ssh-keygen -F` and compares type and fingerprint with the probed key. Only then is the hop `TRUSTED`.
+4. Credential-carrying connections: `strict_opts` = `StrictHostKeyChecking=yes`, `UserKnownHostsFile="<product>" "<user>"`, `UpdateHostKeys=no`, `CheckHostIP=no`, `VerifyHostKeyDNS=no`, `ControlMaster=no`, `ControlPath=none`, `ControlPersist=no` on **every** hop.
 
-**Establish before credentials.** An unknown key is first established by a *registration connection*: a pty `ssh` with `StrictHostKeyChecking=ask`, `HostKeyAlgorithms` restricted to the approved key type, and every authentication method disabled on the hop under test (`PreferredAuthentications=none`, ...). The approved `SHA256:` fingerprint is typed at most once, only when host, port, algorithm and fingerprint of the prompt all equal the approval. OpenSSH itself writes the key. Afterwards `ssh-keygen -F` must show exactly the approved fingerprint. For a target behind a jump host the jump hop runs strict and may only receive its own password through the jump-prompt attribution logic. Discovery workers then always run strict on every hop; no host key is ever auto-accepted on a credential-carrying connection.
+**Where TOFU runs.** `terminal.open_device_terminal` calls `_ensure_host_keys` (-> `hostkey_tofu.ensure_trusted`) before it builds the transport command or touches tmux, so a failure starts no session. Discovery: the CLI always creates a `Coordinator` (with the `/dev/tty` channel only if one exists) and `Coordinator.prepare` registers unknown hops serially before the collector threads start.
 
-**Per-hop options.** `-J` does not propagate command-line `-o StrictHostKeyChecking` to the jump hop (observed with OpenSSH 10.3: the jump hop still prompted). Host-key-managed Discovery therefore builds `-o ProxyCommand=<ssh ... -W %h:%p jump>` with explicit per-hop `StrictHostKeyChecking`, `UserKnownHostsFile`, `UpdateHostKeys=no`, `CheckHostIP=no`, `VerifyHostKeyDNS=no`. Managed terminals use the same per-hop ProxyCommand structure. Other user ssh_config settings (identity, algorithms, ports) still apply because no `-F` is used; command-line `-o` wins over them.
+**Per-hop options.** `-J` does not propagate command-line `-o StrictHostKeyChecking` to the jump hop (observed with OpenSSH 10.3). The jump hop is a structured `-o ProxyCommand=<ssh> <hop options> -W %h:%p ...`. For a target probe the child is the real, strict, authenticating jump hop (real user); only the probed hop gets the dummy user and the no-authentication options. The jump password path is unchanged (attribution, send-once, budget `min(40, 2 x devices behind a password jump host + 6)`; probes happen only for unregistered hops).
 
-**CHANGED recovery.** Detected from OpenSSH's strict-checking message in the pane. Flow: choose replacement -> expected key -> probe on a throw-away `0600` copy in a `0700` directory from which only the target's entries were removed (jump key stays trusted) -> final confirmation -> verify `known_hosts` unchanged since inspection -> own backup -> `ssh-keygen -R` of exactly that identifier (refused for shared host fields, wildcards, markers; result must equal the original minus exactly the matched lines, otherwise restored) -> second registration connection against the real file -> re-run Discovery.
+**Changed or other-type key.** OpenSSH reports both as "Host key ... has changed" under strict checking. Discovery turns that into `HostKeyChanged`; `Coordinator.recover_changed` (human CLI only) probes the new key into a temporary file, classifies `HOST_KEY_CHANGED` vs `KEY_TYPE_MISMATCH`, shows old/new fingerprints and asks through `confirm_replace` on `/dev/tty` (flush, exact `yes`, default No). On yes: signature re-check, backup, `ssh-keygen -R` of exactly that host (`remove_host` refuses shared/pattern/marker entries), `.old` removal and mode check, append, re-read; on failure the removed lines are appended back. Only the product file is ever edited; for trusted keys in other files the CLI prints a manual instruction.
 
 **State machines.** `HostKeyState` (PENDING, REGISTERED_UNVERIFIED, VERIFIED, APPROVED, TRUSTED, FAILED) and `AuthState` per hop; `Hop.advance_auth` refuses authentication unless the hop is trusted.
 
-**Locking.** A per-file in-process lock plus `flock` (lock file in the product state directory, not beside `known_hosts`) serialize registration and removal. Modification by other processes is detected by size/mtime/inode/hash comparison and fails closed.
+**Logging.** `log_event` appends JSON lines to `logs/hostkey-tofu.log` (`0600`); never credentials or key blobs.
 
-**Test isolation.** `ssh_isolation.py` provides a typed `SshRuntime` that tests install through a private import-only hook. It selects absolute `ssh`/`ssh-keygen`/`sshd`/`tmux` paths and forces every OpenSSH process (including those started inside tmux panes and ProxyCommand children) through a wrapper script that validates argv and ssh config against an allow-list and rebuilds a minimal environment before `execve`. It is not controllable from environment variables, YAML, CLI or MCP; without it the real binaries are used.
-
-**Connection kinds.** Direct SSH: target hop. ProxyJump: jump and target hops, independently. Telnet over SSH forwarding: jump hop only, and only if already registered (registration/replacement disabled). Direct Telnet: none.
-
-**Hardening.** (1) No `accept-new` anywhere: non-interactive Discovery is strict and changes nothing. (2) Managed terminals verify target **and** jump hop strictly (ProxyCommand child). (3) The jump password in registration connections follows the jump-prompt attribution, once per connection, with a deterministic budget `min(40, 2 x N + 6)` (N = devices behind a password jump host) and a per-jump-host stop after the first failure. (4) State machine: the integration choice is *both*: `Coordinator.require_trusted` is checked by Discovery before any username/password/jump-password send (every hop must be REGISTERED_UNVERIFIED or TRUSTED), and the strict connection itself makes a credential prompt impossible before the key is verified (integration-tested with real OpenSSH). (5) known_hosts removal re-checks the file immediately before `ssh-keygen -R`, never restores the backup wholesale, and stops for manual recovery when the result cannot be explained. (6) Test infrastructure records every wrapper decision in a sandbox audit log (no argv content) and reaps only the sshd processes the test run itself started.
+**Test isolation (Stage 0).** `ssh_isolation.py` provides a typed `SshRuntime` that tests install through a private import-only hook (`product_known_hosts` is a sandbox path next to the stand-in user `known_hosts`). Every `ssh`, `ssh-keygen` and `sshd` is started through a forced wrapper that validates argv and the generated config against allow-lists, rebuilds the environment, and execs the pinned binary. Security-relevant `-o` options are accepted only with their safe values (`StrictHostKeyChecking` only `yes`/`accept-new`, `ControlMaster=no`, `ControlPath=none`, `SessionType=none`, `PermitLocalCommand=no`, authentication options only in their disabling form, `UserKnownHostsFile` one or more quoted sandbox paths), and a ProxyCommand child is validated with the same policy. An autouse test fixture makes the managed-terminal TOFU hook a no-op unless an isolated runtime is installed, so unit tests never open a real connection.

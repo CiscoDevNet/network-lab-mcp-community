@@ -155,12 +155,63 @@ def test_config_missing_mandatory_directive_rejected(box):
 @pytest.mark.parametrize("opt", [
     "ProxyCommand=nc x 1", "Include=/etc/ssh/ssh_config", "LocalCommand=id", "KnownHostsCommand=/bin/true",
     "IdentityFile=/tmp/k", "CertificateFile=/tmp/c", "ControlPath=/tmp/c", "LocalForward=1 h:2",
+    # security-relevant options are accepted only with their safe value
+    "ControlMaster=auto", "ControlPath=%d/x", "ControlPersist=10m", "PermitLocalCommand=yes", "SessionType=default",
+    "StrictHostKeyChecking=no", "StrictHostKeyChecking=off", "StrictHostKeyChecking=ask", "HashKnownHosts=yes",
+    "CheckHostIP=yes", "VerifyHostKeyDNS=yes", "VerifyHostKeyDNS=ask", "UpdateHostKeys=yes",
+    "PasswordAuthentication=yes", "PubkeyAuthentication=yes", "KbdInteractiveAuthentication=yes",
+    "PreferredAuthentications=password", "NumberOfPasswordPrompts=3", "HostbasedAuthentication=yes",
+    "GSSAPIAuthentication=yes",
 ])
 def test_unsafe_dash_o_rejected(box, opt):
     rt, tmp = box
     r = run_wrapper(rt, "ssh", good_ssh(rt, "-o", opt))
     assert r.returncode == iso.EXIT_VIOLATION
     assert not (tmp / "out-ssh.txt").exists()
+
+
+def test_probe_and_strict_option_sets_pass_the_wrapper_and_unsafe_known_hosts_values_do_not(box):
+    from network_lab_mcp import hostkey_tofu as tofu
+
+    rt, tmp = box
+    probe = tofu.probe_opts(str(Path(rt.tmp_dir) / "probe_kh"))
+    r = run_wrapper(rt, "ssh", [*iso.required_ssh_args(rt, str(Path(rt.tmp_dir) / "probe_kh")), "-N", "-T", *probe,
+                                "-p", "22", "nlm-hostkey-probe@192.0.2.1"])
+    assert r.returncode == 0, r.stderr
+    r = run_wrapper(rt, "ssh", [*iso.required_ssh_args(rt), *tofu.strict_opts([rt.product_known_hosts, rt.known_hosts]),
+                                "-p", "22", "user@192.0.2.1"])
+    assert r.returncode == 0, r.stderr
+    for bad in ('UserKnownHostsFile="/etc/hosts"', f'UserKnownHostsFile="{rt.product_known_hosts}" "/etc/hosts"',
+                f'UserKnownHostsFile="{rt.product_known_hosts}" "{Path.home()}/.ssh/known_hosts"',
+                'UserKnownHostsFile="unterminated'):
+        r = run_wrapper(rt, "ssh", good_ssh(rt, "-o", bad))
+        assert r.returncode == iso.EXIT_VIOLATION, bad
+
+
+def test_probe_proxycommand_child_is_validated_with_the_same_policy(box):
+    from network_lab_mcp import hostkey_tofu as tofu
+
+    rt, tmp = box
+    cfg = {"transport": "ssh", "address": "192.0.2.20", "port": 22, "username": "u",
+           "jump_host_config": {"address": "192.0.2.1", "port": 22, "username": "j"}}
+    iso.install_for_tests(rt)
+    try:
+        argv = tofu.build_probe_command(cfg, "target", str(Path(rt.tmp_dir) / "probe_kh"))
+    finally:
+        iso.uninstall_for_tests()
+    assert argv[0] == rt.wrapper("ssh")
+    assert run_wrapper(rt, "ssh", argv[1:]).returncode == 0
+    evil = [a.replace("StrictHostKeyChecking=yes", "StrictHostKeyChecking=no") for a in argv]
+    assert evil != argv and run_wrapper(rt, "ssh", evil[1:]).returncode == iso.EXIT_VIOLATION
+
+
+def test_runtime_known_hosts_files_must_be_inside_the_sandbox(box, tmp_path):
+    rt, tmp = box
+    import dataclasses
+
+    outside = dataclasses.replace(rt, product_known_hosts=str(tmp_path / "outside_known_hosts"))
+    with pytest.raises(iso.IsolationViolation):
+        iso.validate_runtime(outside)
 
 
 @pytest.mark.parametrize("flag", [["-L", "1:h:2"], ["-R", "1:h:2"], ["-D", "1080"], ["-S", "/tmp/s"], ["-E", "/tmp/log"]])

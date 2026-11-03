@@ -508,45 +508,62 @@ access-info) — it does not change what MCP tools, logs, or errors expose.
 
 ## SSH host keys during `discover topology`
 
-`discover topology` (interactive terminal only) verifies the SSH host key of every SSH hop. A non-interactive run (no TTY) is strict too: an unknown key stops Discovery with a hint to run it interactively, a changed key stops it, and no host key is ever registered, approved, removed or replaced.
+`discover topology` needs **no input for a new device**. Every SSH hop (the target and, for ProxyJump, the jump server) is checked first:
 
-**Registered key matches:** no question is asked.
-
-**Unknown key:**
+- **Registered** (product known_hosts, your `~/.ssh/known_hosts` or the global file): nothing is probed or asked; the connection verifies the key strictly (`StrictHostKeyChecking=yes`).
+- **Not registered:** lab TOFU. One authentication-free probe (dummy user `nlm-hostkey-probe`, no credential) records the key the device presents; it is saved in the product's own known_hosts and read back **before any credential is sent**; then the real connection runs strictly. This also works without a terminal (non-interactive run).
 
 ```
-Device: Router1
-SSH hop: target
-Host: 192.0.2.20
-Port: 22
-
-The SSH host key requires verification.
-Key type [ED25519/ECDSA/RSA]: ED25519
-Expected SHA256 fingerprint: SHA256:...
-Select an action:
-  1. Cancel (default)
-  2. Show verification details
-  3. Approve expected host key
-Choice [1]: 3
-Final confirmation [yes/no]: yes
+network-lab(config)# discover topology
+Discovering topology from access-info 'example-lab'...
+SSH host key automatically accepted (TOFU):
+Router2 (target) ED25519 SHA256:...
 ```
 
-Obtain the fingerprint from a trusted channel, not from the connection being verified. For a jump server such as `jump1`, run on its console `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` (ECDSA and RSA keys are also possible). Router-specific commands depend on the platform; consult its documentation.
+The hop label is `direct`, `jump` or `target`. The same line (plus time, host identifier, port, key type and the result) is appended to `logs/hostkey-tofu.log`.
 
-- Input is read from the controlling terminal (`/dev/tty`) only; pre-typed input is discarded, the default is Cancel, and each answer must arrive within 180 seconds. The approval lives 900 seconds, in memory, for one host/port/hop/key and one use.
-- Only ED25519, ECDSA (nistp256/384/521) and RSA (SHA-2 signatures, `rsa-sha2-512/256`) are accepted. Legacy `ssh-rsa` (SHA-1) is never enabled; a device that offers nothing else must be recovered manually.
-- `MD5:` fingerprints are not accepted.
-- If the host presents a different key type or fingerprint than you approved, or `known_hosts` contains entries that cannot be handled safely (certificate-authority or revoked markers, shared or pattern host fields, unreadable file), Discovery stops with a message and `known_hosts` is left unchanged; recover manually (see below).
+- The product known_hosts is `~/Library/Application Support/Network Lab MCP/ssh/known_hosts` on macOS and `~/.local/state/network-lab-mcp/ssh/known_hosts` on Linux (directory `0700`, file `0600`). Your own `~/.ssh/known_hosts` is consulted and never modified.
+- Only one key per host is registered: the one OpenSSH negotiated (ED25519, ECDSA or RSA; legacy SHA-1 `ssh-rsa` is never enabled automatically; for a device that only offers legacy algorithms enable them for that host in your own ssh_config).
+- Probes happen once per unregistered host and are never retried. Behind a jump server the probe of the target goes through the verified, authenticating jump hop; jump passwords sent for probes count toward the same budget as before (`min(40, 2 x devices behind a password jump host + 6)`).
+- Errors name their class: `TOFU_PROBE_ERROR` (probe failed: refused, timed out, closed/reset; a device that restricts logins may be the cause but the tool does not assume it), `TOFU_STORAGE_ERROR` (the key could not be saved/verified; nothing was sent), `TOFU_IDENTITY_ERROR` (the host identifier is unclear, e.g. a `HostKeyAlias`, or a known_hosts file cannot be read safely), `HOST_KEY_ALGORITHM_MISMATCH`, `SSH_KEX_MISMATCH`, `JUMP_AUTH_ERROR`.
+- If a device cannot be probed safely, register its key once manually with `ssh` and verify the fingerprint through a trusted channel.
 
-**Changed key:** the connection stops before any credential is sent. Choose `3. Review replacement of obsolete host key`, enter the new key type and fingerprint, and confirm. The old file is backed up before removal.
+**TOFU limit.** The first key cannot be proven authentic; a man in the middle of the first connection would be trusted.
 
-**Backups:** `~/Library/Application Support/Network Lab MCP/ssh-hostkey-backups/` on macOS (`~/.local/state/network-lab-mcp/ssh-hostkey-backups/` on Linux), directory `0700`, files `0600`, never overwritten and never deleted automatically. Each backup contains your whole `known_hosts` (other hosts' keys), so protect or remove old backups yourself.
+**Changed key / other key type:** the connection stops before any credential is sent (`HOST_KEY_CHANGED`; a different key *type* than the registered one, which OpenSSH also reports as a change, is shown as `KEY_TYPE_MISMATCH`; it can be caused by a configuration change or software update as well as a reinstallation or an attack). Nothing is replaced automatically. In an interactive terminal the CLI offers the review:
 
-**Manual recovery** (any time): `ssh-keygen -R <host>` (or `ssh-keygen -R "[<host>]:<port>"`), then re-run `discover topology`.
+```
+WARNING:
+The SSH host key has changed.
 
-**Managed terminals** (`terminal_open` through the MCP client) are strict as well: an unknown or changed key of the target or the jump host ends the connection with `Host key verification failed`; there is no prompt to answer and nothing is registered. Register the key first with `discover topology`, or manually: `ssh -o StrictHostKeyChecking=ask user@host` after verifying the fingerprint through a trusted channel.
+This may be caused by device reinstallation,
+configuration changes, or a man-in-the-middle attack.
 
-**Telnet over an SSH jump host:** the jump host key must already be registered; registration and replacement are not offered on that path (register it once with a manual `ssh`).
+The new key was obtained over the network and
+has not been independently verified.
+
+Device: Router2 (direct)
+Host: 192.0.2.20:22
+Reason: HOST_KEY_CHANGED
+
+Trusted key: ssh-ed25519 SHA256:...
+New key:     ssh-ed25519 SHA256:...
+
+Replace the trusted host key? [yes/no] (default: no):
+```
+
+- Input is read from the controlling terminal (`/dev/tty`) only; stdin and stdout must be that same TTY. Pre-typed, pasted or piped input is discarded; only a fresh, exact `yes` approves; empty or other input, EOF, Ctrl-C and the 180 s timeout cancel. The approval is in memory and single-use. This is the only place a registered key can be replaced; MCP tools and managed terminals cannot reach it.
+- On yes: the file is re-checked, backed up, only that host's entries are removed from the **product** known_hosts, the new key is registered and read back. If the registration fails, the previous entries are put back (or the backup path is shown).
+- If the trusted key is in **your own** known_hosts or the system file, nothing is edited; the CLI prints the command to run yourself, e.g. `ssh-keygen -R '[192.0.2.20]:2222' -f ~/.ssh/known_hosts` (use the `[host]:port` form for non-default ports and the `HostKeyAlias` if you use one), or tells you to ask the administrator.
+- Without an interactive terminal a changed key stops Discovery and changes nothing.
+
+**Backups:** `~/Library/Application Support/Network Lab MCP/ssh-hostkey-backups/` on macOS (`~/.local/state/network-lab-mcp/ssh-hostkey-backups/` on Linux), directory `0700`, files `0600`, never overwritten and never deleted automatically. Each backup contains the whole product `known_hosts`, so protect or remove old backups yourself.
+
+**Managed terminals** (`terminal_open` through the MCP client) use the same TOFU for hosts of the active access-info that are not registered yet, then connect strictly. A changed or other-type key ends the connection with `Host key verification failed`; there is no prompt to answer and nothing is replaced. The TOFU result is only in `logs/hostkey-tofu.log` (the MCP tool result is unchanged).
+
+**Telnet over an SSH jump host:** only the jump server's SSH key applies (registered by TOFU like any other hop); the Telnet device has no SSH key. The Telnet leg stays plaintext.
+
+**Your ssh_config.** Probes and connections use your normal ssh_config; `Match exec`, `ProxyCommand` and `LocalCommand` there run locally as they would for any `ssh`. `HostKeyAlias`/`HostName` changing the host identifier makes TOFU fail closed (`TOFU_IDENTITY_ERROR`).
 
 ## Global configuration mode commands
 

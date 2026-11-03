@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Discovery login through a real tmux pane + real OpenSSH (forced wrapper,
-isolated loopback sshd running a fake router CLI). Covers: strict hops,
-CHANGED detection from the pane, no credential/auth before trust, and that
-the pane's ssh really goes through the isolation wrapper."""
+isolated loopback sshd running a fake router CLI). Covers: TOFU before login,
+strict hops, CHANGED detection from the pane, no credential/auth before
+trust, and that the pane's ssh really goes through the isolation wrapper."""
 
 from __future__ import annotations
 
@@ -50,8 +50,9 @@ def env(tmp_path):
         servers.append(s)
         return s
 
-    co = hf.Coordinator(NullChannel(), known_hosts=rt.known_hosts, global_known_hosts=rt.global_known_hosts,
-                        backup_dir=str(tmp_path / "bk"), lock_dir=str(tmp_path / "locks"))
+    co = hf.Coordinator(NullChannel(), known_hosts=rt.product_known_hosts, user_known_hosts=rt.known_hosts,
+                        global_known_hosts=rt.global_known_hosts, backup_dir=str(tmp_path / "bk"),
+                        lock_dir=str(tmp_path / "locks"), emit=lambda t: None)
     yield rt, server, co
     discovery._ACTIVE_HOSTKEYS = None
     terminal.close_bootstrap_terminal("R1")
@@ -78,7 +79,7 @@ def test_registered_host_logs_in_through_wrapper_pane(env):
     trust(rt, A, s.port)
     discovery._ACTIVE_HOSTKEYS = co
     assert discovery._login("R1", cfg(s.port)) == "R1"
-    cmd = hf.build_ssh_command(cfg(s.port), kh=rt.known_hosts)
+    cmd = hf.build_ssh_command(cfg(s.port), files=co.strict_files())
     assert cmd[0] == rt.wrapper("ssh")
     log = Path(rt.sandbox, "sshd_a.log").read_text()
     assert "Accepted publickey" in log
@@ -99,14 +100,27 @@ def test_changed_key_is_detected_and_nothing_authenticates(env):
     assert "Accepted" not in Path(rt.sandbox, "sshd_b.log").read_text()
 
 
-def test_unregistered_key_is_not_auto_accepted_when_coordinator_active(env):
+def test_first_use_is_registered_by_prepare_then_discovery_logs_in_strictly(env):
+    rt, server, co = env
+    A = make_host_key(rt, "A")
+    s = server("a", A)
+    co.prepare({"R1": cfg(s.port)})  # TOFU: probe + persist before the credential-carrying pane starts
+    assert Path(rt.product_known_hosts).read_text() == f"[127.0.0.1]:{s.port} {A['type']} {A['blob']}\n"
+    discovery._ACTIVE_HOSTKEYS = co
+    assert discovery._login("R1", cfg(s.port)) == "R1"  # probe output cannot disturb the login prompt detection
+    log = Path(rt.sandbox, "sshd_a.log").read_text()
+    assert log.index("Invalid user nlm-hostkey-probe") < log.index("Accepted publickey")  # key first, auth later
+    assert not Path(rt.known_hosts).exists()
+
+
+def test_unregistered_key_is_not_auto_accepted_by_the_login_connection_itself(env):
     rt, server, co = env
     A = make_host_key(rt, "A")
     s = server("a", A)
     discovery._ACTIVE_HOSTKEYS = co
     with pytest.raises(discovery.DiscoveryError, match="host key verification failed"):
         discovery._login("R1", cfg(s.port))
-    assert not Path(rt.known_hosts).exists()
+    assert not Path(rt.known_hosts).exists() and not Path(rt.product_known_hosts).exists()
     assert "Accepted" not in Path(rt.sandbox, "sshd_a.log").read_text()
 
 
@@ -116,7 +130,7 @@ def test_pane_ssh_with_unsafe_known_hosts_is_refused_by_wrapper(env):
     rt, server, co = env
     A = make_host_key(rt, "A")
     s = server("a", A)
-    bad = hf.build_ssh_command(cfg(s.port), kh="/etc/hosts")
+    bad = hf.build_ssh_command(cfg(s.port), files=["/etc/hosts"])
     terminal.open_bootstrap_terminal("R1", cfg(s.port), ssh_command=bad)
     import time
     deadline = time.monotonic() + 8
@@ -148,7 +162,7 @@ def test_noninteractive_unknown_key_is_not_registered_and_nothing_authenticates(
     s = server("a", A)
     discovery._ACTIVE_HOSTKEYS = None
     cfgd = dict(cfg(s.port), password="SENTINEL_TARGET_PW")
-    with pytest.raises(discovery.DiscoveryError, match="interactive terminal"):
+    with pytest.raises(discovery.DiscoveryError, match="not registered"):
         discovery._login("R1", cfgd)
     assert not Path(rt.known_hosts).exists()
     assert "Accepted" not in Path(rt.sandbox, "sshd_a.log").read_text()
@@ -197,10 +211,12 @@ def test_credentials_are_not_sent_when_hop_untrusted_with_coordinator(env, monke
     discovery._require_trusted_hops("R1")
 
 
-def test_source_has_no_accept_new_policy():
-    import re
+def test_accept_new_exists_only_in_the_authentication_free_probe():
     src = Path(terminal.__file__).parent
     for path in src.rglob("*.py"):
-        for line in path.read_text().splitlines():
-            if "accept-new" in line:
-                assert line.strip().startswith(("#", '"')) or "never" in line or "not" in line, (path.name, line)
+        hits = [ln for ln in path.read_text().splitlines() if "accept-new" in ln]
+        if path.name == "hostkey_tofu.py":
+            assert [ln.strip() for ln in hits if ln.lstrip().startswith('"-o", "StrictHostKeyChecking=')] \
+                == ['"-o", "StrictHostKeyChecking=accept-new", "-o", known_hosts_option([tmp_kh]),']  # the probe, nothing else
+        elif path.name != "ssh_isolation.py":  # the wrapper's allow-list names the value it permits
+            assert all(ln.lstrip().startswith(("#", '"', "`")) or "never" in ln or "not" in ln for ln in hits), (path.name, hits)

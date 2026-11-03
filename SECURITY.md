@@ -187,25 +187,16 @@ of that session.
 Managed sessions run the system OpenSSH client. Password and key/agent
 authentication are supported.
 
-- **Host keys:** `terminal_open` does not set any host-key option, so
-  OpenSSH's own defaults and the user's own SSH configuration and
-  `known_hosts` apply. An unknown host-key confirmation prompt is not
-  automated by `terminal_open`; it is left in the terminal, where an AI
-  client using `terminal_send` can answer it. Network Lab MCP therefore does
-  not by itself guarantee that a host key was verified by a human. Pre-populate
-  `known_hosts` for lab devices if you want to avoid trust-on-first-use
-  decisions being made through the terminal.
-- **Topology discovery:** Discovery never uses `accept-new` or any other
-  trust-on-first-use mode. Every SSH hop runs with `StrictHostKeyChecking=yes`;
-  a new key can only be registered by the human CLI after the operator approved
-  the expected key type and SHA256 fingerprint (section 11a). A non-interactive
-  run stops on an unknown or changed key and changes nothing.
-- **Managed terminals:** every SSH hop (target and jump host) uses
-  `StrictHostKeyChecking=yes` and `UpdateHostKeys=no`, so an unknown or changed
-  key ends the connection instead of showing a `yes/no` prompt that could be
-  answered through `terminal_send`. The managed terminal never registers,
-  removes or replaces host keys; register keys with the human CLI
-  (`discover topology`) or a manual `ssh` first.
+- **Host keys (lab TOFU):** an SSH hop that is **not registered yet** is registered automatically on first
+  use, before any credential is sent (section 11a). Registered keys are never extended, removed or replaced
+  by `terminal_open` or any other MCP tool. Every credential-carrying SSH hop (target and jump host) runs with
+  `StrictHostKeyChecking=yes`, `UpdateHostKeys=no` and no connection multiplexing, so a changed or other-type
+  key ends the connection instead of showing a `yes/no` prompt that could be answered through
+  `terminal_send`. Only hosts defined in the active access-info (device and its jump host) can ever be
+  registered; there is no MCP argument that names a host or port.
+- **Topology discovery:** the same TOFU applies (no typed fingerprint, no key-type choice). Replacing a
+  registered key remains a human-only action in the CLI (section 11a).
+- **Managed terminals:** see above. The managed terminal never removes or replaces host keys.
 - Do not weaken SSH settings to make Network Lab MCP work.
 
 ## 10. Telnet
@@ -261,12 +252,12 @@ Custom `ProxyCommand` or `ssh` wrapper settings in the operator's own
   re-verified immediately before sending. This reduces, but cannot eliminate,
   the window between prompt detection and sending.
 - The ssh command always gets `-o StrictHostKeyChecking=yes` for the target
-  **and** for the jump hop (inside the ProxyCommand child): unknown or changed
+  **and** for the jump hop (inside the ProxyCommand child): changed or unregistered
   host keys fail instead of being accepted, whatever the user's `ssh_config`
-  says. Verified with OpenSSH 10.3 on loopback: with `-J` the jump hop does
+  says (an unregistered key was registered *before* this connection, see section 11a). Verified with OpenSSH 10.3 on loopback: with `-J` the jump hop does
   **not** inherit a command-line `StrictHostKeyChecking` (it still prompted),
   which is why `-J` is no longer used.
-- Discovery answers the jump-host prompt through the same stage logic (`terminal.authenticate_bootstrap_jump_stage`), once per hop, with the same attribution and re-prompt fail-closed rules. Discovery uses `StrictHostKeyChecking=yes` on every hop, so an unknown or changed key fails Discovery. The jump-host prompt logic was verified against local fakes and the host-key behaviour against loopback OpenSSH; real routers and a real jump server are unverified.
+- Discovery answers the jump-host prompt through the same stage logic (`terminal.authenticate_bootstrap_jump_stage`), once per hop, with the same attribution and re-prompt fail-closed rules. Discovery uses `StrictHostKeyChecking=yes` on every hop, so a changed key fails Discovery. The jump-host prompt logic was verified against local fakes and the host-key behaviour against loopback OpenSSH; the later real-lab Discovery run through a jump server is summarized in the verification status of section 11a. Real-device key changes, AAA effects and the jump server's own first-use registration remain unverified.
 - Access-info address, port and username are validated at commit and again
   when the argv is built; unsafe values never reach ssh/telnet.
 
@@ -278,7 +269,7 @@ gate, `exec`, remain-on-exit, pane identity, pipe-pane logging):
 
 - tunnel session `network-lab-tunnel-<device>`: `ssh -N -T -o ExitOnForwardFailure=yes
   -o ForwardAgent=no -o ForwardX11=no -o PermitLocalCommand=no
-  -o StrictHostKeyChecking=yes -o ControlMaster=no -o ControlPath=none
+  -o StrictHostKeyChecking=yes -o UserKnownHostsFile=<product> <user> -o ControlMaster=no -o ControlPath=none
   -o LogLevel=VERBOSE -o ServerAliveInterval=15 -o ServerAliveCountMax=3
   -L 127.0.0.1:<dynamic-port>:<device>:<port> <jump>`. It is internal: no MCP
   tool derives its name, `terminal_list` never shows it, `terminal_send`
@@ -337,16 +328,45 @@ and the next keystroke); lsof snapshots are not atomic; a tunnel left running
 after a crash holds a loopback port and a jump-host connection until closed;
 the tunnel pane's log lives in the device's log directory as a separate file.
 
-## 11a. SSH host-key approval and recovery (`discover topology`)
+## 11a. SSH host keys: lab TOFU and human-only replacement
 
-- **Human only.** Approval, removal and replacement of host keys exist only in the interactive human CLI. MCP tools and managed terminals have no code path to them (tested).
-- **Independent verification.** The expected key type and `SHA256:` fingerprint must come from a trusted channel other than the connection being verified. A key is registered only if the presented key matches exactly; OpenSSH writes the entry itself.
-- **Keys before credentials.** Registration connections disable authentication on the hop under test. Credential-carrying Discovery connections run `StrictHostKeyChecking=yes` on every hop. Approvals are in-memory, scoped, expiring (900 s) and single-use.
-- **Registration connections and jump passwords.** A registration connection may send a *jump host* password only through the jump-prompt attribution logic, at most once per connection, never when the prompt cannot be attributed to the jump hop, and never again after a re-prompt or failure for the same jump host in the same run. Their total is capped at `min(40, 2 x (devices behind a password-authenticated jump host) + 6)`. The target's credentials are never sent on a registration connection.
-- **known_hosts changes under concurrency.** Before removal the file is re-checked (size, mtime, inode, hash, symlink, owner, permissions). The backup is never written back wholesale: if the file changed in a way that cannot be explained by removing exactly the target host's lines, nothing is repaired automatically and the backup path is shown for manual recovery. Entries other programs add in the meantime are preserved.
-- **Stops without automatic recovery.** A presented key whose type or fingerprint differs from the approved one, certificate-authority/revoked markers, shared or pattern host entries, and an unreadable or symlinked `known_hosts` stop the operation and change nothing.
-- **Replacement** verifies the new key on a copy first, backs up `known_hosts` (to a `0700` directory, files `0600`; contains other hosts' keys; never auto-deleted; may or may not be excluded from your own backup/sync tools), removes exactly one host's entries and registers the new key after a second exact match. `GlobalKnownHostsFile` is never modified.
-- **Residual risks.** A TTY does not prove a human is typing: an AI or script able to drive your terminal (PTY automation) can approve; keep the human CLI out of the AI's reach. Concurrent modification of `known_hosts` by other programs is detected on a best-effort basis (fail closed), not prevented. Legacy `ssh-rsa` (SHA-1) host keys are not supported. SSH features not handled (certificates/`@cert-authority`, `KnownHostsCommand`, DNS-based host keys, shared or pattern host entries) fail closed or fall back to manual recovery. (Managed terminals verify the jump hop strictly as well.) Telnet-over-SSH-tunnel host-key registration and replacement are disabled. Verified only against isolated local OpenSSH servers, not against real routers or a real jump server.
+**What changed.** Earlier versions made the operator type the key type and fingerprint of every new host. The product is for labs, so a host key that is **not registered anywhere** is now registered automatically (TOFU, trust on first use) and the operator does nothing. Registered keys keep their full protection.
+
+**TOFU limit (accepted for lab use).** The first key is obtained over the network and cannot be proven authentic. An attacker who sits between you and the device during the *first* connection is trusted from then on. Register keys yourself (manual `ssh`, or edit your own known_hosts) when a lab network is not trusted.
+
+**Method: pre-register, then strict connect.**
+1. The host identifier (`host` for port 22, `[host]:port` otherwise) is looked up in the product known_hosts, your `~/.ssh/known_hosts` and the global known_hosts. An entry in any of them means *registered*: nothing is probed or added. A file that cannot be read safely (symlink, unreadable, unsupported entry) stops the operation (`TOFU_IDENTITY_ERROR`).
+2. An unregistered hop gets **one authentication-free probe** (no automatic retry): the OpenSSH client with the dummy user `nlm-hostkey-probe`, `PreferredAuthentications=none`, password / public-key / keyboard-interactive / host-based / GSSAPI off, `IdentityAgent=none`, `BatchMode=yes`, `-N -T`, `SessionType=none`, `PermitLocalCommand=no`, `ControlMaster=no`, `ControlPath=none`, `ControlPersist=no`, `UpdateHostKeys=no`, `HashKnownHosts=no`, `CheckHostIP=no`, `VerifyHostKeyDNS=no`, `StrictHostKeyChecking=accept-new` against a **temporary** known_hosts, with a connect timeout and an overall deadline. Verified against a local OpenSSH 10.3 server at DEBUG3: the server saw exactly one request (`none` for `nlm-hostkey-probe`) although it also offered `publickey` and `keyboard-interactive`. The probe never uses the real login name. An authentication success or a confirmation prompt on the probe is treated as an error: the connection is closed, nothing runs and nothing is registered.
+3. The recorded key is validated: exactly one entry, the expected host identifier (a `HostKeyAlias` or `HostName` in your ssh_config that changes it fails closed with `TOFU_IDENTITY_ERROR`), a supported type (ED25519, ECDSA, RSA), a well-formed blob whose embedded type matches, and a SHA256 fingerprint cross-checked with `ssh-keygen -l`. Only the **one negotiated key** is registered; the algorithm is negotiated by OpenSSH (not fixed), and SHA-1 `ssh-rsa` is never enabled by this tool.
+4. The entry is appended to the **product known_hosts** (macOS `~/Library/Application Support/Network Lab MCP/ssh/known_hosts`, Linux `~/.local/state/network-lab-mcp/ssh/known_hosts`; directory `0700`, file `0600`, not a symlink, owned by you) under a dedicated lock file (`flock`, in a `locks` directory next to it; the known_hosts itself is not the lock), `O_APPEND` single write, `fsync` of file and directory, then **re-read through `ssh-keygen` and compared** with the probed key. The probe, the append and the re-read happen under the lock, after the state was re-checked, so concurrent processes probe and register a host once. Any failure stops before a connection that carries a credential (`TOFU_STORAGE_ERROR`). Your own `~/.ssh/known_hosts` and the system file are **never modified** (they are only read).
+5. Every credential-carrying connection then runs `StrictHostKeyChecking=yes`, `UpdateHostKeys=no`, `CheckHostIP=no`, `VerifyHostKeyDNS=no`, `ControlMaster=no`, `ControlPath=none`, `ControlPersist=no`, with `UserKnownHostsFile` = product file + your file, on **every hop**. Multiplexing is disabled so that no existing master connection can stand in for this verification. `CheckHostIP=no` means the IP address of a host reached by name is not verified independently (trade-off, consistent with the probe).
+
+**Invariants.** (1) The key verified by the credential-carrying connection is the registered key (for a first use, the probed key). (2) No credential is sent to a hop before its key is accepted *and persisted*: after a TOFU the persistence and the re-read are complete before the first credential. (3) A first-use key is accepted without a human; every other change of trust needs a human at the CLI. (4) MCP and managed terminals cannot approve, remove or replace anything.
+
+**ProxyJump.** Jump server and target are independent hops, registered in that order. The probe of a target runs through the same jump hop, which is strictly verified and authenticated with its real user as in a normal connection; only the probed hop gets the dummy user and no credential. If the jump key does not verify, the target is never reached. A jump password is only ever sent through the existing attribution logic, at most once per connection, never again after a re-prompt or failure in the same run, and every probe counts toward the cap `min(40, 2 x (devices behind a password-authenticated jump host) + 6)`. Probes happen only for **unregistered** hops (a registered target is not probed), so the cap is not reached by normal use. **Telnet over an SSH jump host** (local port forwarding): only the jump server's SSH key is verified; the Telnet device has none and the Telnet leg stays plaintext.
+
+**What the probe costs on the device.** A device that logs or counts the `none` attempt of a non-existent user may count it as a failed login or ask its AAA server about `nlm-hostkey-probe`. Some devices rate-limit or temporarily block a source address after failed logins (for example `login block-for`). Whether that happens depends on the platform, the software and the AAA configuration and **has not been verified on real equipment**. A probe that fails is never retried; if a device cannot be probed safely, register its key manually once (`ssh -o StrictHostKeyChecking=ask` to the device with your own ssh, or add it to the known_hosts) and the tool will use it. If an error does not clearly identify the cause, the tool does not claim that AAA blocked it.
+
+**Registered keys are protected.**
+- A changed key, and a key of a **different type** than the registered one (OpenSSH reports this as a changed key; the CLI calls it `KEY_TYPE_MISMATCH`; it can also be caused by a configuration change or software update, not only by reinstalling), stop the connection before any credential is sent. They are never replaced, removed or extended automatically, and a server that offers an additional key type does not get it registered (`UpdateHostKeys=no`; a registered type is preferred in the negotiation by OpenSSH).
+- **Human only.** Replacement exists only in the interactive human CLI (`discover topology`). The probe obtains the new key into a temporary file; the CLI shows the trusted and new fingerprints and the warning that the key was obtained over the network and is not independently verified, then asks `Replace the trusted host key? [yes/no] (default: no):` on the **controlling terminal (`/dev/tty`)**. Input that was already buffered (pasted, piped or typed ahead), an empty or any other answer, EOF, Ctrl-C and the 180 s timeout all cancel; stdin and stdout must be the same TTY. On yes: re-check that the file did not change, back up (to a `0700` directory, files `0600`; contains other hosts' keys; never auto-deleted), remove exactly that host's entries (`ssh-keygen -R`), restore owner and `0600` and delete the leftover `.old`, append the new key, re-read and compare. If registration fails after removal, the removed entries are appended back (never overwriting other processes' additions) or the backup path is shown. Approvals are in memory, scoped, expiring and single-use.
+- Entries in **your own** known_hosts or the system file are never edited. For a changed key that lives there the CLI prints the manual command, e.g. `ssh-keygen -R '[host]:port' -f ~/.ssh/known_hosts` (use the `[host]:port` form for a non-default port or the `HostKeyAlias`), or tells you to ask the administrator. This tool does not run it.
+- MCP tools and managed terminals have no code path to replacement, removal, backups or the TTY approval (tested statically and dynamically). The terminal layer reaches only `hostkey_tofu`, which can append a key for an unregistered hop of a device from the access-info.
+
+**Logging.** Every TOFU result is appended as a JSON line to `logs/hostkey-tofu.log` (`0600`; git-ignored): time, device, hop (`direct`/`jump`/`target`), host identifier, port, key type, SHA256 fingerprint of the key that was actually registered, and the result (`registered`, `probe_failed`, `registration_failed`, `replaced`). The CLI prints `SSH host key automatically accepted (TOFU):` with device, hop, type and fingerprint. No credential, private key or key blob is logged.
+
+**Local commands in your ssh_config.** Production connections and probes use your normal ssh_config resolution (`Host`, `HostName`, `Port`, `KexAlgorithms`, `HostKeyAlgorithms`, `ProxyJump`, `ProxyCommand`, `IdentityFile`), so settings such as `Match exec`, `ProxyCommand` and `LocalCommand` run on your machine exactly as they would for a normal `ssh`; `PermitLocalCommand=no` does **not** switch off `Match exec` or `ProxyCommand`. The probe adds no new local command, but it runs the ones your configuration attaches to that host. This tool does not run `ssh -G` against your configuration.
+
+**Other limits.**
+- A host that is reachable under several names or addresses is registered per identifier (`host` or `[host]:port`); the same device under another name or its IP is a different, unregistered host (it would get its own TOFU entry). Existing entries that already cover it (any file) are respected; entries this tool cannot interpret (markers, `@cert-authority`, patterns, `KnownHostsCommand`, DNS host keys) fail closed.
+- Exactly one key type per host is registered. A device that later offers only another type triggers the human review.
+- Legacy devices that only offer SHA-1 `ssh-rsa` or old key exchange fail with `HOST_KEY_ALGORITHM_MISMATCH` / `SSH_KEX_MISMATCH`; enable the algorithm for that host in your own ssh_config. If the key was registered but the main connection then fails during negotiation, the message says so separately.
+- A TTY does not prove a human is typing: an AI or script able to drive your terminal (PTY automation) can approve a *replacement*; keep the human CLI out of the AI's reach.
+- Error classes: `HOST_KEY_UNKNOWN`, `HOST_KEY_CHANGED`, `KEY_TYPE_MISMATCH`, `HOST_KEY_ALGORITHM_MISMATCH`, `SSH_KEX_MISMATCH`, `TOFU_PROBE_ERROR`, `TOFU_STORAGE_ERROR`, `TOFU_IDENTITY_ERROR`, `JUMP_AUTH_ERROR`, `SSH_AUTH_ERROR`.
+- Verification status:
+  - Automated tests ran against isolated local OpenSSH 10.3 (macOS) servers behind a forced test wrapper.
+  - Real lab (macOS, maintainer-run): Topology Discovery through an SSH jump server connected to 9 of 9 devices, registered 7 first-use keys automatically (ED25519, RSA, ECDSA) with no manual key input, and a second run succeeded with no new registration. The CLI output alone does not show that no probe ran the second time or that every hop used `StrictHostKeyChecking=yes`; that rests on the code and tests.
+  - **Not verified:** the jump server's own first-use registration, refusal of a changed real-device key, CLI re-registration on real devices, effects on AAA failed-login counters, TACACS+/RADIUS and `login block-for`, Linux, legacy SSH algorithms on real devices, all authentication methods and failure patterns, and all failure handling of SSH local port forwarding for Telnet. This is not a completed security test of the feature.
 
 ## 12. Candidate / commit boundary
 

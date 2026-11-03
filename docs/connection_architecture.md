@@ -8,7 +8,7 @@ Network Lab MCP provides a lightweight **AI network engineering layer** for real
 
 This document explains **how and why those pieces fit together**. For the overall configuration and MCP architecture, see [Architecture](architecture.md); for human commands, see [CLI reference](cli_reference.md); and for the external tool contract, see [MCP tools](mcp_tools.md).
 
-> **Verification status:** The behaviour described here is implemented in the source and covered by automated tests, including tests against isolated loopback OpenSSH servers (OpenSSH 10.3 on macOS) and fakes for jump-server password prompts. The earlier macOS real-lab checks (managed terminals and Discovery through an SSH jump server) predate the host-key management and the per-hop `ProxyCommand` described below; **host-key registration, replacement and the strict ProxyCommand path have not been validated against real routers or a real jump server**, nor on Linux or other OpenSSH versions. See [SECURITY.md](../SECURITY.md) for security boundaries. No unrestricted AI autonomy or production-network safety is claimed.
+> **Verification status:** The behaviour described here is implemented in the source and covered by automated tests, including tests against isolated loopback OpenSSH servers (OpenSSH 10.3 on macOS) and fakes for jump-server password prompts. A macOS real-lab Discovery run through an SSH jump server (9 of 9 devices, 7 automatic first-use registrations, a second run without new registration) confirmed the lab TOFU path; details are in [SECURITY.md](../SECURITY.md) section 11a. **Not yet validated:** the jump server's own first-use registration, real-device key change refusal and CLI replacement, AAA effects, Linux, other OpenSSH versions, legacy SSH algorithms on real devices. See [SECURITY.md](../SECURITY.md) for security boundaries. No unrestricted AI autonomy or production-network safety is claimed.
 
 ## Design philosophy: compose, do not reinvent
 
@@ -154,8 +154,9 @@ A single SSH jump server allows the workstation to reach an SSH device that is n
 OpenSSH's `ProxyJump` (`-J`) child process does **not** inherit a command-line `-o StrictHostKeyChecking=yes` (observed with OpenSSH 10.3: an unknown jump-server key still produced a `yes/no` prompt). Network Lab MCP therefore does not use `-J` for managed terminals or Discovery. It starts the target with an explicit child command:
 
 ```text
-ssh -o StrictHostKeyChecking=yes -o UpdateHostKeys=no \
-    -o ProxyCommand="ssh -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -W %h:%p -p <jump-port> <jump-user>@<jump-host>" \
+ssh -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o ControlMaster=no -o ControlPath=none \
+    -o UserKnownHostsFile="<product known_hosts>" "<user known_hosts>" \
+    -o ProxyCommand="ssh -o StrictHostKeyChecking=yes -o UpdateHostKeys=no ... -W %h:%p -p <jump-port> <jump-user>@<jump-host>" \
     -p <port> <user>@<target>
 ```
 
@@ -193,7 +194,7 @@ Operational advantages:
 
 **Security boundary:** the local-workstation-to-jump-server segment is carried through SSH. The **jump-server-to-legacy-device segment is Telnet and remains plaintext**. Use this only in appropriately controlled lab networks, and do not imply end-to-end encryption.
 
-For this path the SSH tunnel runs with `StrictHostKeyChecking=yes`. Host-key **registration and replacement are disabled**: the jump server's key must already be registered (for example with a manual `ssh` connection), otherwise the connection is refused with a hint. Telnet itself has no host-key verification.
+For this path the SSH tunnel runs with `StrictHostKeyChecking=yes`. The jump server's key is registered on first use by the same TOFU as any SSH hop (authentication-free probe, saved before the tunnel's credential-carrying connection); a changed key is refused and **replaced only by a human in the CLI**. Only the jump server has an SSH host key to verify. Telnet itself has no host-key verification.
 
 ### 4. Direct Telnet
 
@@ -218,33 +219,35 @@ The separation between `access-info`, `topology`, `scenario` and `reference` is 
 
 These definitions are selected by the human-managed running configuration. See [Architecture](architecture.md) for candidate/commit, file structure and reload semantics.
 
-## SSH host-key trust and human approval
+## SSH host-key trust: lab TOFU and human approval
 
 SSH host-key verification is not the same as user authentication. It verifies the **server identity** before the client trusts the connection for authentication.
 
 ```text
-Known host key matches            -> strict verification, no question asked
-Unknown key, human CLI            -> operator approves expected key type + SHA256 fingerprint
-                                     -> short registration connection (authentication disabled)
-                                     -> Discovery connections run strict on every hop
-Changed key, human CLI            -> connection stops; operator may review replacement
-                                     (verify on a copy, backup, remove one host, re-register)
-Unknown or changed key, anything
-else (non-interactive Discovery,
-managed terminal / MCP)           -> connection refused; nothing is registered or replaced
+Key registered anywhere            -> strict verification, no question, no probe
+(product / user / global known_hosts)
+Not registered (first use)         -> authentication-free probe (dummy user, temporary known_hosts)
+                                     -> key saved in the product known_hosts and read back
+                                     -> credential-carrying connection runs strict on every hop
+                                     (Discovery, managed terminals, MCP; no human input)
+Changed key / other key type       -> connection refused before any credential
+                                     human CLI only: review, TTY approval (default No),
+                                     backup, remove that host's entries, register the new key
 ```
 
-- **Registration connection.** After approval, a short-lived ssh connection with `StrictHostKeyChecking=ask`, `HostKeyAlgorithms` limited to the approved key type and every authentication method disabled on the hop under test lets OpenSSH itself write the key. The approved fingerprint is typed at most once, only if host, port, algorithm and fingerprint of the prompt all match. Afterwards `ssh-keygen -F` must show exactly the approved fingerprint. For a target behind a jump server the jump hop must already be trusted. The Discovery connections that carry credentials are separate and always strict.
-- **Replacement.** The old entry is removed only after the new key was verified on a throw-away copy of `known_hosts`, the operator confirmed, and a backup was written. A concurrent change of `known_hosts` stops the operation; the backup is never written back wholesale.
-- **Stops without recovery.** A key type that differs from the approved one, certificate-authority or revoked markers, unreadable `known_hosts`, unsupported entries and shared host patterns all stop the operation and leave `known_hosts` unchanged; recover manually (`ssh-keygen -R`).
-- **Boundaries.** Approval and replacement exist only in the human CLI (`discover topology`) and are not importable from the MCP server or terminal module (tests enforce this). A TTY does not prove a human is typing; see [SECURITY.md](../SECURITY.md).
+- **Lab-oriented.** The first key is obtained over the network and cannot be independently verified; a man in the middle of the first connection would be trusted (accepted for lab use).
+- **Probe.** One per unregistered host, no retry, OpenSSH itself with the dummy user `nlm-hostkey-probe`, only the `none` authentication method, no multiplexing, `-N -T`, a temporary known_hosts. Behind a jump server the target probe goes through the verified, authenticating jump hop. A device may count the probe as a failed login or ask AAA; the effect on AAA is not verified on real equipment.
+- **Product known_hosts.** The only file written. Your own known_hosts is read, never edited. Written under a dedicated lock file, appended atomically, `fsync`ed and re-read before authentication.
+- **Replacement.** Only the human CLI, on `/dev/tty`, only after an explicit `yes`; the old entries are removed from the product file only after a backup; entries in your own or the system known_hosts are never edited (a manual `ssh-keygen -R` is shown).
+- **Stops without recovery.** Certificate-authority or revoked markers, unreadable or symlinked known_hosts, unsupported entries, shared host patterns, an unclear host identifier (e.g. `HostKeyAlias`) all stop the operation and change nothing.
+- **Boundaries.** Replacement and approval exist only in the human CLI (`discover topology`) and are not importable from the MCP server or terminal module; those can only add a key for an unregistered hop of a device from the access-info (tests enforce this). A TTY does not prove a human is typing; see [SECURITY.md](../SECURITY.md).
 
 ## Authentication
 
 - Credentials stay inside Network Lab MCP. They are typed into the pane through a private input path (never `terminal_send`, never a command line) and only after the hop's host key is verified.
 - SSH: the target password prompt is answered once when it is attributable to the target. With a jump server the jump prompt is attributed first by exact user and host; an ambiguous or re-appearing prompt stops the connection. Key or agent authentication needs no automation.
 - Telnet: username and password prompts are answered once each.
-- Registration connections may send only a jump-server password (never target credentials), with a bounded budget and a stop after the first failure per jump server.
+- Probe connections may send only a jump-server password (never target credentials), with a bounded budget and a stop after the first failure per jump server; the probed hop only ever sees the dummy user and no credential.
 
 ## Failure handling and ownership
 
@@ -254,7 +257,7 @@ Integration safety is a first-class concern because process-based tools can fail
 |---|---|
 | SSH disconnects but tmux remains | Detect dead or invalid pane before further device input; never fall back to a local shell |
 | Jump server or target cannot be authenticated | Stop the affected connection and report a bounded, sanitized failure |
-| Host-key mismatch | Do not silently replace the key; require the appropriate separate recovery workflow |
+| Host-key mismatch (changed key or other key type) | Do not silently replace the key; require the human CLI replacement workflow |
 | Connection command or hop cannot be validated | Fail closed instead of guessing a replacement command |
 | Discovery fails midway | Preserve committed definitions and avoid publishing a partial candidate |
 | Temporary session exits | Clean up only owned sessions, files and subprocesses |

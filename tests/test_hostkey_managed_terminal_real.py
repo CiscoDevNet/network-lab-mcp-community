@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Managed Terminal (the MCP-facing path) with REAL OpenSSH over loopback:
-every hop is verified strictly; unknown/changed keys are refused with no
-prompt that terminal_send could answer, and nothing is registered."""
+an unknown hop is registered first (TOFU: authentication-free probe, key
+persisted in the product known_hosts) and then verified strictly; a changed
+or other-type key is refused with no prompt that terminal_send could answer
+and nothing is replaced or added."""
 
 from __future__ import annotations
 
@@ -91,15 +93,19 @@ def log(rt, name):
     return Path(rt.sandbox, f"sshd_{name}.log").read_text()
 
 
-# state of (jump, target): "T"=trusted, "U"=unknown, "C"=changed
+# state of (jump, target): "T"=trusted, "U"=unknown (TOFU), "C"=changed (refused)
 CASES = [
     ("E", "T", "T", True),
-    ("A_F", "U", "T", False),
+    ("A_F", "U", "T", True),
     ("B_H", "C", "T", False),
-    ("C_G", "T", "U", False),
+    ("C_G", "T", "U", True),
     ("D", "T", "C", False),
-    ("UU", "U", "U", False),
+    ("UU", "U", "U", True),
 ]
+
+
+def read_or_none(path):
+    return Path(path).read_bytes() if Path(path).exists() else None
 
 
 @pytest.mark.parametrize("name,jstate,tstate,should_open", CASES)
@@ -115,30 +121,35 @@ def test_proxyjump_matrix(lab, name, jstate, tstate, should_open):
         trust(rt, T, st.port)
     elif tstate == "C":
         trust(rt, T, st.port, wrong=WRONG)
-    before = Path(rt.known_hosts).read_bytes() if Path(rt.known_hosts).exists() else None
+    user_before = read_or_none(rt.known_hosts)
+    prod_before = read_or_none(rt.product_known_hosts)
     err = open_terminal(cfg(st.port, sj.port))
     assert (err is None) == should_open, err
     text = wait_for(lambda: terminal.read_device("R1")["content"], ["RP/0/RP0/CPU0:R1#", "verification failed", "Host key"])
-    after = Path(rt.known_hosts).read_bytes() if Path(rt.known_hosts).exists() else None
-    assert after == before, "known_hosts must never change in a managed terminal"
+    assert read_or_none(rt.known_hosts) == user_before, "the user's known_hosts must never change"
+    expected_new = "".join(
+        f"[127.0.0.1]:{port} {k['type']} {k['blob']}\n"
+        for state, k, port in (("U" == jstate, J, sj.port), ("U" == tstate, T, st.port)) if state
+    )
+    assert (read_or_none(rt.product_known_hosts) or b"").decode() == (prod_before or b"").decode() + expected_new
+    assert "authenticity of host" not in text and "yes/no" not in text  # nothing for terminal_send to answer
     if should_open:
         assert "RP/0/RP0/CPU0:R1#" in text
         assert "Accepted" in log(rt, "t")
         return
     assert "RP/0/RP0/CPU0:R1#" not in text
-    assert "authenticity of host" not in text and "yes/no" not in text  # nothing for terminal_send to answer
     assert "Accepted" not in log(rt, "t")  # the target never authenticated
     if jstate != "T":
-        assert "Accepted" not in log(rt, "j")  # an untrusted jump never authenticated either
+        assert "Accepted" not in log(rt, "j")  # a changed jump key was never authenticated against
     # the pane is dead: a `yes` cannot reach any shell (disconnect-safe launch)
     wait_for(lambda: terminal.read_device("R1")["content"], ["verification failed"], 10)
     with pytest.raises(terminal.TerminalError):
         terminal.send_to_device("R1", "yes", None, True)
-    assert (Path(rt.known_hosts).read_bytes() if Path(rt.known_hosts).exists() else None) == before
+    assert read_or_none(rt.known_hosts) == user_before
 
 
 @pytest.mark.parametrize("tstate", ["T", "U", "C"])
-def test_direct_ssh_is_strict(lab, tstate):
+def test_direct_ssh_tofu_and_strict(lab, tstate):
     rt, server = lab
     T, WRONG = make_host_key(rt, "T"), make_host_key(rt, "W")
     st = server("t", T, forced=True)
@@ -146,13 +157,77 @@ def test_direct_ssh_is_strict(lab, tstate):
         trust(rt, T, st.port)
     elif tstate == "C":
         trust(rt, T, st.port, wrong=WRONG)
-    before = Path(rt.known_hosts).read_bytes() if Path(rt.known_hosts).exists() else None
+    user_before = read_or_none(rt.known_hosts)
     err = open_terminal(cfg(st.port))
-    assert (err is None) == (tstate == "T"), err
+    assert (err is None) == (tstate != "C"), err
     text = wait_for(lambda: terminal.read_device("R1")["content"], ["RP/0/RP0/CPU0:R1#", "verification failed"])
-    assert (Path(rt.known_hosts).read_bytes() if Path(rt.known_hosts).exists() else None) == before
-    if tstate == "T":
-        assert "RP/0/RP0/CPU0:R1#" in text
+    assert read_or_none(rt.known_hosts) == user_before
+    assert "authenticity of host" not in text
+    if tstate == "C":
+        assert "RP/0/RP0/CPU0:R1#" not in text and "Accepted" not in log(rt, "t")
+        assert not Path(rt.product_known_hosts).exists() or Path(rt.product_known_hosts).read_text() == ""
     else:
-        assert "authenticity of host" not in text and "RP/0/RP0/CPU0:R1#" not in text
-        assert "Accepted" not in log(rt, "t")
+        assert "RP/0/RP0/CPU0:R1#" in text
+        if tstate == "U":
+            assert Path(rt.product_known_hosts).read_text() == f"[127.0.0.1]:{st.port} {T['type']} {T['blob']}\n"
+
+
+def test_tofu_failure_in_managed_terminal_starts_no_session_and_sends_nothing(lab, monkeypatch):
+    from network_lab_mcp import hostkey_tofu
+
+    rt, server = lab
+    T = make_host_key(rt, "T")
+    st = server("t", T, forced=True)
+
+    def boom(*a, **kw):
+        raise hostkey_tofu.HostKeyError("disk full", hostkey_tofu.TOFU_STORAGE_ERROR)
+
+    monkeypatch.setattr(hostkey_tofu, "append_entry", boom)
+    err = open_terminal(cfg(st.port))
+    assert err and "TOFU_STORAGE_ERROR" in err and "Nothing was sent" in err
+    assert terminal.list_device_sessions() == [] or all(x["device"] != "R1" for x in terminal.list_device_sessions())
+    assert "Accepted" not in log(rt, "t")
+
+
+def test_known_hosts_paths_with_spaces_work_end_to_end(tmp_path):
+    """The macOS product path contains a space ("Application Support"): quoting must survive the tmux launch,
+    the ProxyCommand child and the wrapper, for the TOFU probe and for the strict connection."""
+    import dataclasses
+    import json
+
+    before = iso.snapshot_real_ssh_area()
+    rt0 = make_real_runtime(tmp_path, install=False)
+    spaced = Path(rt0.sandbox) / "Application Support" / "Network Lab MCP" / "ssh"
+    spaced.mkdir(parents=True, mode=0o700)
+    rt = dataclasses.replace(rt0, product_known_hosts=str(spaced / "known_hosts"))
+    Path(rt.policy_file).write_text(json.dumps(dataclasses.asdict(rt)))
+    iso.install_for_tests(rt)
+    assert " " in rt.product_known_hosts
+    router = Path(rt.sandbox) / "router.sh"
+    router.write_text(ROUTER)
+    router.chmod(0o700)
+    J, T = make_host_key(rt, "J"), make_host_key(rt, "T")
+    servers = []
+    try:
+        for name, key in (("j", J), ("t", T)):
+            s = Sshd(rt, name, key)
+            if name == "t":
+                auth = Path(rt.sandbox) / "authorized_t"
+                auth.write_text(f'command="{router}" ' + Path(rt.identity + ".pub").read_text())
+                os.chmod(auth, 0o600)
+            s.start()
+            servers.append(s)
+        sj, st = servers
+        assert open_terminal(cfg(st.port, sj.port)) is None
+        text = wait_for(lambda: terminal.read_device("R1")["content"], ["RP/0/RP0/CPU0:R1#"])
+        assert "RP/0/RP0/CPU0:R1#" in text and "Accepted" in log(rt, "t")
+        assert Path(rt.product_known_hosts).read_text().count("\n") == 2  # jump + target registered
+    finally:
+        try:
+            terminal.close_device_terminal("R1")
+        except Exception:
+            pass
+        for s in servers:
+            s.stop()
+        iso.uninstall_for_tests()
+    assert iso.snapshot_real_ssh_area() == before

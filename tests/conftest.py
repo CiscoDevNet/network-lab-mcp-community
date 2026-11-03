@@ -166,6 +166,46 @@ def _isolated_terminal_logs_root(monkeypatch, tmp_path_factory):
     monkeypatch.setattr(terminal, "LOGS_ROOT", tmp_path_factory.mktemp("terminal-logs"))
 
 
+@pytest.fixture(autouse=True)
+def _no_real_tofu_probe_without_isolated_runtime():
+    """TOFU opens a real ssh connection to the device's address. Unit tests
+    use fake devices (documentation addresses) and must never reach the
+    network, so the managed-terminal TOFU hook is a no-op unless the test
+    installed the isolated OpenSSH runtime (loopback sshd, forced wrapper) --
+    the tests that exercise TOFU for real do exactly that. Real-lab runs
+    (`NETWORK_LAB_REAL_TESTS=1`, explicitly approved by the user) keep it."""
+    if os.environ.get("NETWORK_LAB_REAL_TESTS") == "1":
+        yield
+        return
+    from network_lab_mcp import ssh_isolation
+
+    real = terminal._ensure_host_keys
+
+    def guarded(device_name, device_config):
+        if ssh_isolation.active_runtime() is None:
+            return None
+        return real(device_name, device_config)
+
+    patch = pytest.MonkeyPatch()  # its own instance: a test's blanket monkeypatch.undo() must not remove it
+    patch.setattr(terminal, "_ensure_host_keys", guarded)
+
+    # Same for the CLI's Discovery coordinator (it would probe the fake devices' addresses and read the real
+    # user's known_hosts). Tests of the coordinator build it themselves or call the unwrapped factory.
+    import functools
+
+    from network_lab_mcp.cli import main as climain
+
+    real_factory = climain._make_hostkey_coordinator
+
+    @functools.wraps(real_factory)
+    def guarded_factory():
+        return None if ssh_isolation.active_runtime() is None else real_factory()
+
+    patch.setattr(climain, "_make_hostkey_coordinator", guarded_factory)
+    yield
+    patch.undo()
+
+
 @pytest.fixture()
 def production_tmux_socket_name() -> str:
     """The real production tmux socket name -- for the one test file

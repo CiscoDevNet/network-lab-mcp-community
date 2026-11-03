@@ -137,7 +137,9 @@ def test_discovery_argv_is_strict_and_secret_free_when_jump_password_set():
     _, cmd = terminal._build_transport_command(_cfg())
     joined = " ".join(cmd)
     assert "StrictHostKeyChecking=yes" in cmd and "accept-new" not in joined
-    assert "SENTINEL" not in joined and "UserKnownHostsFile" not in joined
+    assert "SENTINEL" not in joined
+    # the product + user known_hosts are named explicitly (never /dev/null or "none")
+    assert "UserKnownHostsFile=" in joined and "/dev/null" not in joined and "UserKnownHostsFile=none" not in joined
     assert "-J" not in cmd and "ProxyCommand=" in joined
 
 

@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from network_lab_mcp import connection_safety, ssh_isolation, tunnel_safety
+from network_lab_mcp import connection_safety, hostkey_tofu, ssh_isolation, tunnel_safety
 
 TMUX_SOCKET_NAME = "network-lab-mcp"
 
@@ -1075,11 +1075,27 @@ def _ssh_base_argv() -> list[str]:
     return [_resolve_ssh_binary()]
 
 
-# Every SSH hop of every terminal this module starts is verified strictly:
-# an unknown or changed host key is refused (no yes/no prompt that could be
-# answered by the AI through terminal_send, never `accept-new`). Host keys
-# are registered/replaced only by the human CLI (human CLI only).
-_STRICT_HOST_KEY_OPTS = ["-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no"]
+# Every SSH hop of every terminal this module starts is verified strictly
+# against the product known_hosts + the user's known_hosts (no yes/no prompt
+# that could be answered by the AI through terminal_send, never `accept-new`
+# on a credential-carrying connection, no multiplexing). A host that is not
+# registered yet was TOFU-registered *before* this connection by
+# `_ensure_host_keys()` (authentication-free probe, key persisted first); an
+# existing key is never replaced here -- replacement is the human CLI's job.
+def _strict_host_key_opts() -> list[str]:
+    return hostkey_tofu.strict_opts()
+
+
+def _ensure_host_keys(device_name: str, device_config: dict) -> None:
+    """TOFU for the SSH hops (jump server and/or target) of a device that is
+    defined in the active access-info. Registered hops are never probed.
+    Failure is fail-closed: no connection (and so no credential) follows."""
+    if device_config.get("transport") not in ("ssh", "telnet"):
+        return
+    try:
+        hostkey_tofu.ensure_trusted(device_name, device_config)
+    except hostkey_tofu.HostKeyError as exc:
+        raise TerminalError(f"Device '{device_name}': {exc} Nothing was sent.") from None
 
 
 def _build_transport_command(device_config: dict) -> tuple[str, list[str]]:
@@ -1113,10 +1129,10 @@ def _build_transport_command(device_config: dict) -> tuple[str, list[str]]:
     if transport == "ssh":
         _require_binary("ssh")
         target, port = _ssh_target(device_config, 22)
-        command = ["ssh", *_STRICT_HOST_KEY_OPTS]
+        command = ["ssh", *_strict_host_key_opts()]
         if jump_host is not None:
             jump_target, jump_port = _ssh_target(jump_host, 22)
-            child = [*_ssh_base_argv(), *_STRICT_HOST_KEY_OPTS, "-W", "%h:%p", "-p", str(jump_port), jump_target]
+            child = [*_ssh_base_argv(), *_strict_host_key_opts(), "-W", "%h:%p", "-p", str(jump_port), jump_target]
             command += ["-o", "ProxyCommand=" + " ".join(shlex.quote(part) for part in child)]
         command += ["-p", str(port), target]
         return transport, _isolate_ssh_command(command)
@@ -1578,7 +1594,7 @@ def _build_tunnel_command(device_config: dict, local_port: int) -> list[str]:
     return [
         _resolve_ssh_binary(), "-N", "-T",
         "-o", "ExitOnForwardFailure=yes", "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
-        "-o", "PermitLocalCommand=no", "-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=no",
+        "-o", "PermitLocalCommand=no", *_strict_host_key_opts(), "-o", "BatchMode=no",
         "-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "LogLevel=VERBOSE",
         "-o", f"ServerAliveInterval={_TUNNEL_SERVER_ALIVE_INTERVAL}",
         "-o", f"ServerAliveCountMax={_TUNNEL_SERVER_ALIVE_COUNT}",
@@ -1887,6 +1903,7 @@ def open_device_terminal(device_name: str, device_config: dict) -> dict:
     reused)."""
     session_name = derive_production_session_name(device_name)
     with _session_lock(session_name):
+        _ensure_host_keys(device_name, device_config)
         if device_config.get("transport") == "telnet" and device_config.get("jump_host_config") is not None:
             return _open_telnet_via_jump(device_name, device_config, session_name)
         transport, command = _build_transport_command(device_config)

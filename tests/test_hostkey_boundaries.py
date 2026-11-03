@@ -21,10 +21,45 @@ HOSTKEY_MODULES = ("hostkey_approval", "hostkey_flow", "hostkey_store")
 
 
 def test_mcp_server_and_terminal_never_import_hostkey_modules():
+    # The terminal layer (used by MCP) may use only hostkey_tofu: first-use registration, no removal/approval.
     for name in ("mcp_server.py", "terminal.py", "lab.py", "connection_safety.py", "tunnel_safety.py"):
         text = (SRC / name).read_text()
         for mod in HOSTKEY_MODULES:
             assert not re.search(rf"\b{mod}\b", text), f"{name} references {mod}"
+    assert not re.search(r"\bhostkey_tofu\b", (SRC / "mcp_server.py").read_text())
+
+
+def test_tofu_module_cannot_remove_replace_or_approve():
+    """What MCP/managed terminals can reach (via terminal.py) is only: add a key for an *unknown* host."""
+    import ast
+
+    tree = ast.parse((SRC / "hostkey_tofu.py").read_text())
+    for node in ast.walk(tree):  # drop docstrings: prose may name what the module does not do
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef)) and ast.get_docstring(node, clean=False):
+            node.body = node.body[1:] or [ast.Pass()]
+    code = ast.unparse(tree)
+    for forbidden in ("remove_host", "make_backup", "hostkey_approval", "hostkey_flow", "TtyChannel", "/dev/tty",
+                      "ApprovalRegistry", "'-R'", "StrictHostKeyChecking=no", "StrictHostKeyChecking=off",
+                      "/dev/null"):
+        assert forbidden not in code, forbidden
+    assert sorted(set(re.findall(r"StrictHostKeyChecking=([a-z-]+)", code))) == ["accept-new", "yes"]
+
+
+def test_terminal_reaches_tofu_only_for_hops_of_the_given_access_info_device(monkeypatch):
+    """ensure_trusted derives its targets from the device config only (no host/port parameter at all)."""
+    import inspect
+
+    from network_lab_mcp import hostkey_tofu as tofu
+
+    assert list(inspect.signature(tofu.ensure_trusted).parameters) == ["device_name", "device_config", "counters"]
+    seen = []
+    monkeypatch.setattr(tofu, "register_unknown", lambda dev, cfg, hop, **kw: seen.append((hop.role, hop.host, hop.port)))
+    tofu.ensure_trusted("Router2", {"transport": "ssh", "address": "192.0.2.20", "port": 2222, "username": "u",
+                                    "jump_host_config": {"address": "192.0.2.1", "port": 22, "username": "j"}})
+    assert seen == [("jump", "192.0.2.1", 22), ("target", "192.0.2.20", 2222)]
+    seen.clear()
+    tofu.ensure_trusted("Legacy", {"transport": "telnet", "address": "192.0.2.30", "port": 23})
+    assert seen == []  # Telnet-only device: no SSH host key applies
 
 
 def test_only_cli_and_discovery_import_hostkey_flow():
@@ -63,58 +98,85 @@ def test_production_defaults_use_pwd_database_not_home(monkeypatch, tmp_path):
     monkeypatch.setattr("pwd.getpwuid", lambda uid: fake)
     monkeypatch.setenv("HOME", str(tmp_path / "otherhome"))
     assert hf.default_known_hosts() == str(tmp_path / "pwhome" / ".ssh" / "known_hosts")
-    assert hf.known_hosts_path() == hf.default_known_hosts()
+    prod = hf.known_hosts_path()
+    assert prod.startswith(str(tmp_path / "pwhome")) and prod != hf.default_known_hosts()  # product file, not the user's
+    assert prod.endswith(os.path.join("ssh", "known_hosts"))
     assert not (tmp_path / "pwhome").exists()  # nothing was created or opened
 
 
 def test_production_ssh_prefix_is_absolute_without_isolation_options():
-    prefix = hf.ssh_prefix()
+    from network_lab_mcp import hostkey_tofu
+    prefix = hostkey_tofu.ssh_prefix()
     assert os.path.isabs(prefix[0]) and prefix[0].endswith("/ssh")
     assert prefix[1:] == []
 
 
-def test_production_command_enforces_strict_on_both_hops_and_no_J():
+def _opt_values(cmd, key):
+    return [cmd[i + 1].split("=", 1)[1] for i, a in enumerate(cmd[:-1]) if a == "-o" and cmd[i + 1].startswith(key + "=")]
+
+
+def test_production_command_enforces_strict_on_both_hops_and_no_J(monkeypatch, tmp_path):
+    monkeypatch.setattr("pwd.getpwuid", lambda uid: types.SimpleNamespace(pw_dir=str(tmp_path / "h")))
     cfg = {"transport": "ssh", "address": "192.0.2.20", "port": 22, "username": "u",
            "jump_host_config": {"address": "192.0.2.1", "port": 22, "username": "j"}}
-    cmd = hf.build_ssh_command(cfg, kh="/tmp/known_hosts_example")
+    cmd = hf.build_ssh_command(cfg)
     assert "-J" not in cmd
     proxy = next(a for a in cmd if a.startswith("ProxyCommand="))
     assert "StrictHostKeyChecking=yes" in proxy and "-W" in proxy
-    assert cmd.count("StrictHostKeyChecking=yes") == 1  # target
-    assert "StrictHostKeyChecking=ask" not in " ".join(cmd)
-    assert "UpdateHostKeys=no" in cmd and "CheckHostIP=no" in cmd and "VerifyHostKeyDNS=no" in cmd
+    assert _opt_values(cmd, "StrictHostKeyChecking") == ["yes"]  # target; the jump hop is in the ProxyCommand
+    assert "StrictHostKeyChecking=accept-new" not in " ".join(cmd) and "StrictHostKeyChecking=ask" not in " ".join(cmd)
+    for key, want in (("UpdateHostKeys", "no"), ("CheckHostIP", "no"), ("VerifyHostKeyDNS", "no"),
+                      ("ControlMaster", "no"), ("ControlPath", "none"), ("ControlPersist", "no")):
+        assert _opt_values(cmd, key) == [want], key
+        assert f"{key}={want}" in proxy, key
+    # both known_hosts files (product first, then the user's) on every hop, quoted
+    (khv,) = _opt_values(cmd, "UserKnownHostsFile")
+    assert khv.count('"') == 4 and "Application Support" in khv or "/.local/state/" in khv
+    assert khv.endswith('.ssh/known_hosts"')
 
 
 def test_no_credential_ever_in_ssh_argv():
     cfg = {"transport": "ssh", "address": "192.0.2.20", "port": 22, "username": "u", "password": "SENTINEL_TARGET_PW",
            "jump_host_config": {"address": "192.0.2.1", "port": 22, "username": "j", "password": "SENTINEL_JUMP_PW"}}
-    joined = " ".join(hf.build_ssh_command(cfg, kh="/tmp/k"))
+    from network_lab_mcp import hostkey_tofu as tofu
+
+    joined = " ".join(hf.build_ssh_command(cfg)) + " ".join(tofu.build_probe_command(cfg, "target", "/tmp/k")) \
+        + " ".join(tofu.build_probe_command(cfg, "jump", "/tmp/k"))
     assert "SENTINEL" not in joined
 
 
-def test_registration_command_disables_every_auth_method_on_the_hop():
-    cfg = {"transport": "ssh", "address": "192.0.2.20", "port": 22, "username": "u",
-           "jump_host_config": {"address": "192.0.2.1", "port": 22, "username": "j"}}
-    cmd = hf.build_ssh_command(cfg, kh="/tmp/k", target_policy="ask", target_label="ED25519", no_auth_hop="target")
-    for opt in ("PreferredAuthentications=none", "PasswordAuthentication=no", "PubkeyAuthentication=no",
-                "GSSAPIAuthentication=no", "NumberOfPasswordPrompts=0"):
-        assert opt in cmd
+def test_probe_command_disables_every_auth_method_uses_dummy_user_and_no_multiplexing():
+    from network_lab_mcp import hostkey_tofu as tofu
+
+    cfg = {"transport": "ssh", "address": "192.0.2.20", "port": 22, "username": "realuser",
+           "jump_host_config": {"address": "192.0.2.1", "port": 22, "username": "jumpuser"}}
+    cmd = tofu.build_probe_command(cfg, "target", "/tmp/probe_kh")
+    for key, want in (("PreferredAuthentications", "none"), ("PasswordAuthentication", "no"), ("PubkeyAuthentication", "no"),
+                      ("GSSAPIAuthentication", "no"), ("KbdInteractiveAuthentication", "no"), ("HostbasedAuthentication", "no"),
+                      ("NumberOfPasswordPrompts", "0"), ("IdentityAgent", "none"), ("BatchMode", "yes"),
+                      ("UpdateHostKeys", "no"), ("HashKnownHosts", "no"), ("CheckHostIP", "no"), ("VerifyHostKeyDNS", "no"),
+                      ("ControlMaster", "no"), ("ControlPath", "none"), ("ControlPersist", "no"),
+                      ("SessionType", "none"), ("PermitLocalCommand", "no"), ("StrictHostKeyChecking", "accept-new")):
+        assert _opt_values(cmd, key) == [want], key
+    assert "-N" in cmd and "-T" in cmd and any(o.startswith("ConnectTimeout=") for o in cmd)
+    assert cmd[-1] == "nlm-hostkey-probe@192.0.2.20" and "realuser" not in " ".join(cmd).split("ProxyCommand=")[0]
+    (khv,) = _opt_values(cmd, "UserKnownHostsFile")
+    assert khv == '"/tmp/probe_kh"'  # only the temporary file: never the product or user file
     proxy = next(a for a in cmd if a.startswith("ProxyCommand="))
-    assert "PreferredAuthentications=none" not in proxy  # the jump hop may authenticate
-    assert "HostKeyAlgorithms=ssh-ed25519" in cmd
+    assert "jumpuser@192.0.2.1" in proxy and "StrictHostKeyChecking=yes" in proxy
+    assert "PreferredAuthentications" not in proxy and "nlm-hostkey-probe" not in proxy  # jump hop: real auth, strict
+    jump_probe = tofu.build_probe_command(cfg, "jump", "/tmp/probe_kh")
+    assert jump_probe[-1] == "nlm-hostkey-probe@192.0.2.1" and not any(a.startswith("ProxyCommand=") for a in jump_probe)
 
 
-def test_rsa_registration_never_enables_sha1():
-    cmd = hf.build_ssh_command({"transport": "ssh", "address": "192.0.2.20", "port": 22, "username": "u"},
-                               kh="/tmp/k", target_policy="ask", target_label="RSA")
-    alg = next(a for a in cmd if a.startswith("HostKeyAlgorithms="))
-    assert alg == "HostKeyAlgorithms=rsa-sha2-512,rsa-sha2-256"
-
-
-def test_noninteractive_cli_gets_no_coordinator():
+def test_noninteractive_cli_still_gets_a_coordinator_without_approval_channel():
     from network_lab_mcp.cli import main as climain
 
-    assert climain._make_hostkey_coordinator() is None  # pytest stdin/stdout are not a TTY
+    import inspect
+
+    co = inspect.unwrap(climain._make_hostkey_coordinator)()  # the real factory; pytest stdin/stdout are not a TTY
+    assert co.channel is None  # first-use TOFU needs no human; replacement review is impossible without a TTY
+    assert co.recover_changed(hf.HostKeyChanged("R", "target", "192.0.2.20", 22), {"transport": "ssh", "address": "192.0.2.20"}) is False
 
 
 # ---- state machine -----------------------------------------------------------

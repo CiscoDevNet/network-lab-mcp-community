@@ -1969,16 +1969,16 @@ def render_discovery_summary(result: "discovery.DiscoveryResult") -> str:
 
 
 def _make_hostkey_coordinator():
-    """Interactive human CLI only: a host-key coordinator that reads approvals
-    from the controlling terminal. Returns None when no safe interactive
-    terminal exists (then Discovery keeps its previous non-interactive
-    behaviour and no approval/removal of any host key is possible)."""
+    """Human CLI only. First-use host keys are registered automatically (TOFU,
+    no input). The controlling-terminal channel, used only to confirm the
+    *replacement* of an already registered key, exists only when a safe
+    interactive terminal does; without one a changed key simply stops the run."""
     from network_lab_mcp import hostkey_approval, hostkey_flow
 
     try:
         channel = hostkey_approval.DevTtyChannel()
     except hostkey_approval.ApprovalError:
-        return None
+        channel = None
     return hostkey_flow.Coordinator(channel)
 
 
@@ -2005,8 +2005,8 @@ def _run_discover_topology(session: cfgmod.CliSession, include_l3: bool) -> None
                     changed, changed.device_config
                 ):
                     raise discovery.DiscoveryError(
-                        f"{changed}\nNo host key was changed. Verify the new key through a trusted channel, or "
-                        "run `discover topology` again from an interactive terminal to review replacement."
+                        f"{changed}\nNo host key was changed. Verify the new key through a trusted channel, then run "
+                        "`discover topology` again from an interactive terminal to review its replacement."
                     ) from None
                 print("Re-running discovery with the replaced host key...")
         removed_devices, removed_links = session.discovery_removals(result)
@@ -2024,7 +2024,7 @@ def _run_discover_topology(session: cfgmod.CliSession, include_l3: bool) -> None
     except (discovery.DiscoveryError, lab.LabConfigError) as exc:
         raise discovery.DiscoveryError(f"{exc}\n% Topology candidate not updated.") from exc
     finally:
-        if coordinator is not None:
+        if coordinator is not None and coordinator.channel is not None:
             coordinator.channel.close()
     print(render_discovery_summary(result))
 

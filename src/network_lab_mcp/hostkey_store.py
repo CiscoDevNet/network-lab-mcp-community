@@ -5,10 +5,10 @@ All OpenSSH interaction uses argument lists (never a shell) and the pinned
 ``ssh-keygen`` (the forced test wrapper when an isolated runtime is
 installed, otherwise the system binary resolved to an absolute path).
 
-This module never *adds* keys: only OpenSSH itself registers a host key,
-after the caller has verified the presented key against a human-approved
-expectation. It only (a) classifies state, (b) backs up, (c) removes the
-entries of exactly one host identifier after a human approved the removal.
+Adding a key is `hostkey_tofu`'s job (TOFU of an unknown host, product file
+only). This module classifies state, takes the product known_hosts lock,
+backs up, and removes the entries of exactly one host identifier after a
+human approved the replacement (human CLI only).
 """
 
 from __future__ import annotations
@@ -219,7 +219,7 @@ class KnownHostsLock:
     """In-process + flock exclusion for one known_hosts file (lock file lives
     in `lock_dir`, never next to the user's known_hosts)."""
 
-    wait_seconds = 30.0
+    wait_seconds = 90.0  # >= one probe (30 s) plus registration of the process that holds it
 
     def __init__(self, known_hosts: str, lock_dir: str):
         self._key = os.path.realpath(known_hosts)
@@ -236,10 +236,15 @@ class KnownHostsLock:
             os.makedirs(self._lock_dir, mode=0o700, exist_ok=True)
             name = hashlib.sha256(self._key.encode()).hexdigest()[:16] + ".lock"
             self._fd = os.open(os.path.join(self._lock_dir, name), os.O_CREAT | os.O_RDWR, 0o600)
-            try:
-                fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                raise HostKeyStoreError("known_hosts is locked by another process") from None
+            deadline = time.monotonic() + self.wait_seconds
+            while True:  # another process may hold it for one probe; wait, but never forever
+                try:
+                    fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise HostKeyStoreError("known_hosts is locked by another process") from None
+                    time.sleep(0.05)
         except BaseException:
             self._release()
             raise

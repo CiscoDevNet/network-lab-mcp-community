@@ -181,8 +181,9 @@ def test_direct_ssh_has_no_proxyjump_argv():
         {"transport": "ssh", "address": "192.0.2.11", "port": 22, "username": "cisco"}
     )
     assert transport == "ssh"
-    assert command == ["ssh", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-p", "22",
-                       "cisco@192.0.2.11"]
+    assert command == ["ssh", *terminal._strict_host_key_opts(), "-p", "22", "cisco@192.0.2.11"]
+    assert command[1:5] == ["-o", "StrictHostKeyChecking=yes", "-o", command[4]] and command[4].startswith("UserKnownHostsFile=")
+    assert "UpdateHostKeys=no" in command and "ControlMaster=no" in command and "ControlPath=none" in command
     assert "-J" not in command
 
 
@@ -309,7 +310,8 @@ def test_terminal_open_proxyjump_argv_construction_unaffected_by_discovery_login
     # The jump host has a configured password (answered by Network Lab MCP),
     # so host keys must already be trusted: StrictHostKeyChecking=yes.
     proxy = next(a for a in command if a.startswith("ProxyCommand="))
-    assert command[:5] == ["ssh", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no"]
+    n = 1 + len(terminal._strict_host_key_opts())
+    assert command[:n] == ["ssh", *terminal._strict_host_key_opts()] and "UpdateHostKeys=no" in command
     assert command[-3:] == ["-p", "22", "target-user@192.0.2.11"]
     # the jump hop gets its own strict policy (it does not inherit one with -J)
     assert "StrictHostKeyChecking=yes" in proxy and "-W %h:%p" in proxy and "jump-user@192.0.2.10" in proxy

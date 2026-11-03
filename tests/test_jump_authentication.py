@@ -130,4 +130,6 @@ def test_strict_host_key_for_every_hop_with_or_without_jump_password():
     # policy: strict on every hop regardless of password configuration
     assert "StrictHostKeyChecking=yes" in cmd and "accept-new" not in " ".join(cmd)
     joined = " ".join(terminal._build_transport_command(_cfg())[1])
-    assert "SENTINEL" not in joined and "UserKnownHostsFile" not in joined
+    assert "SENTINEL" not in joined
+    # the product + user known_hosts are named explicitly (never /dev/null or "none")
+    assert "UserKnownHostsFile=" in joined and "/dev/null" not in joined and "UserKnownHostsFile=none" not in joined

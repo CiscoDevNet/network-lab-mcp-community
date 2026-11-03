@@ -112,7 +112,7 @@ class PtyChannel:
         self._stop = True
 
 
-CTX = ha.PromptContext(device="Router1", hop="target", host="192.0.2.20", port=22, operation="register")
+from network_lab_mcp import hostkey_flow as hf
 
 
 def _typed(channel, lines, delay=0.15):
@@ -123,50 +123,39 @@ def _typed(channel, lines, delay=0.15):
     threading.Thread(target=run, daemon=True).start()
 
 
-def test_prompt_happy_path_and_stale_input_flushed():
+def test_confirm_replace_accepts_only_a_fresh_exact_yes_and_discards_stale_input():
     ch = PtyChannel()
-    ch.type("ED25519\n" + FP + "\n3\nyes\n")  # arrives BEFORE the prompt: must be discarded
+    ch.type("yes\n")  # arrives BEFORE the prompt (pre-typed / replayed): must be discarded
     time.sleep(0.2)
-    _typed(ch, ["ECDSA", FP, "3", "yes"])
-    got = ha.collect_expected_key(ch, CTX, timeout=5)
+    assert hf.confirm_replace(ch, timeout=0.6) is False  # nothing fresh was typed
+    ch.type("yes\n")
+    time.sleep(0.2)
+    _typed(ch, ["yes"])
+    assert hf.confirm_replace(ch, timeout=5) is True
+    assert b"Replace the trusted host key? [yes/no] (default: no): " in ch.out
     ch.close()
-    assert got == ("ECDSA", FP)
 
 
-@pytest.mark.parametrize("script", [
-    [""], ["ED25519", ""], ["ED25519", FP, ""], ["ED25519", FP, "1"], ["ED25519", FP, "3", ""],
-    ["ED25519", FP, "3", "y"], ["ED25519", FP, "3", "YES"], ["DSA"], ["ED25519", "MD5:aa"], ["ED25519", FP, "9"],
-])
-def test_prompt_cancels_on_anything_but_explicit_approval(script):
+@pytest.mark.parametrize("script", [[""], ["no"], ["y"], ["YES"], ["Yes"], [" "], ["1"], ["yes please"], ["yess"]])
+def test_confirm_replace_cancels_on_anything_but_exact_yes(script):
     ch = PtyChannel()
     _typed(ch, script, delay=0.05)
-    assert ha.collect_expected_key(ch, CTX, timeout=1.5) is None
+    assert hf.confirm_replace(ch, timeout=1.5) is False
     ch.close()
 
 
-def test_prompt_timeout_cancels():
+def test_confirm_replace_timeout_and_eof_cancel():
     ch = PtyChannel()
     t0 = time.monotonic()
-    assert ha.collect_expected_key(ch, CTX, timeout=0.5) is None
+    assert hf.confirm_replace(ch, timeout=0.5) is False
     assert time.monotonic() - t0 < 3
+    ch.type("\x04")  # Ctrl-D: EOF on a canonical-mode terminal
+    assert hf.confirm_replace(ch, timeout=0.5) is False
     ch.close()
 
 
-def test_prompt_details_option_then_approve():
-    ch = PtyChannel()
-    _typed(ch, ["ED25519", FP, "2", "3", "yes"], delay=0.08)
-    assert ha.collect_expected_key(ch, CTX, timeout=5) == ("ED25519", FP)
-    assert FP.encode() in ch.out
-    ch.close()
-
-
-def test_prompt_never_echoes_control_chars_from_host():
-    ch = PtyChannel()
-    evil = ha.PromptContext(device="R\x1b[2J", hop="target", host="h\x1b]0;x\x07", port=22, operation="register")
-    _typed(ch, [""], delay=0.05)
-    ha.collect_expected_key(ch, evil, timeout=1)
-    assert b"\x1b[2J" not in ch.out and b"\x1b]0" not in ch.out
-    ch.close()
+def test_prompt_text_cannot_carry_control_characters_from_the_host():
+    assert "\x1b" not in ha.sanitize_display("h\x1b]0;x\x07") and "\x07" not in ha.sanitize_display("h\x1b]0;x\x07")
 
 
 def test_devtty_channel_refuses_non_tty_stdio(monkeypatch):

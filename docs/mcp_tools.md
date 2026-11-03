@@ -170,8 +170,13 @@ for either transport: an SSH password prompt from the target device itself
 (never a jump host's own prompt — that hop must use non-interactive
 key/agent authentication), or a classic-IOS-style Telnet `Username:`/
 `Password:` sequence. Key/agent SSH authentication that succeeds without
-ever showing a password prompt is unaffected. A host-key confirmation
-prompt, or any other interactive step this cannot safely resolve on its own,
+ever showing a password prompt is unaffected. Before the connection starts,
+an SSH hop (device or jump host) of this access-info device that is not yet
+registered gets its host key registered automatically (lab TOFU: an
+authentication-free probe, key saved before any credential is sent; the result
+is only in `logs/hostkey-tofu.log` and the return value is unchanged); a changed
+or other-type key is refused and never replaced by this tool. Any other
+interactive step this cannot safely resolve on its own,
 is still left for `terminal_read()`/`terminal_send()` to handle. No
 credential value is ever returned by this tool or any other, and this
 automated authentication is fully idempotent — calling `terminal_open()`
@@ -290,7 +295,7 @@ it with one of these stable reasons:
   nothing is sent (fail closed).
 
 Input that is sent while a session is still waiting at a login prompt,
-host-key confirmation, or similar interactive step is unaffected: those
+or a similar interactive step is unaffected: those
 sessions are alive and ready.
 
 **Error behavior**: raises a tool error when the device is not present in
@@ -433,6 +438,6 @@ For an ssh device with a jump host, `terminal_open` completes the jump-server
 and target password prompts privately (once each). Telnet devices with a jump
 host are opened as one logical session (internal SSH tunnel + telnet); `terminal_list` shows one entry,
 `terminal_close` ends both, and `terminal_send` is refused once either ends. Errors are stable strings such as
-`telnet client not found`, `host key verification failed`, `jump host authentication failed`,
+`telnet client not found`, `host key verification failed`, `[TOFU_PROBE_ERROR]`/`[TOFU_STORAGE_ERROR]`/`[TOFU_IDENTITY_ERROR]` (first-use registration failed; nothing was sent), `jump host authentication failed`,
 `tunnel ownership could not be verified`, `telnet via jump host is not enabled`. The tool set is unchanged
 (seven tools).

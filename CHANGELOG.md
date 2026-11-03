@@ -1,5 +1,55 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **SSH host keys: lab TOFU (trust on first use) replaces the typed approval.** A host key that no known_hosts file
+  has an entry for is registered automatically, for `discover topology` and managed terminals, with no key-type or
+  fingerprint input. Method: an authentication-free OpenSSH probe (dummy user `nlm-hostkey-probe`, only the `none`
+  method, no multiplexing, `-N -T`, temporary known_hosts, at most one probe per unregistered host, no retry), the
+  one negotiated key validated and saved in the **product known_hosts** (macOS
+  `~/Library/Application Support/Network Lab MCP/ssh/known_hosts`, Linux `~/.local/state/network-lab-mcp/ssh/known_hosts`,
+  `0700`/`0600`, dedicated lock file, `fsync`, read back and compared) **before any credential is sent**, then every
+  credential-carrying hop runs `StrictHostKeyChecking=yes` with the product and user known_hosts. The user's own
+  known_hosts is read, never modified. Jump server and target are registered independently; the target probe goes
+  through the verified, authenticating jump hop and counts toward the existing jump-password budget.
+- **Replacing a registered key is unchanged in spirit and still human-only:** a changed key or a key of another type
+  (`KEY_TYPE_MISMATCH`) is refused before any credential; the CLI shows old and new fingerprints and asks
+  `Replace the trusted host key? [yes/no] (default: no):` on `/dev/tty`, then backs up, removes only that host's
+  entries from the product known_hosts and registers the new key. Keys in the user's or the system known_hosts are
+  never edited (a manual `ssh-keygen -R` is shown).
+- Managed terminals and Discovery now use `ControlMaster=no`, `ControlPath=none`, `ControlPersist=no` and
+  `CheckHostIP=no` on every credential-carrying hop, so no existing master connection can stand in for host-key
+  verification.
+- Every TOFU result is logged to `logs/hostkey-tofu.log` and printed by the CLI with the SHA256 fingerprint. New error
+  classes: `TOFU_PROBE_ERROR`, `TOFU_STORAGE_ERROR`, `TOFU_IDENTITY_ERROR`, `HOST_KEY_ALGORITHM_MISMATCH`,
+  `SSH_KEX_MISMATCH`, `JUMP_AUTH_ERROR`. MCP tool schemas and return values are unchanged (seven tools).
+- Test isolation: the forced OpenSSH wrapper accepts the new probe/strict options only with their safe values.
+
+### Removed
+- The typed key-type/fingerprint pre-approval prompt and the `StrictHostKeyChecking=ask` registration connection.
+
+### Security notes
+- TOFU cannot prove the first key authentic; a man in the middle of the first connection is trusted (accepted for
+  labs). The probe can be counted as a failed login by a device or its AAA and, on some platforms, can trigger login
+  rate limits or source blocking; **effects on AAA and login blocking are not verified on real equipment**. If a device cannot be probed, register its key
+  manually once.
+- Local commands in your ssh_config (`Match exec`, `ProxyCommand`, `LocalCommand`) run during probes as for any `ssh`.
+- Automated tests ran against isolated loopback OpenSSH 10.3 on macOS (full suite: 2220 passed, 2 skipped).
+
+### Real-lab verification (macOS, maintainer-run, generic description)
+- Topology Discovery through an SSH jump server ran twice. First run: 9 of 9 devices connected (8 IOS XR, 1 IOS,
+  including a Telnet-only device), 7 unregistered host keys were registered automatically by TOFU (5 ED25519, 1 RSA,
+  1 ECDSA) with no key-type or fingerprint input; 40 LLDP and 5 CDP observations, 22 managed links, 1 unresolved
+  neighbor. Second run: 9 of 9 connected, no TOFU registration shown, identical counts.
+- The CLI output alone does not prove that no probe ran on the second run or that `StrictHostKeyChecking=yes` was
+  applied on every hop; that rests on the code and the automated tests.
+- **Still unverified:** the jump server's own first-use TOFU registration (a successful connection through it is not the
+  same thing), refusal of a changed real-device key, CLI re-registration of a real-device key, effects on AAA
+  failed-login counters, TACACS+/RADIUS, `login block-for` or source blocking, TOFU on Linux, legacy SSH algorithms on
+  real devices, all SSH authentication methods and failure patterns, and all failure handling of SSH local port
+  forwarding for Telnet.
+
 ## 0.3.0 — 2026-11-02
 
 ### Added

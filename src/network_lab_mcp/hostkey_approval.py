@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Human pre-approval of an expected SSH host key (CLI `discover topology`).
+"""Human approval boundary for replacing a registered SSH host key (CLI `discover topology`).
 
 Nothing in this module is reachable from MCP or from managed terminals: it
 is imported only by the human CLI and by the Discovery host-key coordinator.
@@ -197,74 +197,3 @@ class DevTtyChannel:
             os.close(self._fd)
         except OSError:
             pass
-
-
-@dataclass
-class PromptContext:
-    device: str
-    hop: str
-    host: str
-    port: int
-    operation: str  # "register" | "replace"
-    note: str = ""
-
-
-def collect_expected_key(channel: TtyChannel, ctx: PromptContext, *, timeout: float = INPUT_TIMEOUT_SECONDS) -> tuple[str, str] | None:
-    """Interactive pre-approval. Returns (key_label, fingerprint) or None
-    (Cancel). Every unexpected input, EOF or timeout cancels. Input that was
-    already buffered before the prompt is discarded first."""
-    deadline = time.monotonic() + timeout
-
-    def ask(prompt: str) -> str | None:
-        left = deadline - time.monotonic()
-        if left <= 0:
-            return None
-        channel.write(prompt)
-        line = channel.readline(left)
-        return None if line is None else line.strip()
-
-    d, h, p = sanitize_display(ctx.device), sanitize_display(ctx.host), int(ctx.port)
-    channel.flush_input()
-    title = (
-        "The SSH host key requires verification." if ctx.operation == "register"
-        else "The SSH host key has changed (or must be replaced)."
-    )
-    channel.write(
-        f"\nDevice: {d}\nSSH hop: {sanitize_display(ctx.hop)}\nHost: {h}\nPort: {p}\n\n{title}\n"
-        "Obtain the expected host key fingerprint from the device console or another\n"
-        "trusted source (not from this connection).\n\n"
-    )
-    label_in = ask("Key type [ED25519/ECDSA/RSA]: ")
-    if not label_in:
-        return None
-    try:
-        label = parse_key_type(label_in)
-    except ApprovalError:
-        channel.write("% Unsupported key type. Cancelled.\n")
-        return None
-    fp_in = ask("Expected SHA256 fingerprint: ")
-    if not fp_in:
-        return None
-    try:
-        fp = parse_fingerprint(fp_in)
-    except ApprovalError as exc:
-        channel.write(f"% {exc}. Cancelled.\n")
-        return None
-    while True:
-        choice = ask(
-            "\nSelect an action:\n  1. Cancel (default)\n  2. Show verification details\n"
-            "  3. Approve expected host key\n\nChoice [1]: "
-        )
-        if choice in (None, "", "1"):
-            return None
-        if choice == "2":
-            channel.write(f"Key type: {label}\nFingerprint: {fp}\nHost: {h}:{p} ({sanitize_display(ctx.hop)})\n")
-            continue
-        if choice == "3":
-            break
-        return None
-    final = ask("Final confirmation [yes/no]: ")
-    if final != "yes":
-        return None
-    channel.write("Approval recorded for this discovery operation.\n")
-    return label, fp
