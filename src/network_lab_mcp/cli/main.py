@@ -2542,6 +2542,13 @@ def _make_key_bindings(session: cfgmod.CliSession) -> KeyBindings:
     @kb.add("tab")
     def _(event) -> None:
         buffer = event.current_buffer
+        # IOS XR: Tab on an empty (or whitespace-only) line is a silent
+        # no-op -- no candidate list, no bell, no redraw. Judged on the
+        # whole buffer so a cursor moved to the start of existing text
+        # still completes as before. "reference <Tab>" is not empty and is
+        # unaffected. The buffer is never normalized here.
+        if not buffer.text.strip():
+            return
         text = buffer.document.text_before_cursor
         result = grammar.complete(session.mode, text, build_context(session))
 

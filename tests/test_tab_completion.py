@@ -311,9 +311,10 @@ class _TabFlowHarness:
     headlessly, one keypress at a time, reading back the live buffer text
     and whatever got printed via run_in_terminal() since the last read."""
 
-    def __init__(self, lab_root):
+    def __init__(self, lab_root, configure: bool = True):
         self.session = cfgmod.CliSession(lab_root)
-        self.session.enter_configure()
+        if configure:
+            self.session.enter_configure()
         self._buf = io.StringIO()
         self._redirect = contextlib.redirect_stdout(self._buf)
         self._pipe_input_cm = create_pipe_input()
@@ -360,7 +361,7 @@ class _TabFlowHarness:
         self._pipe_input_cm.__exit__(None, None, None)
 
 
-def _run_tab_flow(lab_root, scenario) -> None:
+def _run_tab_flow(lab_root, scenario, configure: bool = True) -> None:
     """Runs `scenario(harness)` (an async callable containing the actual
     steps/assertions) against a fresh `_TabFlowHarness`, via `anyio.run()`
     -- the same sync-test-function/`anyio.run()`-body convention
@@ -369,7 +370,7 @@ def _run_tab_flow(lab_root, scenario) -> None:
     pytest-anyio is installed or configured here)."""
 
     async def body() -> None:
-        harness = _TabFlowHarness(lab_root)
+        harness = _TabFlowHarness(lab_root, configure=configure)
         try:
             await scenario(harness)
         finally:
@@ -506,3 +507,119 @@ def test_reference_pa_question_mark_shows_help_only(tab_flow_lab_root):
         assert printed.count("legacyrouter_tgn") == 1
 
     _run_tab_flow(tab_flow_lab_root, scenario)
+
+
+# ==========================================================================
+# IOS XR empty-input Tab: a silent no-op (empty or whitespace-only line)
+# ==========================================================================
+
+
+@pytest.fixture()
+def ref_lab_root(tab_flow_lab_root):
+    for name in ("ref_alpha_one", "ref_alpha_two", "ref_beta", "ref_gamma"):
+        _write_yaml(tab_flow_lab_root / "references" / f"{name}.yaml", {"name": name})
+    return tab_flow_lab_root
+
+
+@pytest.mark.parametrize("configure", [True, False], ids=["config", "exec"])
+def test_empty_input_tab_is_silent_noop_even_repeated(ref_lab_root, configure):
+    async def scenario(h):
+        for _ in range(4):
+            assert await h.press_tab() == ""
+            assert h.buffer_text() == ""
+
+    _run_tab_flow(ref_lab_root, scenario, configure=configure)
+
+
+@pytest.mark.parametrize("configure", [True, False], ids=["config", "exec"])
+def test_whitespace_only_tab_preserves_buffer_and_cursor(ref_lab_root, configure):
+    async def scenario(h):
+        await h.type_text("   ")
+        assert await h.press_tab() == ""
+        assert h.buffer_text() == "   "
+        assert h.prompt_session.default_buffer.cursor_position == 3
+
+    _run_tab_flow(ref_lab_root, scenario, configure=configure)
+
+
+def test_command_name_single_candidate_still_completes(ref_lab_root):
+    async def scenario(h):
+        await h.type_text("ref")
+        assert await h.press_tab() == ""
+        assert h.buffer_text() == "reference"
+
+    _run_tab_flow(ref_lab_root, scenario)
+
+
+def test_definition_name_single_candidate_still_completes(ref_lab_root):
+    async def scenario(h):
+        await h.type_text("reference ref_b")
+        assert await h.press_tab() == ""
+        assert h.buffer_text() == "reference ref_beta"
+
+    _run_tab_flow(ref_lab_root, scenario)
+
+
+def test_ambiguous_definition_name_lists_every_tab_and_keeps_input(ref_lab_root):
+    async def scenario(h):
+        await h.type_text("reference ref_alpha_")
+        for _ in range(3):
+            printed = await h.press_tab()
+            assert "ref_alpha_one" in printed and "ref_alpha_two" in printed
+            assert printed.count("ref_alpha_one") == 1
+            assert h.buffer_text() == "reference ref_alpha_"
+
+    _run_tab_flow(ref_lab_root, scenario)
+
+
+@pytest.mark.parametrize("command", ["reference ", "topology ", "scenario "])
+def test_command_plus_space_is_not_empty_and_still_completes(ref_lab_root, command):
+    async def scenario(h):
+        await h.type_text(command)
+        printed = await h.press_tab()
+        # Either extended to a common prefix or listed candidates -- never a no-op.
+        assert printed != "" or h.buffer_text() != command
+
+    _run_tab_flow(ref_lab_root, scenario)
+
+
+def test_unknown_prefix_tab_changes_nothing(ref_lab_root):
+    async def scenario(h):
+        await h.type_text("reference zzz")
+        assert await h.press_tab() == ""
+        assert h.buffer_text() == "reference zzz"
+
+    _run_tab_flow(ref_lab_root, scenario)
+
+
+def test_backspace_then_tab_still_completes(ref_lab_root):
+    async def scenario(h):
+        await h.type_text("reference ref_bx")
+        await h.type_text("\x7f")
+        await h.press_tab()
+        assert h.buffer_text() == "reference ref_beta"
+
+    _run_tab_flow(ref_lab_root, scenario)
+
+
+def test_cursor_at_start_of_existing_text_still_completes_as_before(ref_lab_root):
+    async def scenario(h):
+        await h.type_text("ref")
+        h.prompt_session.default_buffer.cursor_position = 0
+        printed = await h.press_tab()
+        # Not an empty line: the pre-existing (non-no-op) path still runs.
+        assert h.buffer_text().endswith("ref")
+        assert printed != "" or h.buffer_text() != "ref"
+
+    _run_tab_flow(ref_lab_root, scenario)
+
+
+def test_question_mark_help_on_empty_line_unchanged(ref_lab_root):
+    async def scenario(h):
+        h.pipe_input.send_text("?")
+        await h.settle()
+        printed = h._buf.getvalue()
+        assert "running-config" in printed
+        assert "Create or edit" in printed or "definition" in printed.lower() or "Enter" in printed or "Show" in printed
+
+    _run_tab_flow(ref_lab_root, scenario)
