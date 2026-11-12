@@ -38,6 +38,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import Window
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.utils import get_cwidth
 
 import network_lab_mcp
 from network_lab_mcp import discovery
@@ -2509,6 +2510,24 @@ def _tab_multi_candidate_extension(result: grammar.CompletionResult) -> Optional
     return common_prefix if len(common_prefix) > len(result.replace_prefix) else None
 
 
+def _format_candidate_columns(candidates: list[str], width: int) -> list[str]:
+    """Lay candidates out row-major in aligned columns, IOS XR style:
+    two-space indent, two spaces between columns, every line shorter than
+    `width` (the last terminal column is left free so no line auto-wraps).
+    Display width, not len(), so wide characters stay aligned. A candidate
+    wider than the terminal gets a row of its own."""
+    if not candidates:
+        return []
+    cell = max(get_cwidth(c) for c in candidates) + 2
+    per_row = max(1, (width - 1) // cell)
+    rows = []
+    for start in range(0, len(candidates), per_row):
+        chunk = candidates[start : start + per_row]
+        padded = [c + " " * (cell - get_cwidth(c)) for c in chunk[:-1]] + [chunk[-1]]
+        rows.append("  " + "".join(padded))
+    return rows
+
+
 def _make_key_bindings(session: cfgmod.CliSession) -> KeyBindings:
     kb = KeyBindings()
 
@@ -2551,6 +2570,13 @@ def _make_key_bindings(session: cfgmod.CliSession) -> KeyBindings:
             return
         text = buffer.document.text_before_cursor
         result = grammar.complete(session.mode, text, build_context(session))
+        # An empty token under completion ("reference <Tab>", "show <Tab>")
+        # is also a silent no-op: Tab only completes what has been typed;
+        # `?` is the way to list what could come next. The token is the
+        # grammar's own `replace_prefix` (already cursor- and trailing-
+        # space-aware), never a re-split of the buffer.
+        if not result.replace_prefix:
+            return
 
         if len(result.candidates) == 1:
             candidate = result.candidates[0]
@@ -2577,10 +2603,16 @@ def _make_key_bindings(session: cfgmod.CliSession) -> KeyBindings:
                 buffer.insert_text(extension)
                 return
 
+            line = f"{prompt_text(session)}{buffer.text}"
+            columns = event.app.output.get_size().columns
+
             def _show() -> None:
-                print()
-                for candidate in result.candidates:
-                    print(f"  {candidate}")
+                # Keep the line being edited in the scrollback (IOS XR
+                # style), then the candidates in aligned columns; the
+                # prompt and buffer are redrawn by prompt_toolkit afterwards.
+                print(line)
+                for row in _format_candidate_columns(result.candidates, columns):
+                    print(row)
 
             run_in_terminal(_show)
         else:

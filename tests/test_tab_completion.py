@@ -572,13 +572,29 @@ def test_ambiguous_definition_name_lists_every_tab_and_keeps_input(ref_lab_root)
     _run_tab_flow(ref_lab_root, scenario)
 
 
-@pytest.mark.parametrize("command", ["reference ", "topology ", "scenario "])
-def test_command_plus_space_is_not_empty_and_still_completes(ref_lab_root, command):
+@pytest.mark.parametrize("command", ["reference ", "topology ", "scenario ", "reference", "show "])
+def test_empty_completion_token_is_silent_noop(ref_lab_root, command):
+    """No characters typed for the token under completion (a trailing
+    space after a complete command word, or nothing new to add): Tab does
+    nothing -- `?` is how the next argument's candidates are listed."""
+
     async def scenario(h):
         await h.type_text(command)
-        printed = await h.press_tab()
-        # Either extended to a common prefix or listed candidates -- never a no-op.
-        assert printed != "" or h.buffer_text() != command
+        assert await h.press_tab() == ""
+        assert h.buffer_text() == command
+        assert h.prompt_session.default_buffer.cursor_position == len(command)
+
+    _run_tab_flow(ref_lab_root, scenario)
+
+
+@pytest.mark.parametrize("command", ["reference ", "topology ", "scenario "])
+def test_question_mark_still_lists_after_empty_token(ref_lab_root, command):
+    async def scenario(h):
+        await h.type_text(command)
+        h.pipe_input.send_text("?")
+        await h.settle()
+        printed = h._buf.getvalue()
+        assert "<name>" in printed
 
     _run_tab_flow(ref_lab_root, scenario)
 
@@ -602,16 +618,47 @@ def test_backspace_then_tab_still_completes(ref_lab_root):
     _run_tab_flow(ref_lab_root, scenario)
 
 
-def test_cursor_at_start_of_existing_text_still_completes_as_before(ref_lab_root):
+def test_cursor_before_token_start_is_noop_but_inside_token_completes(ref_lab_root):
     async def scenario(h):
-        await h.type_text("ref")
-        h.prompt_session.default_buffer.cursor_position = 0
+        await h.type_text("reference ref_beta")
+        buf = h.prompt_session.default_buffer
+        buf.cursor_position = len("reference ")  # token under cursor is empty
+        assert await h.press_tab() == ""
+        assert buf.text == "reference ref_beta" and buf.cursor_position == len("reference ")
+        buf.cursor_position = len("reference ref_alpha"[:14])  # after "ref_" -> ambiguous
         printed = await h.press_tab()
-        # Not an empty line: the pre-existing (non-no-op) path still runs.
-        assert h.buffer_text().endswith("ref")
-        assert printed != "" or h.buffer_text() != "ref"
+        assert "ref_alpha_one" in printed
+        assert buf.text == "reference ref_beta" and buf.cursor_position == 14
 
     _run_tab_flow(ref_lab_root, scenario)
+
+
+def test_ambiguous_tab_keeps_input_line_and_aligns_columns(ref_lab_root):
+    async def scenario(h):
+        await h.type_text("reference ref_alpha_")
+        printed = await h.press_tab()
+        assert printed == "network-lab(config)# reference ref_alpha_\n  ref_alpha_one  ref_alpha_two\n"
+        assert h.buffer_text() == "reference ref_alpha_"
+
+    _run_tab_flow(ref_lab_root, scenario)
+
+
+@pytest.mark.parametrize("width", [40, 80, 120])
+def test_candidate_columns_fit_width_and_keep_order(width):
+    names = [f"wide_item_{n:02d}" for n in range(8)] + ["sample_packets", "sample_traffic"]
+    rows = climain._format_candidate_columns(names, width)
+    assert all(len(r) < width for r in rows)
+    assert all(r.startswith("  ") and r == r.rstrip() for r in rows)
+    assert " ".join(" ".join(rows).split()).split(" ") == names
+    cell = max(map(len, names)) + 2
+    assert len(rows) == -(-len(names) // max(1, (width - 1) // cell))
+
+
+def test_candidate_columns_wide_chars_and_oversize_and_empty():
+    assert climain._format_candidate_columns([], 80) == []
+    rows = climain._format_candidate_columns(["日本語", "ab"], 80)
+    assert rows == ["  日本語  ab"]
+    assert climain._format_candidate_columns(["x" * 100, "y"], 40) == ["  " + "x" * 100, "  y"]
 
 
 def test_question_mark_help_on_empty_line_unchanged(ref_lab_root):

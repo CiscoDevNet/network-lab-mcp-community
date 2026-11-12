@@ -24,6 +24,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from vt_screen import Screen
+
 SRC = str(Path(__file__).resolve().parent.parent / "src")
 DRIVER = (
     "import sys, pathlib\n"
@@ -42,7 +44,7 @@ def _write(path: Path, data) -> None:
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
 
 
-def _make_lab(tmp: Path) -> Path:
+def _make_lab(tmp: Path, extra_refs: tuple[str, ...] = ()) -> Path:
     root = tmp / "lab"
     _write(root / "settings.yaml", {"active_access_info": "sample_lab", "active_topology": "sample_lab",
                                     "active_scenario": "ref_beta", "active_references": ["ref_beta"]})
@@ -52,15 +54,16 @@ def _make_lab(tmp: Path) -> Path:
     _write(root / "access-info" / "sample_lab.yaml",
            {"name": "sample_lab", "devices": {"R1": {"type": "iosxr", "address": "192.0.2.11",
                                                      "transport": "ssh", "port": 22}}})
-    for name in ("ref_alpha_one", "ref_alpha_two", "ref_beta", "ref_gamma"):
+    for name in ("ref_alpha_one", "ref_alpha_two", "ref_beta", "ref_gamma", *extra_refs):
         _write(root / "references" / f"{name}.yaml", {"name": name, "description": "d"})
         _write(root / "scenarios" / f"{name}.yaml", {"name": name, "description": "d"})
     return root
 
 
 class _Cli:
-    def __init__(self, tmp: Path) -> None:
-        root = _make_lab(tmp)
+    def __init__(self, tmp: Path, rows: int = 24, cols: int = 80, extra_refs: tuple[str, ...] = ()) -> None:
+        root = _make_lab(tmp, extra_refs)
+        self.screen = Screen(rows, cols)
         env = {
             "PATH": os.environ.get("PATH", ""), "TERM": "xterm", "HOME": str(tmp),
             "INPUTRC": "/dev/null", "PYTHONPATH": SRC, "PYTHONDONTWRITEBYTECODE": "1",
@@ -68,7 +71,7 @@ class _Cli:
         self.pid, self.fd = pty.fork()
         if self.pid == 0:  # pragma: no cover - child
             os.execve(sys.executable, [sys.executable, "-c", DRIVER, str(root)], env)
-        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         self.log = ""
         self.deadline = time.monotonic() + DEADLINE
 
@@ -80,8 +83,11 @@ class _Cli:
             except OSError:
                 data = b""
             text = data.decode("utf-8", "replace")
-            if "\x1b[6n" in text:  # answer cursor-position requests like a real terminal
-                os.write(self.fd, b"\x1b[1;1R")
+            # Answer cursor-position requests from the emulated cursor, like
+            # a real terminal does.
+            reply = self.screen.feed(text)
+            if reply:
+                os.write(self.fd, reply.encode())
             self.log += text
 
     def wait_for(self, needle: str, start: int = 0) -> int:
@@ -135,13 +141,18 @@ class _Cli:
         os.waitpid(self.pid, 0)
 
 
-@pytest.fixture()
-def cli(tmp_path):
+def _open(tmp_path, **kwargs):
     if not hasattr(os, "fork"):
         pytest.skip("PTY not available on this platform")
-    c = _Cli(tmp_path)
+    c = _Cli(tmp_path, **kwargs)
+    c.wait_for("network-lab#")
+    return c
+
+
+@pytest.fixture()
+def cli(tmp_path):
+    c = _open(tmp_path)
     try:
-        c.wait_for("network-lab#")
         yield c
     finally:
         c.close()
@@ -190,3 +201,104 @@ def test_ambiguous_tab_lists_candidates_once_per_press(cli):
     for _ in range(2):
         out = cli.segment("\t")
         assert out.count("ref_alpha_one") == 1 and out.count("ref_alpha_two") == 1
+
+
+# ==========================================================================
+# Visible-screen checks (scrollback-aware, via vt_screen.Screen)
+# ==========================================================================
+
+PROMPT = "network-lab(config)# "
+
+
+def _tab_once(c: _Cli, keys: str) -> tuple[list[str], list[str]]:
+    """Type `keys` (no Tab), settle, then send exactly one Tab and settle.
+    Returns the full scrollback+screen history before and after the Tab."""
+    c.settle()
+    os.write(c.fd, keys.encode())
+    c.settle()
+    before = c.screen.history()
+    os.write(c.fd, b"\t")
+    c.settle()
+    return before, c.screen.history()
+
+
+def test_empty_argument_token_tab_changes_nothing_on_screen(cli):
+    _enter_config(cli)
+    for command in ("reference ", "topology ", "scenario "):
+        cli.settle()
+        os.write(cli.fd, b"\x15")  # Ctrl-U
+        before, after = _tab_once(cli, command)
+        assert after == before
+        assert after[-1] == f"{PROMPT}{command}".rstrip()
+        assert (cli.screen.r, cli.screen.c) == (len(after) - 1, len(PROMPT) + len(command))
+
+
+def test_command_word_without_space_tab_changes_nothing_on_screen(cli):
+    _enter_config(cli)
+    before, after = _tab_once(cli, "reference")
+    assert after == before
+
+
+def test_ambiguous_tab_keeps_line_then_aligned_candidates_then_prompt(cli):
+    _enter_config(cli)
+    before, after = _tab_once(cli, "reference ref_alpha_")
+    # The edited line is kept, candidates follow on one aligned row with no
+    # blank lines around them, and the prompt + buffer come back below.
+    assert after[len(before) - 1 :] == [
+        f"{PROMPT}reference ref_alpha_",
+        "  ref_alpha_one  ref_alpha_two",
+        f"{PROMPT}reference ref_alpha_",
+    ]
+    assert cli.screen.c == len(PROMPT) + len("reference ref_alpha_")
+    # The history above the Tab line is untouched (no re-emitted old prompt).
+    assert after[: len(before) - 1] == before[:-1]
+
+
+def test_repeated_tab_lists_once_per_press(cli):
+    _enter_config(cli)
+    _tab_once(cli, "reference ref_alpha_")
+    os.write(cli.fd, b"\t")
+    cli.settle()
+    history = cli.screen.history()
+    assert sum(1 for line in history if line == "  ref_alpha_one  ref_alpha_two") == 2
+    assert sum(1 for line in history if line.startswith("network-lab# config")) == 1
+    assert history[-1] == f"{PROMPT}reference ref_alpha_"
+    assert "" not in history[history.index("  ref_alpha_one  ref_alpha_two") :]
+
+
+def test_accept_completed_command_and_question_mark_unchanged(cli):
+    _enter_config(cli)
+    cli.settle()
+    os.write(cli.fd, b"reference ref_b\t")
+    cli.settle()
+    assert cli.screen.history()[-1] == f"{PROMPT}reference ref_beta"
+    os.write(cli.fd, b"\r")
+    cli.settle()
+    assert cli.screen.history()[-1].startswith("network-lab(config-reference-ref_beta)#")
+    os.write(cli.fd, b"\x15")  # nothing typed yet; back out via exit
+    os.write(cli.fd, b"exit\r")
+    cli.settle()
+    os.write(cli.fd, b"reference ?")
+    cli.settle()
+    history = cli.screen.history()
+    assert any(line.startswith("  ref_beta") and "Existing reference definition" in line for line in history)
+    assert any(line.startswith("  <name>") for line in history)
+
+
+@pytest.mark.parametrize("cols, expected_rows", [(40, 4), (80, 2), (120, 1)])
+def test_candidate_columns_adapt_to_terminal_width(tmp_path, cols, expected_rows):
+    names = tuple(f"wide_item_{ch}x" for ch in "abcdefgh")
+    c = _open(tmp_path, cols=cols, extra_refs=names)
+    try:
+        _enter_config(c)
+        before, after = _tab_once(c, "reference wide_item_")
+        # At 40 columns the 41-character prompt line itself wraps, so pick
+        # the candidate rows by content instead of by position.
+        rows = [line for line in after[len(before) - 1 :] if line.startswith("  wide_item_")]
+        assert len(rows) == expected_rows
+        assert all(len(r) < cols for r in rows)
+        assert " ".join(" ".join(rows).split()).split(" ") == list(names)
+        assert f"{PROMPT}reference wide_item_".endswith(after[-1])
+        assert after[: len(before) - 1] == before[:-1]
+    finally:
+        c.close()
