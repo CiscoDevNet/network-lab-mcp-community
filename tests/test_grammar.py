@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the command grammar single source of truth: parsing, unique
 abbreviation, ambiguity/incomplete/invalid-input detection, fixed-keyword

@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Forced-wrapper isolation, verified with Fake executables only.
 No real ssh / ssh-keygen / sshd is started by this module."""

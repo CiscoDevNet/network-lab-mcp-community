@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """`show logging` / `show logging <device-id>` / `show logging <device-id>
 <log-file>`: EXEC-only, read-only viewing of persistent terminal

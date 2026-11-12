@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """known_hosts removal under concurrent modification and failures (real
 ssh-keygen, isolated sandbox). The backup is never written back wholesale."""

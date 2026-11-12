@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Discovery disables terminal paging (`terminal length 0`)
 immediately after successful login, before any show command, for IOS XE

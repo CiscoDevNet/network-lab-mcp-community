@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """IOS XE target selection and end-to-end mixed IOS XR + IOS XE
 `discover_topology()` behavior (device collection itself is monkeypatched,

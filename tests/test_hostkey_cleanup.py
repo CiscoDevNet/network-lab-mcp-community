@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Failure-injection: a temporary sshd started by a test must never outlive
 the test, whatever way the test (or its fixture) fails. Each scenario runs an

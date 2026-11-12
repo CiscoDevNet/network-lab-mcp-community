@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 # Human-facing entry point for the Network Lab CLI.
 #

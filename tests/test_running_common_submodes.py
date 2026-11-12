@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Name-less Running selection submodes for topology / scenario / reference
 (`config-running-<kind>`), modeled on the access-info one (see

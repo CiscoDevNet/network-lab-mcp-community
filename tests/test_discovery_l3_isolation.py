@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """L3 enrichment is additive, never a Discovery blocker. A genuine L3
 *parser* failure for one device (unrecognized output,

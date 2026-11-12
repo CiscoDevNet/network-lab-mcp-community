@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """`discover topology` candidate workflow: reuses the existing candidate/
 commit/clear system exactly like a manually typed `topology <name>` --

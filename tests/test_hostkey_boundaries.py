@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Boundary tests: host-key approval/removal is reachable only from the human
 CLI; MCP and managed terminals cannot reach it; test hooks cannot be enabled

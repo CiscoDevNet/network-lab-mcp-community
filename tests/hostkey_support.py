@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Helpers for tests that use the REAL OpenSSH binaries, always through the
 forced isolation wrapper and a per-test sandbox (never the user's ~/.ssh)."""

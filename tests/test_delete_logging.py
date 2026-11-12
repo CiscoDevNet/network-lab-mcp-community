@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """`delete logging all` / `delete logging <device> all` / `delete logging
 <device> <log-file>` / `delete logging <device> directory` / `delete

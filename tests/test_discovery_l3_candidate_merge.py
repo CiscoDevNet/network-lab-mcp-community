@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """build_discovery_candidate()'s rebuild semantics (replaces the former
 per-interface merge, which no longer exists): the candidate is built from

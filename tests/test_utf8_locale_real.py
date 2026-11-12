@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """UTF-8 Safe Editor Launch against the real libc and a fake editor child
 (never a real Vim). Host-dependent results are skipped or only recorded."""

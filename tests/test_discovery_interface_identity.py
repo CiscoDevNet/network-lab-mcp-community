@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Interface identity in link reconciliation: the same physical port seen as
 "Gi0/0/0/10" (LLDP) and "Gig 0/0/0/10" (CDP summary) must be one endpoint, while

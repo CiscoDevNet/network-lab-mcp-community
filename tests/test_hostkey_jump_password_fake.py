@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Jump-server password handling in the authentication-free probe, verified
 with a FAKE ssh that scripts OpenSSH's prompts on a real pty. Sentinels are

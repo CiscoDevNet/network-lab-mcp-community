@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """`terminal monitor <device-id>` -- read-only
 observation backend, incremental streaming, and monitor UI lifecycle.

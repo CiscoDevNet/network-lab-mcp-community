@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Tests for cli/main.py's Quick Start help, help topics, and `show
 version` rendering. Grammar-level parsing/completion/help for these

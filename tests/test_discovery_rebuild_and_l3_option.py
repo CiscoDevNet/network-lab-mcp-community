@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """`discover topology` / `discover topology l3`: candidate rebuild (no link
 merge), optional L3, strict protocol/conflict fatality, dirty-candidate

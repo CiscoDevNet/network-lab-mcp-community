@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Committed L3 topology enrichment (ipv4_address
 + vrf) must naturally appear through the existing get_active_topology()

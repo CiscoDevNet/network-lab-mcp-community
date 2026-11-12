@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """`<cr>` inline-help regression tests for the `creatable`-argument gap
 fixed in grammar.help() (cli/grammar.py).

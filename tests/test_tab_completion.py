@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Tab/`?` completion regression tests for the `tab` key binding's
 multiple-candidate branch (`_make_key_bindings()` in cli/main.py).

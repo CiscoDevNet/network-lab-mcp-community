@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Test isolation: ordinary pytest must never be able to list,
 read, send to, or close a real production managed session -- only the

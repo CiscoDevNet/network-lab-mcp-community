@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Discovery login through a real tmux pane + real OpenSSH (forced wrapper,
 isolated loopback sshd running a fake router CLI). Covers: TOFU before login,

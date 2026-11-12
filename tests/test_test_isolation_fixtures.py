@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """The suite's own isolation guarantees (see conftest.py): a private
 TMUX_TMPDIR with no inherited TMUX/TMUX_PANE, a safe owned-directory

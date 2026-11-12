@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """UTF-8 Safe Editor Launch: verify (and if needed repair) the locale of the
 environment handed to the external editor.

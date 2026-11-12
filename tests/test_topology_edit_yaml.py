@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Topology `edit` presentation: each link is a one-line flow mapping, top-level
 sections are separated by one blank line, and nothing about the data model,

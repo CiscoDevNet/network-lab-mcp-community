@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Symmetric candidate-based deletion for all four stored
 definition kinds (`no access-info <name>`, `no topology <name>`, `no

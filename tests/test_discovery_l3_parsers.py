@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """L3 interface enrichment parsers -- parse_ipv4_interface_brief()
 (IOS XR's `show ipv4 interface brief`), parse_ip_interface_brief() +

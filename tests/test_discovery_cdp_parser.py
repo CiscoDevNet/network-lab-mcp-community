@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """`parse_cdp_neighbors()` -- the CDP counterpart of
 parse_lldp_neighbors(). Handles both real-world row shapes: an IOS XR-style

@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Tests for cli/config.py: the running-config candidate (independent from
 any definition candidate), topology/access-info/scenario/reference

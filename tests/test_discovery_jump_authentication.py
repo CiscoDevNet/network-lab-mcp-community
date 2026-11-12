@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Discovery SSH ProxyJump: the jump-server password prompt is answered once
 via the same stage logic as managed terminal_open (terminal.authenticate_

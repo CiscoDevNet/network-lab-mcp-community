@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Link reconciliation (reconcile_links()) and unresolved-neighbor
 evidence retention -- reciprocal LLDP observations collapse into one

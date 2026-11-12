@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """`discovery._login_ios_style()` -- the shared classic-IOS-style login
 used by *both* IOS XE and classic IOS (named generically rather than

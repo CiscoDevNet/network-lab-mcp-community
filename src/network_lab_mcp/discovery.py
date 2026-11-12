@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """IOS XR + IOS XE + classic IOS topology discovery over LLDP and CDP,
 enriched with stable Layer-3 interface context (IPv4 address + VRF).

@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Managed Terminal (the MCP-facing path) with REAL OpenSSH over loopback:
 an unknown hop is registered first (TOFU: authentication-free probe, key

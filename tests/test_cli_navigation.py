@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the IOS XR-style navigation refinement: `commit` staying in
 the current mode, `root` (jump straight to global config, preserving

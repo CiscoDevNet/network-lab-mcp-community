@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Test fixture helper: puts stdin into raw tty mode (disabling ICRNL/
 ICANON/etc. line-discipline translation) and records every byte it reads,

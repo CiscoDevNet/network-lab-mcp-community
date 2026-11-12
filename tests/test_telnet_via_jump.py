@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Telnet over an SSH local port forward, end to end against local
 fakes only: a fake ssh (password prompt + loopback listener that relays to a

@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """UTF-8 Safe Editor Launch: locale decision rules (mock validator) and the
 isolation properties of the real validation subprocess."""
