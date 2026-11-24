@@ -417,9 +417,13 @@ def test_utf8_payload_is_locale_independent(server, tmp_path):
         "import sys, locale;from network_lab_mcp import terminal;"
         f"terminal.TMUX_SOCKET_NAME={server!r};"
         "enc=locale.getpreferredencoding(False);"
-        "terminal._send_text_via_stdin(sys.argv[1], sys.argv[2]);print('PYENC='+enc+' utf8mode='+str(sys.flags.utf8_mode))"
+        # The payload crosses argv as ASCII hex: under LC_ALL=C a raw non-ASCII argv would be decoded with
+        # surrogateescape (Linux) into surrogates, i.e. an invalid str, not the intended text.
+        "text=bytes.fromhex(sys.argv[2]).decode('utf-8');"
+        "assert not any('\\ud800' <= c <= '\\udfff' for c in text);"
+        "terminal._send_text_via_stdin(sys.argv[1], text);print('PYENC='+enc+' utf8mode='+str(sys.flags.utf8_mode))"
     )
-    r = subprocess.run([sys.executable, "-c", code, session, payload.encode("utf-8").decode("utf-8", "surrogateescape")],
+    r = subprocess.run([sys.executable, "-c", code, session, payload.encode("utf-8").hex()],
                        env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
     assert r.returncode == 0, r.stderr[-300:]
     sup.wait_for(lambda: out.exists() and out.stat().st_size >= len(payload.encode()), "bytes")
