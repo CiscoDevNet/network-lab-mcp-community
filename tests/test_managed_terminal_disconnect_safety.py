@@ -515,7 +515,7 @@ def test_password_never_appears_in_argv_pane_start_command_buffers_or_log(monkey
     assert received.read_text().strip() == secret  # delivered through stdin
     session = terminal.derive_production_session_name(DEVICE)
     observable = [
-        subprocess.run(["ps", "-axo", "args"], capture_output=True, text=True).stdout,
+        subprocess.run(["ps", "-axww", "-o", "args"], capture_output=True, text=True).stdout,
         terminal._run(["display-message", "-p", "-t", session, "#{pane_start_command}|#{pane_current_command}"]).stdout,
         terminal._run(["list-buffers"], check=False).stdout,
         terminal.read_device(DEVICE, 50)["content"],

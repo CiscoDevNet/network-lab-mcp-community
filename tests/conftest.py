@@ -354,11 +354,14 @@ def _no_orphan_sshd_after_session(tmp_path_factory):
     root = str(tmp_path_factory.getbasetemp())
     import subprocess as _sp
 
-    out = _sp.run(["ps", "-axo", "pid,command"], capture_output=True, text=True).stdout
-    leftovers = [ln for ln in out.splitlines() if "sshiso/etc/sshd_" in ln and root in ln]
-    for ln in leftovers:  # reap (only ours: the command line carries this session's temp root), then fail
-        try:
-            os.kill(int(ln.split()[0]), 15)
-        except (ValueError, ProcessLookupError, PermissionError):
-            pass
-    assert not leftovers, f"orphan sshd left by tests: {len(leftovers)}"
+    # Self-contained on purpose (this conftest is also executed in nested pytester sessions) and independent of
+    # the cleanup bookkeeping in hostkey_support. Full width (-ww); a ps failure fails the session instead of
+    # reading as "no leftovers". Report only: a command line alone is not proof of ownership, so nothing is signalled.
+    r = _sp.run(["ps", "-axww", "-o", "pid=,ppid=,pgid=,stat=,command="], capture_output=True, text=True,
+                env={**os.environ, "LC_ALL": "C"}, timeout=30)
+    assert r.returncode == 0 and r.stdout.strip(), f"ps failed rc={r.returncode}: cannot verify sshd leftovers"
+    leftovers = [
+        ln.strip() for ln in r.stdout.splitlines()
+        if "sshiso/etc/sshd_" in ln and root in ln and ln.split(None, 4)[3:4] and not ln.split(None, 4)[3].startswith("Z")
+    ]
+    assert not leftovers, f"orphan sshd left by tests: {len(leftovers)}\n" + "\n".join(leftovers)
