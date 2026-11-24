@@ -1899,63 +1899,102 @@ def _group_unresolved_neighbors(unresolved: list) -> dict:
     return grouped
 
 
-def render_discovery_summary(result: "discovery.DiscoveryResult") -> str:
-    grouped_unresolved = _group_unresolved_neighbors(result.unresolved)
-    lines = [
-        "Discovery complete.",
+_CONNECTION_LABELS = {"connected": "Connected", "failed": "Failed", "not_attempted": "Not attempted"}
+_PROTOCOL_LABELS = {
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "unsupported": "Unsupported",
+    "unknown": "Unknown",
+    "na": "N/A",
+}
+_PROTOCOL_UNAVAILABLE = ("disabled", "unsupported", "na")
+
+
+def _render_table(headers: tuple, rows: list) -> list:
+    widths = [max([len(header)] + [len(row[i]) for row in rows]) for i, header in enumerate(headers)]
+    rule = "-" * (sum(widths) + 3 * (len(widths) - 1))
+
+    def line(cells) -> str:
+        return "   ".join(cell.ljust(width) for cell, width in zip(cells, widths)).rstrip()
+
+    return [rule, line(headers), rule, *(line(row) for row in rows), rule]
+
+
+def render_discovery_summary(
+    result: "discovery.DiscoveryResult", changes: "discovery.TopologyChanges | None" = None
+) -> str:
+    """The Device Discovery Summary, the Topology Changes block, the warnings
+    and the closing message of a successful (possibly partial) run. Only ever
+    called after the candidate was actually updated or confirmed unchanged --
+    a fatal error prints no summary."""
+    changes = changes or discovery.TopologyChanges()
+    outcomes = result.outcomes
+    lines = ["", "Device Discovery Summary"]
+    rows = [
+        (
+            o.device_id,
+            o.device_type or "-",
+            _CONNECTION_LABELS[o.connection],
+            _PROTOCOL_LABELS[o.lldp],
+            _PROTOCOL_LABELS[o.cdp],
+            o.status,
+        )
+        for o in outcomes
+    ]
+    lines += _render_table(("Device", "Type", "Connection", "LLDP", "CDP", "Status"), rows)
+    connected = sum(1 for o in outcomes if o.connection == "connected")
+    with_neighbors = sum(1 for o in outcomes if o.protocol_usable and o.observations)
+    without_protocol = sum(
+        1
+        for o in outcomes
+        if o.connection == "connected"
+        and not o.protocol_usable
+        and o.lldp in _PROTOCOL_UNAVAILABLE
+        and o.cdp in _PROTOCOL_UNAVAILABLE
+    )
+    protocol_unknown = sum(
+        1
+        for o in outcomes
+        if o.connection == "connected" and not o.protocol_usable and "unknown" in (o.lldp, o.cdp)
+    )
+    lines += [
         "",
-        f"  Access-info:          {result.access_info_name}",
-        f"  IOS XR targets:       {result.iosxr_target_count}",
-        f"  IOS XE targets:       {result.iosxe_target_count}",
-        f"  IOS targets:          {result.ios_target_count}",
-        f"  Connected:            {result.connected_count}",
-        f"  LLDP observations:    {result.observation_count}",
-        f"  CDP observations:     {result.cdp_observation_count}",
-        f"  Managed links:        {len(result.managed_links)}",
-        f"  Unresolved neighbors: {len(grouped_unresolved)}",
+        f"Devices registered       : {len(result.devices)}",
+        f"Devices connected        : {connected}",
+        f"Devices not connected    : {len(outcomes) - connected}",
+        f"Devices with neighbors   : {with_neighbors}",
+        f"Devices without protocol : {without_protocol}",
+    ]
+    if protocol_unknown:
+        lines.append(f"Devices protocol unknown : {protocol_unknown}")
+    lines.append(f"Discovered links         : {len(result.managed_links)}")
+    lines += ["", "Topology Changes", "-" * 32]
+    lines += [
+        f"Devices added            : {changes.devices_added}",
+        f"Devices updated          : {changes.devices_updated}",
+        f"Devices retained         : {changes.devices_retained}",
+        f"Links added              : {changes.links_added}",
+        f"Links retained           : {changes.links_retained}",
     ]
     if result.include_l3:
-        lines.append(
-            f"  L3 enrichment:        {result.l3_enriched_device_count}/{result.connected_count} devices, "
-            f"{result.l3_interface_count} interfaces"
-        )
+        lines += [
+            f"L3 interfaces added      : {changes.interfaces_added}",
+            f"L3 interfaces updated    : {changes.interfaces_updated}",
+            f"L3 interfaces retained   : {changes.interfaces_retained}",
+            f"L3 enrichment            : {result.l3_enriched_device_count}/{connected} devices, "
+            f"{result.l3_interface_count} interfaces",
+        ]
     else:
-        lines.append("  L3 enrichment:        Disabled")
-        lines.append("  Previous L3 data:     Not carried over")
-    lines.append(f"  Topology candidate:   {result.default_topology_name}")
-    if result.protocol_status:
-        lines.append("")
-        lines.append("Neighbor discovery protocol status:")
-        for label, devices in result.protocol_status.items():
-            count = f"{len(devices)} device" + ("" if len(devices) == 1 else "s")
-            lines.append(f"  {label + ':':<22}{count} ({', '.join(devices)})")
-    if result.protocol_warnings:
-        lines.append("")
-        lines.append(f"Neighbor discovery warnings ({len(result.protocol_warnings)}):")
-        for warning in result.protocol_warnings:
-            lines.append(f"  {warning}")
-    if result.l3_warnings:
-        lines.append("")
-        lines.append(f"L3 enrichment warnings ({len(result.l3_warnings)}):")
-        for warning in result.l3_warnings:
-            lines.append(f"  {warning}")
-    if result.conflicts:
-        lines.append("")
-        lines.append(f"Protocol/link reconciliation conflicts ({len(result.conflicts)}, not added):")
-        for conflict in result.conflicts:
-            a_dev, a_intf = conflict.endpoint_a
-            b_dev, b_intf = conflict.endpoint_b
-            if conflict.endpoint_a == conflict.endpoint_b:
-                lines.append(
-                    f"  {a_dev} {a_intf}: conflicting neighbor observations "
-                    f"({conflict.observation_a.source} -> {conflict.observation_a.remote_device_id_raw} "
-                    f"vs {conflict.observation_b.source} -> {conflict.observation_b.remote_device_id_raw})"
-                )
-            else:
-                lines.append(f"  {a_dev} {a_intf} <-> {b_dev} {b_intf}: inconsistent reciprocal observation")
+        lines += [
+            f"L3 interfaces retained   : {changes.interfaces_retained}",
+            "L3 enrichment            : Disabled (existing L3 data is kept)",
+        ]
+    if result.warnings:
+        lines += ["", "Warnings:"]
+        lines += [f"  {warning}" for warning in result.warnings]
+    grouped_unresolved = _group_unresolved_neighbors(result.unresolved)
     if grouped_unresolved:
-        lines.append("")
-        lines.append("Unresolved neighbors:")
+        lines += ["", "Unresolved neighbors:"]
         for raw_id, observations in grouped_unresolved.items():
             lines.append(f"  {raw_id}")
             for obs in observations:
@@ -1964,10 +2003,13 @@ def render_discovery_summary(result: "discovery.DiscoveryResult") -> str:
                     f"    {obs.local_device_id} {obs.local_interface} -> {obs.remote_port_id} ({capability})"
                 )
     lines.append("")
-    if result.protocol_warnings or result.l3_warnings:
-        lines.append("Topology discovery completed with warnings.")
+    limited = any(o.status != "Complete" for o in outcomes)
+    if not changes.changed:
+        lines.append("Topology candidate unchanged.")
     else:
-        lines.append("Topology discovery completed successfully.")
+        lines.append("Topology candidate updated with limitations." if limited else "Topology candidate updated.")
+        lines.append("Review the candidate using 'show configuration'.")
+        lines.append("Commit is required to save the topology.")
     return "\n".join(lines)
 
 
@@ -1983,6 +2025,17 @@ def _make_hostkey_coordinator():
     except hostkey_approval.ApprovalError:
         channel = None
     return hostkey_flow.Coordinator(channel)
+
+
+def _not_updated_message(session: cfgmod.CliSession, target_name: str) -> str:
+    message = "% Topology candidate not updated."
+    if (
+        session.definition_kind == "topology"
+        and session.definition_name == target_name
+        and session.definition_candidate is not None
+    ):
+        message += f"\n% The existing candidate for '{target_name}' is preserved; none of this run's changes were applied."
+    return message
 
 
 def _run_discover_topology(session: cfgmod.CliSession, include_l3: bool) -> None:
@@ -2012,24 +2065,22 @@ def _run_discover_topology(session: cfgmod.CliSession, include_l3: bool) -> None
                         "`discover topology` again from an interactive terminal to review its replacement."
                     ) from None
                 print("Re-running discovery with the replaced host key...")
-        removed_devices, removed_links = session.discovery_removals(result)
         # Everything that can fail has run; only now is the candidate
-        # replaced (apply validates before it touches any session state).
-        if removed_devices or removed_links:
-            print(f"Discovery will remove from candidate '{target_name}' (committed definition is unchanged):")
-            for device in removed_devices:
-                print(f"  device {device}")
-            for link in removed_links:
-                print(f"  link   {link}")
-        session.apply_discovery_result(result)
+        # merged (apply validates before it touches any session state).
+        changes = session.apply_discovery_result(result)
     except hostkey_flow.HostKeyError as exc:
-        raise discovery.DiscoveryError(f"{exc}\n% Topology candidate not updated.") from None
+        raise discovery.DiscoveryError(f"{exc}\n{_not_updated_message(session, target_name)}") from None
     except (discovery.DiscoveryError, lab.LabConfigError) as exc:
-        raise discovery.DiscoveryError(f"{exc}\n% Topology candidate not updated.") from exc
+        raise discovery.DiscoveryError(f"{exc}\n{_not_updated_message(session, target_name)}") from exc
+    except KeyboardInterrupt:
+        # An interrupt is not a partial success: nothing is merged and the
+        # discovery sessions were already closed by discover_topology().
+        print(f"\n% Discovery interrupted.\n{_not_updated_message(session, target_name)}")
+        return
     finally:
         if coordinator is not None and coordinator.channel is not None:
             coordinator.channel.close()
-    print(render_discovery_summary(result))
+    print(render_discovery_summary(result, changes))
 
 
 def h_global_discover_topology(session: cfgmod.CliSession, args: dict) -> None:

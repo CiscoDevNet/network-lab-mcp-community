@@ -135,26 +135,39 @@ def _pairs(result):
 R1R2 = ("HOST-R2", "Gi0/0/0/2", "Gi0/0/0/2")
 
 
+def _outcome(result, device_id):
+    return next(o for o in result.outcomes if o.device_id == device_id)
+
+
+def _states(result, device_id):
+    o = _outcome(result, device_id)
+    return (o.lldp, o.cdp, o.status)
+
+
 def test_i01_lldp_disabled_cdp_links_retained(lab_root, monkeypatch):
     r = _run(lab_root, monkeypatch, {"R1": (LLDP_OFF, cdp_table(R1R2)), "R2": (LLDP_EMPTY, CDP_EMPTY)})
     assert _pairs(r) == [("R1", "Gi0/0/0/2", "R2", "Gi0/0/0/2")]
-    # Disabled beside a working protocol is a protocol status, not a warning.
-    assert r.protocol_status == {"LLDP disabled": ["R1"]}
-    assert r.protocol_warnings == []
+    # Disabled beside a working protocol is a protocol state, not a warning.
+    assert _states(r, "R1") == ("disabled", "enabled", "Complete")
+    assert r.warnings == []
 
 
 def test_i02_cdp_disabled_lldp_links_retained(lab_root, monkeypatch):
     r = _run(lab_root, monkeypatch, {"R1": (lldp_table(R1R2), CDP_OFF), "R2": (LLDP_EMPTY, CDP_EMPTY)})
     assert _pairs(r) == [("R1", "Gi0/0/0/2", "R2", "Gi0/0/0/2")]
-    assert r.protocol_status == {"CDP disabled": ["R1"]}
-    assert r.protocol_warnings == []
+    assert _states(r, "R1") == ("enabled", "disabled", "Complete")
+    assert r.warnings == []
 
 
-def test_i03_both_disabled_is_fatal_no_usable_protocol(lab_root, monkeypatch):
-    # IC-4: a device with no usable discovery protocol fails Discovery
-    # (previously: success with a warning and zero links).
-    with pytest.raises(discovery.DiscoveryError, match=r"Device 'R1': no usable neighbor discovery protocol \(LLDP disabled, CDP disabled\)"):
-        _run(lab_root, monkeypatch, {"R1": (LLDP_OFF, CDP_OFF), "R2": (LLDP_EMPTY, CDP_EMPTY)})
+def test_i03_both_disabled_registers_the_device_as_partial(lab_root, monkeypatch):
+    # Device Registration no longer depends on a usable neighbor protocol:
+    # the device is registered, Partial, with a warning (previously fatal).
+    r = _run(lab_root, monkeypatch, {"R1": (LLDP_OFF, CDP_OFF), "R2": (LLDP_EMPTY, CDP_EMPTY)})
+    assert sorted(r.devices) == ["R1", "R2"]
+    assert _states(r, "R1") == ("disabled", "disabled", "Partial")
+    assert _states(r, "R2") == ("enabled", "enabled", "Complete")
+    assert r.warnings == ["R1: No usable neighbor discovery protocol."]
+    assert r.managed_links == []
 
 
 def test_i04_disabled_device_is_not_a_contradiction_and_one_way_policy_kept(lab_root, monkeypatch):
@@ -185,7 +198,7 @@ def test_i05_i12_other_devices_continue_and_no_inference(lab_root, monkeypatch):
     assert r.connected_count == 4
 
 
-def test_i06_all_disabled_fails_discovery_and_leaves_candidate_untouched(lab_root, monkeypatch, capsys):
+def test_i06_all_disabled_keeps_existing_topology_and_reports_limitations(lab_root, monkeypatch, capsys):
     _targets(lab_root, ["R1", "R2"])
     monkeypatch.setattr(
         discovery,
@@ -200,14 +213,19 @@ def test_i06_all_disabled_fails_discovery_and_leaves_candidate_untouched(lab_roo
     session = cfgmod.CliSession(lab_root)
     session.enter_configure()
     capsys.readouterr()
-    assert climain.execute_command_line(session, "discover topology") is False
+    assert climain.execute_command_line(session, "discover topology") is True
     out = capsys.readouterr().out
-    assert "no usable neighbor discovery protocol" in out
-    assert "% Topology candidate not updated." in out
-    assert session.definition_kind is None and session.definition_candidate is None
-    assert session.mode == "global"
+    assert "R1: No usable neighbor discovery protocol." in out
+    assert "R2: No usable neighbor discovery protocol." in out
+    # The committed sample_lab already has these devices and a link; with no
+    # usable protocol nothing new is observed, nothing is removed, and the
+    # candidate is unchanged (the limitations are still reported above).
+    assert "Topology candidate unchanged." in out
+    assert session.definition_candidate["devices"] == {"R1": {"type": "iosxr"}, "R2": {"type": "iosxr"}}
+    assert session.definition_candidate["links"] == [{"a": "R1", "b": "R2"}]
     assert SENTINEL not in out and "Local Intf" not in out
-    assert not lab.topology_exists("sample_lab_new", lab_root)
+    # Candidate only: the committed definition is exactly what it was.
+    assert lab.load_topology("sample_lab", lab_root)["links"] == [{"a": "R1", "b": "R2"}]
 
 
 def test_i07_cdp_command_actually_runs_after_lldp_disabled(monkeypatch):
@@ -243,8 +261,15 @@ def test_i07_cdp_command_actually_runs_after_lldp_disabled(monkeypatch):
     ],
 )
 def test_i08_i09_errors_are_not_masked_by_the_other_protocol(lab_root, monkeypatch, lldp, cdp):
-    with pytest.raises(discovery.DiscoveryError):
-        _run(lab_root, monkeypatch, {"R1": (lldp, cdp), "R2": (LLDP_EMPTY, CDP_EMPTY)})
+    """An unrecognized protocol output is never reinterpreted as the other
+    protocol's "disabled": that protocol stays unusable (state unknown, a
+    warning, no observation), the device is Partial, and the other device is
+    unaffected."""
+    r = _run(lab_root, monkeypatch, {"R1": (lldp, cdp), "R2": (LLDP_EMPTY, CDP_EMPTY)})
+    o = _outcome(r, "R1")
+    assert o.status == "Partial" and o.warnings and not o.protocol_usable
+    assert "unknown" in (o.lldp, o.cdp)
+    assert r.managed_links == [] and _states(r, "R2") == ("enabled", "enabled", "Complete")
 
 
 def test_i10_conflict_detection_preserved(lab_root, monkeypatch):
@@ -266,29 +291,39 @@ def test_i10_conflict_detection_preserved(lab_root, monkeypatch):
 
 def test_i11_duplicate_lldp_cdp_dedup(lab_root, monkeypatch):
     r = _run(lab_root, monkeypatch, {"R1": (lldp_table(R1R2), cdp_table(R1R2)), "R2": (LLDP_EMPTY, CDP_EMPTY)})
-    assert len(r.managed_links) == 1 and r.protocol_warnings == []
+    assert len(r.managed_links) == 1 and r.warnings == []
 
 
-def test_i13_warnings_deterministic_and_unique(lab_root, monkeypatch):
+def test_i13_outcomes_deterministic_and_in_access_info_order(lab_root, monkeypatch):
     outputs = {f"R{i}": (LLDP_OFF, CDP_EMPTY) for i in range(1, 9)}
     results = [_run(lab_root, monkeypatch, outputs) for _ in range(5)]
-    runs = [(r.protocol_status, r.protocol_warnings) for r in results]
+    runs = [([(o.device_id, o.lldp, o.cdp, o.status) for o in r.outcomes], r.warnings) for r in results]
     assert all(run == runs[0] for run in runs)
-    status, warnings = runs[0]
-    assert status == {"LLDP disabled": [f"R{i}" for i in range(1, 9)]}  # target order, unique
-    assert len(warnings) == 1 and "No physical links were discovered" in warnings[0]
+    states, warnings = runs[0]
+    assert [s[0] for s in states] == [f"R{i}" for i in range(1, 9)]  # access-info order, unique
+    assert all(s[1:] == ("disabled", "enabled", "Complete") for s in states)
+    assert warnings == []
 
 
 def test_i14_i15_cleanup_on_success_and_failure(lab_root, monkeypatch, _env):
     _run(lab_root, monkeypatch, {"R1": (LLDP_OFF, CDP_EMPTY), "R2": (LLDP_EMPTY, CDP_OFF)})
     assert sorted(_env) == ["R1", "R2"]
     _env.clear()
+    # A fatal (non-continuable) failure still closes every bootstrap session.
+    _targets(lab_root, ["R1", "R2"])
+
+    def fake(device_id, cfg):
+        if device_id == "R1":
+            raise discovery.DiscoveryError("Device 'R1': host key problem")
+        return {"hostname": "HOST-R2", "show_version": "x", "show_lldp_neighbors": LLDP_OFF, "show_cdp_neighbors": CDP_EMPTY}
+
+    monkeypatch.setattr(discovery, "_bootstrap_collect", fake)
     with pytest.raises(discovery.DiscoveryError):
-        _run(lab_root, monkeypatch, {"R1": ("% CDP is not enabled\n", CDP_EMPTY), "R2": (LLDP_OFF, CDP_OFF)})
+        discovery.discover_topology(lab_root)
     assert sorted(_env) == ["R1", "R2"]
 
 
-def test_i19_iosxe_lldp_disabled_is_a_protocol_status_and_unrecognized_cdp_is_fatal(lab_root, monkeypatch):
+def test_i19_iosxe_lldp_disabled_is_a_protocol_state_and_unrecognized_cdp_is_unusable(lab_root, monkeypatch):
     _targets(lab_root, ["X1"], {"X1": "iosxe"})
 
     def collect(cdp):
@@ -302,47 +337,61 @@ def test_i19_iosxe_lldp_disabled_is_a_protocol_status_and_unrecognized_cdp_is_fa
     monkeypatch.setattr(discovery, "_bootstrap_collect_iosxe", collect(CDP_EMPTY))
     r = discovery.discover_topology(lab_root)
     assert r.managed_links == []
-    assert r.protocol_status == {"LLDP disabled": ["X1"]}
+    assert _states(r, "X1") == ("disabled", "enabled", "Complete")
 
-    # IC-3: unrecognized CDP output is a parser failure (previously: zero neighbors).
+    # IC-3: unrecognized CDP output is a parser failure -- its observations
+    # are not used (previously the whole run failed).
     monkeypatch.setattr(discovery, "_bootstrap_collect_iosxe", collect("garbage\n"))
-    with pytest.raises(discovery.DiscoveryError, match="not recognized as valid CDP"):
-        discovery.discover_topology(lab_root)
+    r = discovery.discover_topology(lab_root)
+    assert _states(r, "X1") == ("disabled", "unknown", "Partial")
+    assert "not recognized as valid CDP" in r.warnings[0]
 
-    # Both known "not enabled" texts on IOS XE: no usable protocol.
+    # "% CDP is not enabled" on IOS XE is not a recognized CDP state: unknown, never "disabled".
     monkeypatch.setattr(discovery, "_bootstrap_collect_iosxe", collect("% CDP is not enabled\n"))
-    with pytest.raises(discovery.DiscoveryError, match="no usable neighbor discovery protocol"):
-        discovery.discover_topology(lab_root)
+    r = discovery.discover_topology(lab_root)
+    assert _states(r, "X1")[2] == "Partial" and r.warnings
 
 
 def test_ios_classic_cdp_only_matrix(lab_root, monkeypatch):
-    """Classic IOS has no LLDP (not applicable): CDP success(0) is a
-    success without warnings; CDP disabled leaves no usable protocol."""
+    """Classic IOS has no LLDP (not applicable): CDP success(0) is Complete
+    without warnings; CDP disabled leaves no usable protocol (Partial)."""
     _targets(lab_root, ["I1"], {"I1": "ios"})
 
     def collect(cdp):
         return lambda d, c: {"hostname": "HOST-I1", "show_version": "x", "show_cdp_neighbors": cdp}
 
     monkeypatch.setattr(discovery, "_bootstrap_collect_ios", collect(CDP_EMPTY))
-    assert discovery.discover_topology(lab_root).protocol_warnings == []
+    r = discovery.discover_topology(lab_root)
+    assert r.warnings == [] and _states(r, "I1") == ("na", "enabled", "Complete")
     monkeypatch.setattr(discovery, "_bootstrap_collect_ios", collect("% CDP is not enabled\n"))
-    with pytest.raises(discovery.DiscoveryError, match=r"LLDP not applicable, CDP disabled"):
-        discovery.discover_topology(lab_root)
+    r = discovery.discover_topology(lab_root)
+    assert _states(r, "I1") == ("na", "disabled", "Partial")
+    assert r.warnings == ["I1: No usable neighbor discovery protocol."]
 
 
-def test_i16_i18_no_warnings_leaves_summary_unchanged(lab_root, monkeypatch, capsys):
+def test_i16_i18_no_warnings_summary_is_complete(lab_root, monkeypatch, capsys):
     _run(lab_root, monkeypatch, {"R1": (lldp_table(R1R2), CDP_EMPTY), "R2": (LLDP_EMPTY, CDP_EMPTY)})
     session = cfgmod.CliSession(lab_root)
     session.enter_configure()
     capsys.readouterr()
     climain.execute_command_line(session, "discover topology")
     out = capsys.readouterr().out
-    assert "Neighbor discovery warnings" not in out and "completed with warnings" not in out
+    assert "Warnings:" not in out and "with limitations" not in out
+    assert "Topology candidate updated." in out
     added = [l for l in session.definition_candidate["links"] if "a_interface" in l]
     assert len(added) == 1
 
 
 def test_i20_warnings_contain_no_credentials_or_raw_output(lab_root, monkeypatch):
-    r = _run(lab_root, monkeypatch, {"R1": (LLDP_OFF, CDP_EMPTY), "R2": (LLDP_EMPTY, CDP_OFF)})
-    text = "\n".join(r.protocol_warnings + [f"{k} {v}" for k, v in r.protocol_status.items()])
-    assert SENTINEL not in text and "JST" not in text and "%" not in text
+    r = _run(
+        lab_root,
+        monkeypatch,
+        {
+            "R1": (LLDP_OFF, CDP_EMPTY),
+            "R2": (LLDP_EMPTY, CDP_OFF),
+            "R3": (LLDP_OFF, "Fri Oct 9 14:59:45.758 JST\nsecret-looking garbage " + SENTINEL + "\n"),
+        },
+    )
+    assert r.warnings  # R3's unrecognized CDP output is reported ...
+    text = "\n".join(r.warnings + [f"{o.lldp} {o.cdp} {o.status}" for o in r.outcomes])
+    assert SENTINEL not in text and "JST" not in text and "garbage" not in text and "%" not in text

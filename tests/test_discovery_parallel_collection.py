@@ -174,19 +174,60 @@ def test_result_ordering_is_deterministic_regardless_of_completion_order(lab_roo
 # ==========================================================================
 
 
-def test_first_target_order_failure_is_surfaced_not_completion_order(lab_root, monkeypatch):
+def test_every_device_failure_is_reported_in_target_order_not_completion_order(lab_root, monkeypatch):
     device_ids = ["R1", "R2", "R3", "R4"]
     _write_targets(lab_root, device_ids)
     # R4 (last in target order) fails fastest; R2 (earlier in target order)
-    # fails slower. The visible error must still name R2, the earliest
-    # failing device by target order, not R4 merely because it finished
-    # raising first.
+    # fails slower. Both are reported (nothing stops at the first), in target
+    # order -- R2 before R4 -- and the healthy devices' results are kept.
     failing = {"R2": 0.1, "R4": 0.0}
 
     def fake_collect(device_id, device_config):
         if device_id in failing:
             time.sleep(failing[device_id])
-            raise terminal.TerminalError(f"{device_id} login failed")
+            raise discovery.DeviceCollectionError(f"Device '{device_id}': {device_id} login failed")
+        return _fake_collect_result(device_id)
+
+    monkeypatch.setattr(discovery, "_bootstrap_collect", fake_collect)
+
+    result = discovery.discover_topology(lab_root)
+
+    assert result.warnings == ["R2: R2 login failed", "R4: R4 login failed"]
+    assert [(o.device_id, o.connection, o.status) for o in result.outcomes] == [
+        ("R1", "connected", "Complete"),
+        ("R2", "failed", "Partial"),
+        ("R3", "connected", "Complete"),
+        ("R4", "failed", "Partial"),
+    ]
+    assert list(result.devices) == device_ids  # failed devices are still registered
+    assert result.connected_count == 2
+
+
+def test_all_devices_failing_still_registers_every_device(lab_root, monkeypatch):  # D02, C03
+    device_ids = ["R1", "R2", "R3"]
+    _write_targets(lab_root, device_ids)
+
+    def fake_collect(device_id, device_config):
+        raise discovery.DeviceCollectionError(f"Device '{device_id}': {device_id} unreachable")
+
+    monkeypatch.setattr(discovery, "_bootstrap_collect", fake_collect)
+
+    result = discovery.discover_topology(lab_root)
+
+    assert list(result.devices) == device_ids and result.connected_count == 0
+    assert all(o.connection == "failed" and o.lldp == o.cdp == "unknown" for o in result.outcomes)
+    assert len(result.warnings) == 3 and result.managed_links == []
+
+
+def test_uncategorized_terminal_error_from_a_worker_is_fatal(lab_root, monkeypatch):
+    """Only an explicitly classified DeviceCollectionError is continuable: a
+    raw TerminalError escaping a collector is a contract violation (bug) and
+    fails the run closed -- there is no catch-all."""
+    _write_targets(lab_root, ["R1", "R2"])
+
+    def fake_collect(device_id, device_config):
+        if device_id == "R2":
+            raise terminal.TerminalError("R2 login failed")
         return _fake_collect_result(device_id)
 
     monkeypatch.setattr(discovery, "_bootstrap_collect", fake_collect)
@@ -195,17 +236,33 @@ def test_first_target_order_failure_is_surfaced_not_completion_order(lab_root, m
         discovery.discover_topology(lab_root)
 
 
-def test_multiple_device_failures_still_fail_closed_with_zero_candidate_mutation(lab_root, monkeypatch):
-    device_ids = ["R1", "R2", "R3"]
-    _write_targets(lab_root, device_ids)
+def test_security_relevant_discovery_error_from_one_worker_is_fatal(lab_root, monkeypatch):  # S02
+    _write_targets(lab_root, ["R1", "R2"])
 
     def fake_collect(device_id, device_config):
-        raise terminal.TerminalError(f"{device_id} unreachable")
+        if device_id == "R2":
+            raise discovery.DiscoveryError("Device 'R2': SSH host key verification failed")
+        return _fake_collect_result(device_id)
 
     monkeypatch.setattr(discovery, "_bootstrap_collect", fake_collect)
 
-    with pytest.raises(discovery.DiscoveryError):
+    with pytest.raises(discovery.DiscoveryError, match="host key verification failed"):
         discovery.discover_topology(lab_root)
+
+
+def test_keyboard_interrupt_is_not_a_partial_success(lab_root, monkeypatch, _track_bootstrap_close):  # C10
+    _write_targets(lab_root, ["R1", "R2"])
+
+    def fake_collect(device_id, device_config):
+        if device_id == "R2":
+            raise KeyboardInterrupt
+        return _fake_collect_result(device_id)
+
+    monkeypatch.setattr(discovery, "_bootstrap_collect", fake_collect)
+
+    with pytest.raises(KeyboardInterrupt):
+        discovery.discover_topology(lab_root)
+    assert sorted(_track_bootstrap_close) == ["R1", "R2"]  # sessions are still cleaned up
 
 
 # ==========================================================================
@@ -248,13 +305,12 @@ def test_cleanup_runs_for_every_target_after_one_failure(lab_root, monkeypatch, 
 
     def fake_collect(device_id, device_config):
         if device_id == "R2":
-            raise terminal.TerminalError("boom")
+            raise discovery.DeviceCollectionError("Device 'R2': boom")
         return _fake_collect_result(device_id)
 
     monkeypatch.setattr(discovery, "_bootstrap_collect", fake_collect)
 
-    with pytest.raises(discovery.DiscoveryError):
-        discovery.discover_topology(lab_root)
+    discovery.discover_topology(lab_root)
 
     assert sorted(_track_bootstrap_close) == device_ids
 
@@ -264,12 +320,11 @@ def test_cleanup_runs_for_every_target_after_multiple_failures(lab_root, monkeyp
     _write_targets(lab_root, device_ids)
 
     def fake_collect(device_id, device_config):
-        raise terminal.TerminalError("boom")
+        raise discovery.DeviceCollectionError(f"Device '{device_id}': boom")
 
     monkeypatch.setattr(discovery, "_bootstrap_collect", fake_collect)
 
-    with pytest.raises(discovery.DiscoveryError):
-        discovery.discover_topology(lab_root)
+    discovery.discover_topology(lab_root)
 
     assert sorted(_track_bootstrap_close) == device_ids
 
@@ -303,7 +358,11 @@ def test_cleanup_runs_after_lldp_parse_failure(lab_root, monkeypatch, _track_boo
 
     monkeypatch.setattr(discovery, "_bootstrap_collect", fake_collect)
 
-    with pytest.raises(discovery.DiscoveryError):
-        discovery.discover_topology(lab_root)
+    result = discovery.discover_topology(lab_root)
 
+    # The unparsable LLDP is dropped (R1 stays Partial); CDP is still used.
+    assert [(o.device_id, o.lldp, o.cdp_ok, o.status) for o in result.outcomes] == [
+        ("R1", "unknown", True, "Partial"),
+        ("R2", "enabled", True, "Complete"),
+    ]
     assert sorted(_track_bootstrap_close) == device_ids

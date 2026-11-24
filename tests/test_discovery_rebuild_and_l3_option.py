@@ -212,26 +212,49 @@ def _r1r2r5r6_outputs():
     }
 
 
-def test_stale_committed_links_do_not_survive_rediscovery(lab_root, monkeypatch, capsys):
+def test_contradicting_committed_links_refuse_the_update_and_nothing_is_removed(lab_root, monkeypatch, capsys):
+    """The stored R1 Gi10 <-> R6 Gi6 link contradicts the live R1 Gi10 <->
+    R5 Gi6 observation. Discovery never resolves that by deleting the stored
+    link: the whole candidate update is refused (M13)."""
     _committed_stale(lab_root)
+    _access(lab_root, ["R1", "R2", "R5", "R6"])
+    monkeypatch.setattr(discovery, "_bootstrap_collect", _fake_xr(_r1r2r5r6_outputs()))
+    session = _session(lab_root)
+    capsys.readouterr()
+    assert _run(session) is False
+    out = capsys.readouterr().out
+    assert "contradicts the existing topology" in out and "R1 GigabitEthernet0/0/0/10" in out or "R1 Gi0/0/0/10" in out
+    assert "% Topology candidate not updated." in out
+    assert "no topology <name>" in out  # the way out is to delete explicitly and rediscover
+    assert session.definition_candidate is None and session.mode == "global"
+    assert len(lab.load_topology("sample_lab", lab_root)["links"]) == 4
+
+
+def test_unobserved_committed_links_are_retained_and_new_links_added(lab_root, monkeypatch, capsys):  # M06
+    kept = {"a": "R1", "a_interface": "Gi0/0/0/20", "b": "R6", "b_interface": "Gi0/0/0/20"}
+    lab.write_topology(
+        "sample_lab",
+        {
+            "name": "sample_lab",
+            "description": "kept",
+            "devices": {d: {"type": "iosxr"} for d in ("R1", "R2", "R5", "R6")},
+            "links": [kept],
+        },
+        lab_root,
+    )
     _access(lab_root, ["R1", "R2", "R5", "R6"])
     monkeypatch.setattr(discovery, "_bootstrap_collect", _fake_xr(_r1r2r5r6_outputs()))
     session = _session(lab_root)
     capsys.readouterr()
     assert _run(session)
     out = capsys.readouterr().out
-    links = {(l["a"], l["a_interface"], l["b"], l["b_interface"]) for l in session.definition_candidate["links"]}
-    assert links == {
-        ("R1", "Gi0/0/0/10", "R5", "Gi0/0/0/6"),
-        ("R1", "Gi0/0/0/11", "R5", "Gi0/0/0/7"),
-        ("R2", "Gi0/0/0/10", "R6", "Gi0/0/0/6"),
-        ("R2", "Gi0/0/0/11", "R6", "Gi0/0/0/7"),
-    }
+    links = session.definition_candidate["links"]
+    assert links[0] == kept and len(links) == 5
     assert session.definition_candidate["description"] == "kept"
-    # Removed (stale) committed links are announced before the replacement ...
-    assert "link   R1 Gi0/0/0/10 <-> R6 Gi0/0/0/6" in out
+    assert "Links added              : 4" in out and "Links retained           : 1" in out
+    assert "removed" not in out.lower()
     # ... and nothing is persisted before commit.
-    assert len(lab.load_topology("sample_lab", lab_root)["links"]) == 4
+    assert lab.load_topology("sample_lab", lab_root)["links"] == [kept]
     assert session.mode == "topology"
 
 
@@ -253,9 +276,12 @@ def test_candidate_is_deterministic_under_observation_and_device_order(lab_root,
         candidates.append(session.definition_candidate)
     assert all(c == candidates[0] for c in candidates)
     assert list(candidates[0]["devices"]) == sorted(candidates[0]["devices"])
-    keys = [discovery._topology_link_key(l) for l in candidates[0]["links"]]
-    assert keys == sorted(keys)
-    assert all((l["a"], l["a_interface"]) <= (l["b"], l["b_interface"]) for l in candidates[0]["links"])
+    # The committed R1-R2 link (no interfaces) stays first; discovered links follow, sorted.
+    assert candidates[0]["links"][0] == {"a": "R1", "b": "R2"}
+    discovered = candidates[0]["links"][1:]
+    keys = [discovery._topology_link_key(l) for l in discovered]
+    assert len(discovered) == 4 and keys == sorted(keys)
+    assert all((l["a"], l["a_interface"]) <= (l["b"], l["b_interface"]) for l in discovered)
 
 
 def test_reverse_link_orientation_is_one_link(lab_root, monkeypatch):
@@ -268,7 +294,8 @@ def test_reverse_link_orientation_is_one_link(lab_root, monkeypatch):
     session = _session(lab_root)
     assert _run(session)
     assert session.definition_candidate["links"] == [
-        {"a": "R1", "a_interface": "Gi0/0/0/1", "b": "R2", "b_interface": "Gi0/0/0/2"}
+        {"a": "R1", "b": "R2"},  # the committed link is retained, never replaced
+        {"a": "R1", "a_interface": "Gi0/0/0/1", "b": "R2", "b_interface": "Gi0/0/0/2"},
     ]
 
 
@@ -278,7 +305,7 @@ def test_managed_devices_without_links_are_included(lab_root, monkeypatch):
     session = _session(lab_root)
     assert _run(session)
     assert session.definition_candidate["devices"] == {"R1": {"type": "iosxr"}, "R2": {"type": "iosxr"}}
-    assert session.definition_candidate["links"] == []
+    assert session.definition_candidate["links"] == [{"a": "R1", "b": "R2"}]  # nothing observed, nothing removed
 
 
 # ==========================================================================
@@ -359,28 +386,27 @@ def _xr_text(proto, state):
 @pytest.mark.parametrize(
     "lldp_state,cdp_state,expected",
     [
-        (OK, OK, "success"),
-        (OK0, OK0, "success"),
-        (OK, OFF, "warning"),
-        (OFF, OK, "warning"),
-        (OFF, OK0, "warning"),
-        (OK0, OFF, "warning"),
-        (OFF, OFF, "fatal"),
+        (OK, OK, "complete"),
+        (OK0, OK0, "complete"),
+        (OK, OFF, "complete"),
+        (OFF, OK, "complete"),
+        (OFF, OK0, "complete"),
+        (OK0, OFF, "complete"),
+        (OFF, OFF, "no-protocol"),
     ],
 )
 def test_xr_protocol_priority_matrix(lab_root, monkeypatch, lldp_state, cdp_state, expected):
     _access(lab_root, ["R1", "R2"])
     outputs = {"R1": (_xr_text("lldp", lldp_state), _xr_text("cdp", cdp_state)), "R2": (LLDP_EMPTY, CDP_EMPTY)}
     monkeypatch.setattr(discovery, "_bootstrap_collect", _fake_xr(outputs))
-    if expected == "fatal":
-        with pytest.raises(discovery.DiscoveryError, match="no usable neighbor discovery protocol"):
-            discovery.discover_topology(lab_root)
-        return
     result = discovery.discover_topology(lab_root)
-    # "warning" rows = one protocol disabled beside a working one: a
-    # protocol status of a successful run, not a warning.
-    assert bool(result.protocol_status) == (expected == "warning")
-    assert not any("disabled" in w for w in result.protocol_warnings)
+    o = next(o for o in result.outcomes if o.device_id == "R1")
+    assert sorted(result.devices) == ["R1", "R2"]  # registered either way
+    if expected == "complete":
+        # One protocol disabled beside a working one is a protocol state, not a warning.
+        assert o.status == "Complete" and result.warnings == []
+    else:
+        assert o.status == "Partial" and result.warnings == ["R1: No usable neighbor discovery protocol."]
 
 
 @pytest.mark.parametrize(
@@ -392,16 +418,26 @@ def test_xr_protocol_priority_matrix(lab_root, monkeypatch, lldp_state, cdp_stat
         (f"{LLDP_HDR}\nHOST-R2  Gi0/0/0/1  120  R  Gi0/0/0/1\nTotal entries displayed: 4\n", CDP_EMPTY),
     ],
 )
-def test_unrecognized_protocol_output_is_fatal_even_if_the_other_protocol_succeeds(lab_root, monkeypatch, lldp_text, cdp_text):
+def test_unrecognized_protocol_output_is_dropped_while_the_other_protocol_is_used(lab_root, monkeypatch, lldp_text, cdp_text):
     _access(lab_root, ["R1", "R2"])
     outputs = {"R1": (lldp_text, cdp_text), "R2": (LLDP_EMPTY, CDP_EMPTY)}
     monkeypatch.setattr(discovery, "_bootstrap_collect", _fake_xr(outputs))
-    with pytest.raises(discovery.DiscoveryError):
-        discovery.discover_topology(lab_root)
+    result = discovery.discover_topology(lab_root)
+    o = next(o for o in result.outcomes if o.device_id == "R1")
+    # Parser fail-closed: the unusable protocol contributes nothing; the
+    # other one is still used; the device is Partial with a warning.
+    assert o.status == "Partial" and len(o.warnings) == 1 and o.protocol_usable
+    assert o.observations == [] and result.managed_links == []
 
 
-@pytest.mark.parametrize("failure", [terminal.TerminalError("Timed out waiting for the device prompt."), terminal.TerminalError("boom")])
-def test_command_error_or_timeout_during_collection_is_fatal(lab_root, monkeypatch, failure):
+@pytest.mark.parametrize(
+    "failure,session_ended",
+    [
+        (terminal.TerminalError("Timed out waiting for the device prompt."), False),
+        (terminal.TerminalError("Session 'network-lab-discovery-R1' exited while waiting for expected output."), True),
+    ],
+)
+def test_command_failure_mid_collection_keeps_the_completed_results(lab_root, monkeypatch, failure, session_ended):  # D05, C15
     _access(lab_root, ["R1"])
     monkeypatch.setattr(discovery, "_login", lambda d, c: "HOST-R1")
     monkeypatch.setattr(discovery, "_disable_terminal_paging", lambda d, p: None)
@@ -412,17 +448,22 @@ def test_command_error_or_timeout_during_collection_is_fatal(lab_root, monkeypat
         return LLDP_EMPTY if cmd == "show lldp neighbors" else "x"
 
     monkeypatch.setattr(discovery, "_run_command", run)
-    with pytest.raises(discovery.DiscoveryError, match="Device 'R1'"):
-        discovery.discover_topology(lab_root)
+    result = discovery.discover_topology(lab_root)
+    o = result.outcomes[0]
+    # Login and `show lldp neighbors` completed before the failure: the device
+    # stays Connected, its LLDP result is kept, only CDP is unknown.
+    assert (o.connection, o.lldp, o.lldp_ok, o.cdp, o.status) == ("connected", "enabled", True, "unknown", "Partial")
+    assert o.session_ended is session_ended and len(result.warnings) == 1
+    assert result.warnings[0].startswith("R1: ") and "Device 'R1'" not in result.warnings[0]
 
 
 def test_iosxe_matrix(lab_root, monkeypatch):
     _access(lab_root, ["X1"], {"X1": "iosxe"})
     cases = [
-        (LLDP_EMPTY, CDP_EMPTY, "success"),
-        (LLDP_OFF, CDP_EMPTY, "warning"),
-        (LLDP_EMPTY, CDP_OFF, "warning"),
-        (LLDP_OFF, CDP_OFF, "fatal"),
+        (LLDP_EMPTY, CDP_EMPTY, "Complete"),
+        (LLDP_OFF, CDP_EMPTY, "Complete"),
+        (LLDP_EMPTY, CDP_OFF, "Complete"),
+        (LLDP_OFF, CDP_OFF, "Partial"),
     ]
     for lldp_text, cdp_text, expected in cases:
         monkeypatch.setattr(
@@ -435,11 +476,8 @@ def test_iosxe_matrix(lab_root, monkeypatch):
                 "show_cdp_neighbors": b,
             },
         )
-        if expected == "fatal":
-            with pytest.raises(discovery.DiscoveryError):
-                discovery.discover_topology(lab_root)
-        else:
-            assert bool(discovery.discover_topology(lab_root).protocol_status) == (expected == "warning")
+        result = discovery.discover_topology(lab_root)
+        assert result.outcomes[0].status == expected and list(result.devices) == ["X1"]
 
 
 # ==========================================================================
@@ -460,21 +498,21 @@ def test_l3_mode_collects_and_reports_interfaces(lab_root, monkeypatch, capsys):
     capsys.readouterr()
     assert _run(session, "discover topology l3")
     out = capsys.readouterr().out
-    assert "L3 enrichment:        2/2 devices, 1 interfaces" in out
-    assert "Previous L3 data" not in out and "Disabled" not in out
+    assert "L3 enrichment            : 2/2 devices, 1 interfaces" in out
+    assert "L3 interfaces added      : 1" in out and "L3 enrichment            : Disabled" not in out
     assert session.definition_candidate["devices"]["R1"]["interfaces"] == {
         "GigabitEthernet0/0/0/1": {"ipv4_address": "10.0.12.1", "vrf": "default"}
     }
 
 
-def test_l2_mode_output_always_shows_disabled_and_not_carried_over(lab_root, monkeypatch, capsys):
+def test_l2_mode_output_shows_l3_disabled_and_existing_l3_kept(lab_root, monkeypatch, capsys):
     _access(lab_root, ["R1"])
     monkeypatch.setattr(discovery, "_bootstrap_collect", _fake_xr({"R1": (LLDP_EMPTY, CDP_OFF)}))
     session = _session(lab_root)
     capsys.readouterr()
     assert _run(session)
     out = capsys.readouterr().out
-    assert "  L3 enrichment:        Disabled\n  Previous L3 data:     Not carried over\n  Topology candidate:   sample_lab" in out
+    assert "L3 interfaces retained   : 0\nL3 enrichment            : Disabled (existing L3 data is kept)" in out
 
 
 @pytest.mark.parametrize(
@@ -485,15 +523,17 @@ def test_l2_mode_output_always_shows_disabled_and_not_carried_over(lab_root, mon
         "garbage without header\n",  # malformed
     ],
 )
-def test_l3_failure_is_fatal_and_leaves_candidate_untouched(lab_root, monkeypatch, capsys, l3_text):
+def test_l3_failure_is_a_warning_and_never_removes_or_blocks_anything(lab_root, monkeypatch, capsys, l3_text):  # L02, L03
     _access(lab_root, ["R1"])
     monkeypatch.setattr(discovery, "_bootstrap_collect", _fake_xr({"R1": (LLDP_EMPTY, CDP_OFF)}, {"R1": l3_text}))
     session = _session(lab_root)
     capsys.readouterr()
-    assert _run(session, "discover topology l3") is False
+    assert _run(session, "discover topology l3") is True
     out = capsys.readouterr().out
-    assert "Device 'R1': L3 interface collection failed" in out and "% Topology candidate not updated." in out
-    assert session.definition_candidate is None
+    assert "R1: L3 interface observations were not used" in out
+    assert "L3 enrichment            : 0/1 devices, 0 interfaces" in out
+    assert "% Topology candidate not updated." not in out and "Topology candidate unchanged." in out
+    assert "interfaces" not in session.definition_candidate["devices"]["R1"]
 
 
 def test_l3_valid_zero_interfaces_is_success(lab_root, monkeypatch):
@@ -503,14 +543,15 @@ def test_l3_valid_zero_interfaces_is_success(lab_root, monkeypatch):
     assert result.l3_enriched_device_count == 1 and result.l3_interface_count == 0
 
 
-def test_l3_then_l2_does_not_carry_l3_over(lab_root, monkeypatch):
+def test_l3_then_l2_keeps_the_l3_data(lab_root, monkeypatch):  # L04
     _access(lab_root, ["R1"])
     monkeypatch.setattr(discovery, "_bootstrap_collect", _fake_xr({"R1": (LLDP_EMPTY, CDP_OFF)}, {"R1": L3_OK}))
     session = _session(lab_root)
     assert _run(session, "discover topology l3")
-    assert "interfaces" in session.definition_candidate["devices"]["R1"]
+    l3_interfaces = session.definition_candidate["devices"]["R1"]["interfaces"]
+    assert l3_interfaces
     assert _rediscover(session)  # discovery-generated candidate: re-discovery allowed
-    assert session.definition_candidate["devices"]["R1"] == {"type": "iosxr"}
+    assert session.definition_candidate["devices"]["R1"] == {"type": "iosxr", "interfaces": l3_interfaces}
 
 
 def test_committed_l3_definition_then_l2_discovery(lab_root, monkeypatch):
@@ -524,7 +565,7 @@ def test_committed_l3_definition_then_l2_discovery(lab_root, monkeypatch):
 
     session = _session(lab_root)
     assert _run(session)
-    assert "interfaces" not in session.definition_candidate["devices"]["R1"]
+    assert session.definition_candidate["devices"]["R1"]["interfaces"] == committed["devices"]["R1"]["interfaces"]
     assert lab.load_topology("sample_lab", lab_root) == committed  # unchanged before commit
     assert _run(session, "clear")
     assert session.definition_candidate == committed  # clear restores committed state
@@ -532,7 +573,7 @@ def test_committed_l3_definition_then_l2_discovery(lab_root, monkeypatch):
 
     assert _rediscover(session)
     assert _run(session, "commit")
-    assert "interfaces" not in lab.load_topology("sample_lab", lab_root)["devices"]["R1"]
+    assert lab.load_topology("sample_lab", lab_root) == committed  # an L2 run never drops L3 data
 
 
 # ==========================================================================
@@ -553,7 +594,10 @@ def _edit(session, line):
 
 def test_manual_edit_after_discovery_is_rejected_even_if_reverted(one_device, capsys):
     session = _session(one_device)
-    assert _run(session)
+    # An L3 run adds interface data, so the candidate really differs from the
+    # committed topology (a no-change Discovery leaves nothing to protect).
+    assert _run(session, "discover topology l3")
+    assert session.definition_dirty()
     discovered_description = session.definition_candidate["description"]
     _edit(session, "description edited")
     capsys.readouterr()
@@ -575,7 +619,7 @@ def test_manual_edit_after_discovery_is_rejected_even_if_reverted(one_device, ca
     _edit(session, "clear")
     capsys.readouterr()
     _rediscover(session)
-    assert "Discovery complete." in capsys.readouterr().out
+    assert "Topology candidate unchanged." in capsys.readouterr().out
 
 
 def test_manual_revert_stays_dirty_by_value_semantics_unchanged(one_device):
@@ -601,7 +645,7 @@ def test_failed_manual_command_does_not_block_discovery(one_device, capsys):
     assert _run(session, "no device NOPE") is False  # fails: no change made
     capsys.readouterr()
     assert _rediscover(session)
-    assert "Discovery complete." in capsys.readouterr().out
+    assert "Topology candidate unchanged." in capsys.readouterr().out
 
 
 def test_unchanged_manual_value_is_not_a_mutation(one_device):

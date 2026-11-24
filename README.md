@@ -447,6 +447,7 @@ Restart Codex after changing its configuration. AI-client configuration and appr
 | `network-lab ... Failed to connect` | Check that the executable exists, the venv is intact, and the registration points to the current checkout. Avoid printing environment variables containing secrets. |
 | `/mcp` does not show a newly added server | Start a new Claude Code session after updating registration. |
 | `Device 'Router1' is not present in access-info` | The active topology and active access-info have different device inventories. Add an authorized connection definition or select the intended definitions **in the human CLI**; never guess credentials. |
+| A device shows `Partial` in the Device Discovery Summary | Read its line under `Warnings:`. The device is still registered; the warning says what was limited (connection, no usable LLDP/CDP, parse or L3 failure, unset/unsupported type). Fix the cause and run `discover topology` again -- retained information is kept and new information is merged. |
 | Discovery connects but produces zero managed links | Check whether observed neighbors are actually registered as managed devices. Unresolved LLDP/CDP neighbors do not become guessed topology links. |
 | Jump-host password prompt is rejected | Check the running version, private access-info selection, prompt/host identity, and authentication configuration. Do not disable fail-closed checks to force access. |
 | Host key verification failed | A first-use key is registered automatically, so this means the key of the jump server or target **changed** (or is of another type than the registered one) or could not be registered (`TOFU_*` error). Verify the new key through a trusted channel, then review the replacement with `discover topology` from an interactive terminal (a key in your own `~/.ssh/known_hosts`: `ssh-keygen -R`). Managed terminals never replace keys. **Never use `StrictHostKeyChecking=no` as a workaround.** |
@@ -564,8 +565,9 @@ network-lab# configure
 network-lab(config)# discover topology
 Discovering topology from access-info 'my_lab'...
 ...
-Discovery complete.
-...
+Topology candidate updated.
+Review the candidate using 'show configuration'.
+Commit is required to save the topology.
 network-lab(config-topology-my_lab)# show configuration
 ...
 network-lab(config-topology-my_lab)# commit
@@ -579,13 +581,74 @@ Commit complete.
 
 The two commits serve different purposes: **the first saves the discovered topology definition; the second selects it as active**.
 
-Discovery is intentionally conservative:
+**Discovery adds and updates information; it never deletes it.** `discover topology` enriches a topology candidate with what it can learn, and it does not synchronize the topology with the network.
 
-- `discover topology` collects LLDP/CDP evidence only; `discover topology l3` adds observed IPv4/VRF information.
-- It **rebuilds** the topology candidate from the current observations instead of silently merging older links. Unobserved elements can therefore disappear **from the new candidate**. The committed definition remains untouched until `commit`.
-- Missing or conflicting evidence, failures, and uncommitted manual edits cause Discovery to fail closed rather than guessing or overwriting edits.
-- Discovery does not configure devices, enable LLDP/CDP, auto-commit, or auto-select a topology.
+- **Device Registration, Device Discovery and Link Discovery are separate.** Every device defined in the selected access-info is registered in the topology candidate (device ID and `type` only -- never an address, credential, port, transport or jump host; jump hosts are not devices). Registration does not depend on connectivity, authentication, LLDP, CDP or L3 collection. A device with no `type`, or a type Discovery does not implement (for example `nxos`, `host`), is registered too, and Discovery is simply not attempted for it.
+- **Failures are per device and per protocol (partial success).** A connection or login failure, a session that ends mid-collection, a disabled/unsupported/unparsable LLDP or CDP, or a failed L3 collection becomes a **warning** for that device (status `Partial`); everything that was collected correctly -- from this device and from every other one -- is still used. An unparsable protocol output contributes nothing (the parsers stay fail-closed). LLDP and CDP are independent: if one works, its observations are used. L3 collection does not depend on LLDP/CDP.
+- **The merge is non-destructive.** New devices, links and L3 interfaces are added; a newly observed, valid value (for example a changed IPv4 address on a known interface) updates that field. Nothing is ever removed: not a device that was dropped from the access-info, not a link that was not seen this time (including after a successful "zero neighbors" result, a disabled protocol or an unreachable device), not an interface or L3 data a run did not report (an L2 run keeps existing L3 data). The same link seen again is never duplicated, whatever the endpoint order or interface spelling, or LLDP/CDP source.
+- **Retained is not re-confirmed.** What Discovery keeps may be stale; a retained device, link or interface was not necessarily observed by this run.
+- **Contradictions are refused, not overwritten.** A new link that claims an interface already used by a different stored link, a device `type` that differs from the stored one, conflicting LLDP/CDP observations, an interface in more than one link, a changed or unverifiable SSH host key, an unexpected internal error, or an invalid candidate are fatal: nothing is applied (`% Topology candidate not updated.`) and the previous candidate is kept.
+- **To rebuild a topology from scratch, delete it explicitly** and discover again (see below). There is no `replace` option and Discovery never deletes anything on its own.
+- Discovery does not configure devices, enable LLDP/CDP, auto-commit, or auto-select a topology. Uncommitted manual edits block a re-run (`clear` first). Ctrl-C during Discovery applies nothing.
 - `clear` discards uncommitted candidate changes and restores the committed state.
+
+Example (the output of a run where one device has no usable neighbor protocol and one could not be reached):
+
+```text
+network-lab(config)# discover topology
+Discovering topology from access-info 'sr-training'...
+
+Device Discovery Summary
+---------------------------------------------------------------
+Device   Type    Connection   LLDP       CDP           Status
+---------------------------------------------------------------
+R1       iosxr   Connected    Enabled    Unsupported   Complete
+R2       iosxr   Connected    Disabled   Unsupported   Partial
+R3       iosxr   Connected    Enabled    Unsupported   Complete
+R4       iosxr   Failed       Unknown    Unknown       Partial
+---------------------------------------------------------------
+
+Devices registered       : 4
+Devices connected        : 3
+Devices not connected    : 1
+Devices with neighbors   : 2
+Devices without protocol : 1
+Discovered links         : 2
+
+Topology Changes
+--------------------------------
+Devices added            : 4
+Devices updated          : 0
+Devices retained         : 0
+Links added              : 2
+Links retained           : 0
+L3 interfaces retained   : 0
+L3 enrichment            : Disabled (existing L3 data is kept)
+
+Warnings:
+  R2: No usable neighbor discovery protocol.
+  R4: Session 'network-lab-discovery-R4' exited while waiting for expected output.
+
+Topology candidate updated with limitations.
+Review the candidate using 'show configuration'.
+Commit is required to save the topology.
+```
+
+- **Status**: `Complete` -- connected, and at least one neighbor protocol was read successfully (an empty neighbor table counts), with no limitation. `Partial` -- the device is registered, but something was limited (not connected, no usable protocol, a failed parse or L3 read, a session that ended, unsupported or unset type). A session that ends after login still shows `Connected`, with `Partial` and a warning.
+- **LLDP / CDP**: `Enabled`, `Disabled`, `Unsupported`, `Unknown` (could not be confirmed -- for example the device was not reached) or `N/A`. `Unknown` is never reported as `Disabled` or `Unsupported`.
+- **Topology Changes** compares the topology before the run with the final candidate. `Discovered links` counts this run's observations; `Links retained` counts stored links that stayed. If nothing changed: `Topology candidate unchanged.`
+
+To rebuild a topology completely (for example after replacing the lab), delete it and discover again:
+
+```text
+network-lab(config)# no topology my_lab
+network-lab(config)# commit
+network-lab(config)# discover topology
+network-lab(config-topology-my_lab)# show configuration
+network-lab(config-topology-my_lab)# commit
+```
+
+If `my_lab` is the **active** topology, the CLI refuses the deletion at `commit` (`Cannot remove topology 'my_lab' because it is active in running-config.`): first select another topology in `running-config` (`topology <other>`, then `commit`), delete, rediscover, commit, and select the rebuilt topology again if you want it active.
 
 See [CLI reference](docs/cli_reference.md) for detailed discovery conditions and command syntax.
 
@@ -649,7 +712,7 @@ See [SECURITY.md](SECURITY.md) for the complete trust model and vulnerability re
 
 - Discovery supports IOS XR, IOS XE, and classic IOS, but not NX-OS.
 - No SNMP, NETCONF, RESTCONF, or generic discovery-plugin framework.
-- No automatic stale-link pruning **outside a Discovery run**; Discovery itself rebuilds the candidate from current observations.
+- No automatic pruning of any kind: Discovery only adds and updates, so stale devices, links and interfaces stay until you edit the topology or delete and rediscover it.
 - L3 enrichment records directly observed IPv4 address and VRF information, not an inferred routed topology.
 - Editable checkout required; no standard non-editable/wheel installation.
 - `access-info` is edited through structured CLI commands, not the external YAML editor.

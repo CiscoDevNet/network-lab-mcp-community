@@ -134,6 +134,38 @@ class DiscoveryError(Exception):
     """Fail-closed error for the whole `discover topology` operation."""
 
 
+class ProtocolOutputError(DiscoveryError):
+    """A neighbor-protocol output carrying a "not enabled" message that is not
+    exactly the expected one -- an unverifiable state. Raised by the pure
+    classifier; Discovery turns it into an unusable protocol (state
+    "unknown", a warning, no observations), never into a guess."""
+
+
+_DEVICE_PREFIX_RE = re.compile(r"^Device '[^']*': ")
+_SESSION_EXITED_MARKER = "exited while waiting for expected output"
+
+
+class DeviceCollectionError(DiscoveryError):
+    """A *continuable*, single-device collection failure: connection, login,
+    authentication, timeout, or the session ending mid-collection. Only an
+    explicitly classified failure of this kind becomes a per-device Warning
+    (the device is still registered); every other DiscoveryError --
+    host-key problems, an ambiguous credential target, unexpected worker
+    crashes -- stays fatal for the whole run. `collected` holds the output
+    of every command that *completed* before the failure (never the
+    interrupted command's partial output) and `hostname` its login prompt
+    identity when login succeeded."""
+
+    def __init__(self, message: str, collected: dict | None = None, session_ended: bool = False):
+        super().__init__(message)
+        self.collected: dict = collected if collected is not None else {}
+        self.session_ended = session_ended
+
+    @property
+    def reason(self) -> str:
+        return _DEVICE_PREFIX_RE.sub("", str(self), count=1)
+
+
 # --------------------------------------------------------------------------
 # Private bootstrap connectivity + minimal command runner
 # --------------------------------------------------------------------------
@@ -214,7 +246,9 @@ def _raise_if_host_key_failure(device_id: str, device_config: dict) -> None:
         raise err
     known = hostkey_flow.tofu.classify_ssh_failure(text)
     if known is not None and known[0] in (hostkey_flow.tofu.HOST_KEY_ALGORITHM_MISMATCH, hostkey_flow.tofu.SSH_KEX_MISMATCH):
-        raise DiscoveryError(
+        # Algorithm negotiation failed before any credential was sent: an
+        # ordinary connection failure of this one device, not a trust problem.
+        raise DeviceCollectionError(
             f"Device '{device_id}': [{known[0]}] {known[1]}. The host key was registered (if it was new) but the "
             "connection failed during algorithm negotiation; no credentials were sent."
         )
@@ -273,7 +307,7 @@ def _login(device_id: str, device_config: dict) -> str:
         text = terminal.wait_for_bootstrap_pattern(device_id, _IOSXR_PROMPT_RE, LOGIN_TIMEOUT_SECONDS)
     match = _IOSXR_PROMPT_RE.search(_last_nonblank_line(text))
     if not match:
-        raise DiscoveryError(f"Device '{device_id}': did not reach an IOS XR prompt after login.")
+        raise DeviceCollectionError(f"Device '{device_id}': did not reach an IOS XR prompt after login.")
     return match.group("hostname")
 
 
@@ -301,7 +335,7 @@ def _login_ios_style(device_id: str, device_config: dict) -> str:
     if _USERNAME_PROMPT_RE.search(last_line):
         username = device_config.get("username")
         if not username:
-            raise DiscoveryError(
+            raise DeviceCollectionError(
                 f"Device '{device_id}': a username prompt appeared but no username is configured in "
                 "the active access-info definition."
             )
@@ -318,7 +352,7 @@ def _login_ios_style(device_id: str, device_config: dict) -> str:
         text = terminal.wait_for_bootstrap_pattern(device_id, _IOS_STYLE_PROMPT_RE, LOGIN_TIMEOUT_SECONDS)
     match = _IOS_STYLE_PROMPT_RE.search(_last_nonblank_line(text))
     if not match:
-        raise DiscoveryError(f"Device '{device_id}': did not reach an exec prompt after login.")
+        raise DeviceCollectionError(f"Device '{device_id}': did not reach an exec prompt after login.")
     return match.group("hostname")
 
 
@@ -390,108 +424,90 @@ def _disable_terminal_paging(device_id: str, prompt_re: re.Pattern) -> None:
         raise terminal.TerminalError(f"Timed out disabling terminal paging: {exc}") from exc
 
 
-def _bootstrap_collect(device_id: str, device_config: dict, include_l3: bool = False) -> dict:
-    """IOS XR collection: log in, disable pagination, and collect the
-    read-only commands -- `show version` (identity/diagnostic parity),
-    both neighbor-discovery protocols (IOS XR gets LLDP and CDP), and
-    `show ipv4 interface brief` (L3 enrichment, only when `include_l3`). `show running-config` is deliberately
-    not collected: nothing in the Discovery result, parser, or
-    reconciliation logic ever read it, so collecting the device's
-    complete configuration -- which can be large and carries far more
-    device-specific detail than Discovery needs -- would only persist
-    unnecessary information into the terminal log for no benefit. CDP/L3
-    being unavailable is not a collection failure -- only a login,
-    LLDP/CDP command, or timeout failure is (DiscoveryError). The caller
-    is responsible for closing the bootstrap session either way."""
+def _collect_device(
+    device_id: str,
+    device_config: dict,
+    login,
+    paging_prompt_re: re.Pattern,
+    commands: list[tuple[str, str]],
+    prompt_re: re.Pattern | None,
+) -> dict:
+    """Shared collection body: log in, disable paging, then run each read-only
+    `(key, command)` in order, recording each command's output only once the
+    device prompt has returned. A continuable failure (TerminalError, or a
+    DeviceCollectionError from login) is re-raised as a DeviceCollectionError
+    that carries everything collected *before* it, so one late command
+    failing never discards the earlier, completed results; the interrupted
+    command's own partial output is never recorded. Security-relevant
+    DiscoveryErrors (host keys, ambiguous credential target) propagate
+    unchanged. The caller closes the bootstrap session either way."""
+    collected: dict = {}
     try:
-        hostname = _login(device_id, device_config)
+        collected["hostname"] = login(device_id, device_config)
         # Discovery sessions are temporary and closed right after
         # collection, so there is no need to restore terminal length
         # afterwards (see docs/architecture.md).
-        _disable_terminal_paging(device_id, _IOSXR_PROMPT_RE)
-        show_version = _run_command(device_id, "show version")
-        show_lldp_neighbors = _run_command(device_id, "show lldp neighbors")
-        show_cdp_neighbors = _run_command(device_id, "show cdp neighbors")
-        show_ipv4_interface_brief = (
-            _run_command(device_id, "show ipv4 interface brief") if include_l3 else None
-        )
+        _disable_terminal_paging(device_id, paging_prompt_re)
+        for key, command in commands:
+            if prompt_re is None:
+                collected[key] = _run_command(device_id, command)
+            else:
+                collected[key] = _run_command(device_id, command, prompt_re)
+    except DeviceCollectionError as exc:
+        exc.collected = collected
+        raise
     except terminal.TerminalError as exc:
-        raise DiscoveryError(f"Device '{device_id}': {exc}") from exc
-    collected = {
-        "hostname": hostname,
-        "show_version": show_version,
-        "show_lldp_neighbors": show_lldp_neighbors,
-        "show_cdp_neighbors": show_cdp_neighbors,
-    }
-    if include_l3:
-        collected["show_ipv4_interface_brief"] = show_ipv4_interface_brief
+        raise DeviceCollectionError(
+            f"Device '{device_id}': {exc}",
+            collected=collected,
+            session_ended=_SESSION_EXITED_MARKER in str(exc),
+        ) from exc
     return collected
+
+
+def _bootstrap_collect(device_id: str, device_config: dict, include_l3: bool = False) -> dict:
+    """IOS XR collection: `show version` (identity/diagnostic parity), both
+    neighbor-discovery protocols (IOS XR gets LLDP and CDP), and `show ipv4
+    interface brief` (L3 enrichment, only when `include_l3`). `show
+    running-config` is deliberately not collected: nothing in Discovery ever
+    read it, and a device's complete configuration would only persist
+    unnecessary detail into the terminal log. A continuable failure raises
+    DeviceCollectionError carrying the results completed so far (see
+    _collect_device())."""
+    commands = [
+        ("show_version", "show version"),
+        ("show_lldp_neighbors", "show lldp neighbors"),
+        ("show_cdp_neighbors", "show cdp neighbors"),
+    ]
+    if include_l3:
+        commands.append(("show_ipv4_interface_brief", "show ipv4 interface brief"))
+    return _collect_device(device_id, device_config, _login, _IOSXR_PROMPT_RE, commands, None)
 
 
 def _bootstrap_collect_iosxe(device_id: str, device_config: dict, include_l3: bool = False) -> dict:
-    """IOS XE collection: log in, disable pagination (see
-    _disable_terminal_paging()'s own docstring for the real C9200L
-    failure this fixes), and collect `show version` (diagnostic parity
-    with the IOS XR path), both neighbor-discovery protocols (IOS XE gets
-    LLDP, in addition to CDP -- `% LLDP is not enabled` is handled by the
-    caller, not here, exactly like CDP-unavailable already was), and the
-    L3 enrichment commands `show vrf` + `show ip interface brief`
-    (only when `include_l3`). `show
-    running-config` is skipped since it is unused downstream for IOS XR
-    too (kept minimal, "collect at minimum"). Fails closed (DiscoveryError)
-    on any login, paging, LLDP/CDP command, or timeout failure."""
-    try:
-        hostname = _login_ios_style(device_id, device_config)
-        _disable_terminal_paging(device_id, _IOS_STYLE_PROMPT_RE)
-        show_version = _run_command(device_id, "show version", _IOS_STYLE_PROMPT_RE)
-        show_lldp_neighbors = _run_command(device_id, "show lldp neighbors", _IOS_STYLE_PROMPT_RE)
-        show_cdp_neighbors = _run_command(device_id, "show cdp neighbors", _IOS_STYLE_PROMPT_RE)
-        show_vrf = _run_command(device_id, "show vrf", _IOS_STYLE_PROMPT_RE) if include_l3 else None
-        show_ip_interface_brief = (
-            _run_command(device_id, "show ip interface brief", _IOS_STYLE_PROMPT_RE) if include_l3 else None
-        )
-    except terminal.TerminalError as exc:
-        raise DiscoveryError(f"Device '{device_id}': {exc}") from exc
-    collected = {
-        "hostname": hostname,
-        "show_version": show_version,
-        "show_lldp_neighbors": show_lldp_neighbors,
-        "show_cdp_neighbors": show_cdp_neighbors,
-    }
+    """IOS XE collection: `show version`, LLDP and CDP, and the L3 commands
+    `show vrf` + `show ip interface brief` (only when `include_l3`).
+    Pagination is disabled first (see _disable_terminal_paging()'s docstring
+    for the real C9200L failure this fixes). `% LLDP is not enabled` is
+    classified by the caller, not here."""
+    commands = [
+        ("show_version", "show version"),
+        ("show_lldp_neighbors", "show lldp neighbors"),
+        ("show_cdp_neighbors", "show cdp neighbors"),
+    ]
     if include_l3:
-        collected["show_vrf"] = show_vrf
-        collected["show_ip_interface_brief"] = show_ip_interface_brief
-    return collected
+        commands += [("show_vrf", "show vrf"), ("show_ip_interface_brief", "show ip interface brief")]
+    return _collect_device(device_id, device_config, _login_ios_style, _IOS_STYLE_PROMPT_RE, commands, _IOS_STYLE_PROMPT_RE)
 
 
 def _bootstrap_collect_ios(device_id: str, device_config: dict, include_l3: bool = False) -> dict:
-    """Classic IOS collection (deliberately minimal -- preserving the same
-    "collect at minimum" principle used for IOS XE): log in, disable
-    pagination, `show version`, `show cdp neighbors` (classic IOS has no
-    LLDP support), and the L3 enrichment commands `show vrf` + `show ip
-    interface brief` (only when `include_l3`). No `show running-config` (unused
-    downstream). Fails closed (DiscoveryError) on any login, paging, CDP
-    command, or timeout failure."""
-    try:
-        hostname = _login_ios_style(device_id, device_config)
-        _disable_terminal_paging(device_id, _IOS_STYLE_PROMPT_RE)
-        show_version = _run_command(device_id, "show version", _IOS_STYLE_PROMPT_RE)
-        show_cdp_neighbors = _run_command(device_id, "show cdp neighbors", _IOS_STYLE_PROMPT_RE)
-        show_vrf = _run_command(device_id, "show vrf", _IOS_STYLE_PROMPT_RE) if include_l3 else None
-        show_ip_interface_brief = (
-            _run_command(device_id, "show ip interface brief", _IOS_STYLE_PROMPT_RE) if include_l3 else None
-        )
-    except terminal.TerminalError as exc:
-        raise DiscoveryError(f"Device '{device_id}': {exc}") from exc
-    collected = {
-        "hostname": hostname,
-        "show_version": show_version,
-        "show_cdp_neighbors": show_cdp_neighbors,
-    }
+    """Classic IOS collection (deliberately minimal): `show version`, `show
+    cdp neighbors` (classic IOS has no LLDP support), and the L3 commands
+    `show vrf` + `show ip interface brief` (only when `include_l3`)."""
+    commands = [("show_version", "show version"), ("show_cdp_neighbors", "show cdp neighbors")]
     if include_l3:
-        collected["show_vrf"] = show_vrf
-        collected["show_ip_interface_brief"] = show_ip_interface_brief
-    return collected
+        commands += [("show_vrf", "show vrf"), ("show_ip_interface_brief", "show ip interface brief")]
+    return _collect_device(device_id, device_config, _login_ios_style, _IOS_STYLE_PROMPT_RE, commands, _IOS_STYLE_PROMPT_RE)
 
 
 # --------------------------------------------------------------------------
@@ -609,7 +625,7 @@ def iosxr_protocol_disabled(raw_text: str, protocol: str, local_device_id: str) 
         return False
     if meaningful == [_IOSXR_DISABLED_MESSAGES[protocol]]:
         return True
-    raise DiscoveryError(
+    raise ProtocolOutputError(
         f"Device '{local_device_id}': 'show {protocol} neighbors' output contains a protocol-disabled "
         "message that is not exactly the expected one for this command; refusing to interpret it."
     )
@@ -1193,6 +1209,52 @@ def reconcile_links(
 # --------------------------------------------------------------------------
 
 
+@dataclass
+class DeviceOutcome:
+    """Everything one run learned about one registered device -- the single
+    per-device record behind the Device Discovery Summary and the Warnings.
+    Internal and display-only: none of it is persisted into the topology.
+
+    connection: "connected" (login prompt identity confirmed), "failed" (an
+    attempt that did not get that far) or "not_attempted". A session that
+    ends *after* login stays "connected" with a warning.
+    lldp / cdp: "enabled", "disabled", "unsupported", "unknown" (could not be
+    confirmed) or "na" (not applicable). `*_ok` means a recognized, fully
+    parsed neighbor table was obtained (zero rows included), i.e. its
+    observations are usable. l3_state: "not_requested", "ok", "failed" or
+    "unknown" (never collected)."""
+
+    device_id: str
+    device_type: str | None
+    supported: bool
+    attempted: bool = False
+    connection: str = "not_attempted"
+    hostname: str | None = None
+    session_ended: bool = False
+    lldp: str = "unknown"
+    cdp: str = "unknown"
+    lldp_ok: bool = False
+    cdp_ok: bool = False
+    observations: list = field(default_factory=list)
+    l3_state: str = "not_requested"
+    l3_interfaces: dict | None = None
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def protocol_usable(self) -> bool:
+        return self.lldp_ok or self.cdp_ok
+
+    @property
+    def status(self) -> str:
+        """"Complete": connected, identity confirmed, at least one neighbor
+        protocol observed (an empty table counts) and no limitation of any
+        kind (no warning). Everything else that is still registered is
+        "Partial"."""
+        if self.connection == "connected" and self.protocol_usable and not self.warnings:
+            return "Complete"
+        return "Partial"
+
+
 @dataclass(frozen=True)
 class DiscoveryResult:
     access_info_name: str
@@ -1205,25 +1267,23 @@ class DiscoveryResult:
     ios_target_count: int = 0
     l3_enriched_device_count: int = 0
     l3_interface_count: int = 0
-    l3_warnings: list[str] = field(default_factory=list)
     devices: dict[str, dict] = field(default_factory=dict)
     managed_links: list[ManagedLink] = field(default_factory=list)
     unresolved: list[UnresolvedNeighbor] = field(default_factory=list)
     conflicts: list[LinkConflict] = field(default_factory=list)
     identity_map: dict[str, str] = field(default_factory=dict)
-    protocol_warnings: list[str] = field(default_factory=list)
-    # Normal protocol-availability facts of a successful run (not warnings):
-    # {"CDP disabled": [device, ...], "CDP unsupported": [...], ...} in a fixed
-    # label order, devices in target order.
-    protocol_status: dict[str, list[str]] = field(default_factory=dict)
     include_l3: bool = False
+    # Per registered device, in access-info order, and the flattened,
+    # deterministic "<device>: <message>" warning lines.
+    outcomes: list[DeviceOutcome] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 def _select_targets_by_type(access_data: dict, wanted_type: str) -> dict[str, dict]:
-    """Discovery targets of one normalized device `type`. Any other type
-    (including an unrecognized/missing one) is silently skipped, not an
-    error -- only a definition with *zero* supported targets of any kind
-    fails (see discover_topology())."""
+    """Discovery targets of one normalized device `type`, with the device's
+    jump host definition resolved into `jump_host_config`. Devices of any
+    other type (including an unrecognized/missing one) are not targets of
+    this type; they are still *registered* (see discover_topology())."""
     targets: dict[str, dict] = {}
     devices = access_data.get("devices") or {}
     jump_hosts = access_data.get("jump_hosts") or {}
@@ -1258,45 +1318,209 @@ def _select_ios_targets(access_data: dict) -> dict[str, dict]:
     return _select_targets_by_type(access_data, "ios")
 
 
-# Display/serialization order of the protocol-status labels.
-_PROTOCOL_STATUS_LABELS = ("LLDP disabled", "LLDP unsupported", "CDP disabled", "CDP unsupported")
+def _plan_registration(access_data: dict) -> dict[str, DeviceOutcome]:
+    """Device Registration plan: every device defined in the access-info, in
+    access-info order, regardless of type, reachability or protocol support.
+    Only the device ID and its (already validated) type are ever used; no
+    connection detail and no jump host is registered."""
+    plan: dict[str, DeviceOutcome] = {}
+    for device_id, device_cfg in (access_data.get("devices") or {}).items():
+        raw_type = (device_cfg or {}).get("type")
+        device_type = None
+        if raw_type:
+            try:
+                device_type = lab.normalize_device_type(str(raw_type))
+            except lab.LabConfigError as exc:
+                raise DiscoveryError(f"Device '{device_id}': {exc}") from exc
+        plan[device_id] = DeviceOutcome(device_id, device_type, supported=device_type in _SUPPORTED_TYPES)
+    return plan
+
+
+_SUPPORTED_TYPES = ("iosxr", "iosxe", "ios")
+
+
+def _connection_info_missing(device_cfg: dict) -> bool:
+    return not device_cfg.get("address") or device_cfg.get("transport") not in ("ssh", "telnet")
+
+
+def _strip_device_prefix(text: str) -> str:
+    return _DEVICE_PREFIX_RE.sub("", text, count=1)
+
+
+def _apply_neighbor_state(outcome: DeviceOutcome, info: dict) -> None:
+    """Classify LLDP and CDP independently from the commands that actually
+    completed. Neither protocol's failure affects the other, and a failure
+    never raises: it leaves that protocol unusable (its partial or
+    unrecognized observations are dropped) and records a warning. "No
+    neighbors" (a recognized empty table) is a normal, usable observation."""
+    device_id = outcome.device_id
+    device_type = outcome.device_type
+    if device_type in ("iosxr", "iosxe"):
+        lldp_text = info.get("show_lldp_neighbors")
+        if lldp_text is None:
+            outcome.lldp = "unknown"
+        else:
+            try:
+                disabled = (
+                    iosxr_protocol_disabled(lldp_text, "lldp", device_id)
+                    if device_type == "iosxr"
+                    else bool(_LLDP_UNAVAILABLE_RE.search(lldp_text))
+                )
+                lldp_observations = [] if disabled else parse_lldp_neighbors(lldp_text, device_id)
+            except (LldpParseError, ProtocolOutputError) as exc:
+                outcome.lldp = "unknown"
+                outcome.warnings.append(f"LLDP observations were not used: {_strip_device_prefix(str(exc))}")
+            else:
+                if disabled:
+                    outcome.lldp = "disabled"
+                else:
+                    outcome.lldp = "enabled"
+                    outcome.lldp_ok = True
+                    outcome.observations.extend(lldp_observations)
+    else:
+        outcome.lldp = "na"
+
+    cdp_text = info.get("show_cdp_neighbors")
+    cdp_disabled = False
+    cdp_ambiguous: ProtocolOutputError | None = None
+    if cdp_text is not None and not _cdp_table_recognized(cdp_text):
+        try:
+            cdp_disabled = iosxr_protocol_disabled(cdp_text, "cdp", device_id)
+        except ProtocolOutputError as exc:
+            cdp_ambiguous = exc
+    if cdp_text is None:
+        outcome.cdp = "unknown"
+    elif cdp_ambiguous is not None:
+        outcome.cdp = "unknown"
+        outcome.warnings.append(f"CDP observations were not used: {_strip_device_prefix(str(cdp_ambiguous))}")
+    elif _cdp_table_recognized(cdp_text):
+        outcome.cdp = "enabled"
+        cdp_observations = parse_cdp_neighbors(cdp_text, device_id)
+        if not cdp_observations and _cdp_table_has_body(cdp_text):
+            outcome.warnings.append(
+                "CDP observations were not used: 'show cdp neighbors' table could not be parsed "
+                "(rows present but none recognized)."
+            )
+        else:
+            outcome.cdp_ok = True
+            outcome.observations.extend(cdp_observations)
+    elif cdp_disabled:
+        outcome.cdp = "disabled"
+    elif device_type == "iosxr" and _iosxr_lnt_cdp_unsupported(info.get("show_version", ""), cdp_text):
+        outcome.cdp = "unsupported"
+    else:
+        outcome.cdp = "unknown"
+        outcome.warnings.append(
+            "CDP observations were not used: 'show cdp neighbors' output was not recognized as valid "
+            "CDP structure (no 'Device ID ... Local Intrfce ... Port ID' table header found)."
+        )
+
+
+def _apply_l3_state(outcome: DeviceOutcome, info: dict, management_address: str | None) -> None:
+    """L3 enrichment is independent of LLDP/CDP: it is classified from its own
+    completed commands only. A parse failure drops that device's L3
+    observation (with a warning); a command that never completed leaves it
+    "unknown" (the collection failure's own warning covers it)."""
+    device_type = outcome.device_type
+    keys = ("show_ipv4_interface_brief",) if device_type == "iosxr" else ("show_ip_interface_brief", "show_vrf")
+    if any(key not in info for key in keys):
+        outcome.l3_state = "unknown"
+        return
+    try:
+        if device_type == "iosxr":
+            raw_l3 = parse_ipv4_interface_brief(info["show_ipv4_interface_brief"])
+        else:
+            raw_l3 = _combine_ios_style_l3(
+                parse_ip_interface_brief(info["show_ip_interface_brief"]), parse_show_vrf(info["show_vrf"])
+            )
+    except L3ParseError as exc:
+        outcome.l3_state = "failed"
+        outcome.warnings.append(f"L3 interface observations were not used: {exc}")
+        return
+    outcome.l3_state = "ok"
+    outcome.l3_interfaces = _build_device_interface_fields(raw_l3, management_address)
+
+
+def _record_collection(
+    outcome: DeviceOutcome,
+    info: dict,
+    failure: DeviceCollectionError | None,
+    include_l3: bool,
+    management_address: str | None,
+) -> None:
+    outcome.attempted = True
+    outcome.hostname = info.get("hostname")
+    outcome.connection = "connected" if outcome.hostname else "failed"
+    if failure is not None:
+        outcome.session_ended = failure.session_ended
+        outcome.warnings.append(failure.reason)
+    if outcome.connection != "connected":
+        # Identity was never confirmed: nothing the device printed (if
+        # anything) is trusted, so every protocol stays "unknown".
+        if include_l3:
+            outcome.l3_state = "unknown"
+        return
+    _apply_neighbor_state(outcome, info)
+    if include_l3:
+        _apply_l3_state(outcome, info, management_address)
+    unavailable = ("disabled", "unsupported", "na")
+    if not outcome.protocol_usable and outcome.lldp in unavailable and outcome.cdp in unavailable:
+        outcome.warnings.append("No usable neighbor discovery protocol.")
 
 
 def discover_topology(lab_root=None, include_l3: bool = False, hostkeys=None) -> DiscoveryResult:
     """Run the full Discovery flow against committed running-config's
     selected access-info and return an in-memory DiscoveryResult.
 
-    Never touches the committed candidate/topology/settings -- turning this
-    into a topology candidate (a rebuild, see build_discovery_candidate())
-    is the caller's job (cli/config.py). Conservative or nothing: if any supported
-    target fails login/collection, the whole operation fails
-    (DiscoveryError) before any bootstrap session is even considered for
-    reconciliation -- there is no partial result.
+    Never touches the committed candidate/topology/settings -- merging the
+    result into a topology candidate (see build_discovery_candidate()) is
+    the caller's job (cli/config.py).
 
-    Supported targets: IOS XR (LLDP + CDP), IOS XE
-    (LLDP + CDP), and classic IOS (CDP only). `nxos`/`host` and any
-    unrecognized type are silently skipped, not failed; only zero supported
-    targets of *any* kind fails. L3 enrichment (IPv4 + VRF context) is
-    collected only when `include_l3` is True (`discover topology l3`);
-    the default L2-only run never sends an L3 command. Fatal (DiscoveryError,
-    nothing returned): any login/command/timeout failure, an unrecognized
-    LLDP/CDP output, a device with no usable neighbor protocol, a
-    reconciliation conflict or physical-interface reuse, and -- for an
-    explicit L3 request -- any L3 collection or parse failure."""
+    Device Registration, Device Discovery and Link Discovery are separate
+    responsibilities. Every device the access-info defines is registered
+    (ID and type only), whatever its type, reachability or protocol support.
+    Supported devices (IOS XR, IOS XE, classic IOS) are then collected in
+    parallel, and each device's outcome is recorded independently: a
+    connection/login/timeout failure, a session ending mid-collection, a
+    disabled/unsupported/unparsable LLDP or CDP, or a failed L3 collection
+    is a per-device (or per-protocol) *warning*, never a failure of the run,
+    and results completed before a failure are kept. Types without a
+    Discovery implementation (and `type`-less devices) are registered with
+    discovery not attempted.
+
+    Still fatal (DiscoveryError, nothing returned): an invalid access-info
+    definition, no device at all, anything security relevant (changed or
+    unverifiable host key, ambiguous credential target), an unexpected worker
+    crash (a bug), and reconciliation conflicts or physical-interface reuse
+    in the observed links. Ctrl-C is not a partial success: it propagates."""
     lab_root = lab_root or lab.find_lab_root()
     access_info_name = resolve_default_topology_name(lab_root)
     if not lab.access_info_exists(access_info_name, lab_root):
         raise DiscoveryError(f"Selected access-info '{access_info_name}' does not exist.")
     access_data = lab.load_access_info(access_info_name, lab_root)
 
+    plan = _plan_registration(access_data)
+    if not plan:
+        raise DiscoveryError(f"No devices found in access-info '{access_info_name}'.")
     iosxr_targets = _select_iosxr_targets(access_data)
     iosxe_targets = _select_iosxe_targets(access_data)
     ios_targets = _select_ios_targets(access_data)
-    if not iosxr_targets and not iosxe_targets and not ios_targets:
-        raise DiscoveryError(
-            f"No supported IOS XR, IOS XE, or IOS devices found in access-info '{access_info_name}'."
-        )
-    all_targets: dict[str, dict] = {**iosxr_targets, **iosxe_targets, **ios_targets}
+    supported_targets: dict[str, dict] = {**iosxr_targets, **iosxe_targets, **ios_targets}
+
+    all_targets: dict[str, dict] = {}
+    for device_id, outcome in plan.items():
+        if not outcome.supported:
+            if outcome.device_type is None:
+                outcome.warnings.append("Device type is not set in access-info; discovery was not attempted.")
+            else:
+                outcome.warnings.append(
+                    f"Device type '{outcome.device_type}' is not supported for discovery; discovery was not attempted."
+                )
+            outcome.lldp = outcome.cdp = "na"
+        elif _connection_info_missing(supported_targets[device_id]):
+            outcome.warnings.append("Connection information is incomplete; discovery was not attempted.")
+        else:
+            all_targets[device_id] = supported_targets[device_id]
 
     # One device's collection (login + its own read-only commands)
     # still runs strictly sequentially within its own worker -- only
@@ -1308,135 +1532,68 @@ def discover_topology(lab_root=None, include_l3: bool = False, hostkeys=None) ->
     # been collected below.
     collect_kwargs = {"include_l3": True} if include_l3 else {}
     global _ACTIVE_HOSTKEYS
-    if hostkeys is not None:
+    if hostkeys is not None and all_targets:
         try:
             hostkeys.prepare(all_targets)
         except hostkey_flow.HostKeyError as exc:
             raise DiscoveryError(str(exc)) from None
     _ACTIVE_HOSTKEYS = hostkeys
-    worker_count = min(len(all_targets), DISCOVERY_MAX_WORKERS)
     futures: dict[str, concurrent.futures.Future] = {}
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {
-                device_id: executor.submit(_bootstrap_collect, device_id, device_cfg, **collect_kwargs)
-                for device_id, device_cfg in iosxr_targets.items()
-            }
-            futures.update(
-                {
-                    device_id: executor.submit(_bootstrap_collect_iosxe, device_id, device_cfg, **collect_kwargs)
-                    for device_id, device_cfg in iosxe_targets.items()
-                }
-            )
-            futures.update(
-                {
-                    device_id: executor.submit(_bootstrap_collect_ios, device_id, device_cfg, **collect_kwargs)
-                    for device_id, device_cfg in ios_targets.items()
-                }
-            )
-        # The `with` block above only exits once every submitted future has
-        # finished (successfully or not) -- so every bootstrap session below
-        # is either fully collected or has already failed, never still
-        # in flight, exactly like the previous sequential loop's own
-        # try/finally guarantee.
+        if all_targets:
+            worker_count = min(len(all_targets), DISCOVERY_MAX_WORKERS)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+                for device_id, device_cfg in all_targets.items():
+                    if device_id in iosxr_targets:
+                        collector = _bootstrap_collect
+                    elif device_id in iosxe_targets:
+                        collector = _bootstrap_collect_iosxe
+                    else:
+                        collector = _bootstrap_collect_ios
+                    futures[device_id] = executor.submit(collector, device_id, device_cfg, **collect_kwargs)
+            # The `with` block above only exits once every submitted future has
+            # finished (successfully or not) -- so every bootstrap session below
+            # is either fully collected or has already failed, never still
+            # in flight.
     finally:
         _ACTIVE_HOSTKEYS = None
         for device_id in all_targets:
             terminal.close_bootstrap_terminal(device_id)
 
-    # Deterministic aggregation and error attribution: always in original
-    # target order (IOS XR targets, then IOS XE targets -- each preserving
-    # its own access-info iteration order), never in whatever order the
-    # thread pool happened to finish them -- so which device's failure
-    # surfaces first, and the eventual candidate's own device/link
-    # ordering, never depends on scheduling. The first target-order failure
-    # is raised and stops aggregation immediately, matching the previous
-    # sequential loop's own fail-fast behavior exactly (it also never
-    # populated `collected` past the first failing device).
-    collected: dict[str, dict] = {}
-    for device_id in all_targets:
+    # Deterministic aggregation in access-info order, never in whatever order
+    # the thread pool happened to finish. Every device's outcome is recorded;
+    # only an explicitly classified DeviceCollectionError is continuable.
+    # Any other DiscoveryError (host key, credential-target ambiguity),
+    # HostKeyChanged, an unexpected worker exception and KeyboardInterrupt
+    # propagate and fail the run closed -- there is deliberately no catch-all.
+    for device_id, outcome in plan.items():
+        if device_id not in futures:
+            continue
+        management_address = all_targets[device_id].get("address")
         try:
-            collected[device_id] = futures[device_id].result()
+            info = futures[device_id].result()
+        except DeviceCollectionError as exc:
+            _record_collection(outcome, exc.collected, exc, include_l3, management_address)
         except (DiscoveryError, hostkey_flow.HostKeyChanged):
             raise
         except Exception as exc:
             # A worker crash (not a DiscoveryError) is a bug, not an
-            # anticipated device/login/command failure -- still fails
-            # Discovery closed, through the same bounded error type, without
-            # leaking a raw traceback to the caller.
+            # anticipated device/login/command failure -- it fails Discovery
+            # closed, through the same bounded error type, without leaking a
+            # raw traceback to the caller.
             raise DiscoveryError(f"Device '{device_id}': unexpected collection failure: {exc}") from exc
+        else:
+            _record_collection(outcome, info, None, include_l3, management_address)
 
-    identity_map = {device_id: info["hostname"] for device_id, info in collected.items()}
+    outcomes = list(plan.values())
+    identity_map = {o.device_id: o.hostname for o in outcomes if o.connection == "connected"}
 
     resolved: list[tuple[NeighborObservation, str]] = []
     unresolved: list[UnresolvedNeighbor] = []
-    observation_count = 0
-    cdp_observation_count = 0
-    protocol_warnings: list[str] = []
-    status_devices: dict[str, list[str]] = {label: [] for label in _PROTOCOL_STATUS_LABELS}
-    for device_id, info in collected.items():
-        observations: list[NeighborObservation] = []
-        lldp_state = "unavailable"  # IOS: classic IOS has no LLDP (not applicable)
-        if device_id in iosxr_targets or device_id in iosxe_targets:
-            lldp_text = info.get("show_lldp_neighbors", "")
-            lldp_disabled = (
-                iosxr_protocol_disabled(lldp_text, "lldp", device_id)
-                if device_id in iosxr_targets
-                else bool(_LLDP_UNAVAILABLE_RE.search(lldp_text))
-            )
-            if lldp_disabled:
-                lldp_state = "disabled"
-            else:
-                try:
-                    lldp_observations = parse_lldp_neighbors(lldp_text, device_id)
-                except LldpParseError as exc:
-                    raise DiscoveryError(str(exc)) from exc
-                lldp_state = "success"
-                observation_count += len(lldp_observations)
-                observations.extend(lldp_observations)
-
-        cdp_text = info.get("show_cdp_neighbors", "")
-        cdp_state = "success"
-        if _cdp_table_recognized(cdp_text):
-            cdp_observations = parse_cdp_neighbors(cdp_text, device_id)
-            if not cdp_observations and _cdp_table_has_body(cdp_text):
-                raise DiscoveryError(
-                    f"Device '{device_id}': 'show cdp neighbors' table could not be parsed "
-                    "(rows present but none recognized)."
-                )
-            cdp_observation_count += len(cdp_observations)
-            observations.extend(cdp_observations)
-        elif iosxr_protocol_disabled(cdp_text, "cdp", device_id):
-            cdp_state = "disabled"
-        elif device_id in iosxr_targets and _iosxr_lnt_cdp_unsupported(info.get("show_version", ""), cdp_text):
-            cdp_state = "unsupported"
-        else:
-            raise DiscoveryError(
-                f"Device '{device_id}': 'show cdp neighbors' output was not recognized as valid "
-                "CDP structure (no 'Device ID ... Local Intrfce ... Port ID' table header found)."
-            )
-
-        # Collection-status priority: a device needs at least one protocol
-        # that actually ran and was recognized (an empty neighbor table
-        # counts); "disabled" is a warning only when another protocol
-        # succeeded, "unavailable" (not supported / not applicable) is a
-        # capability fact, never a warning.
-        if "success" not in (lldp_state, cdp_state):
-            raise DiscoveryError(
-                f"Device '{device_id}': no usable neighbor discovery protocol "
-                f"(LLDP {lldp_state if lldp_state != 'unavailable' else 'not applicable'}, "
-                f"CDP {cdp_state})."
-            )
-        # Disabled / unsupported beside a working protocol is a normal
-        # protocol status of this run, reported separately from warnings.
-        if lldp_state == "disabled":
-            status_devices["LLDP disabled"].append(device_id)
-        if cdp_state in ("disabled", "unsupported"):
-            status_devices[f"CDP {cdp_state}"].append(device_id)
-
-        for obs in observations:
+    for outcome in outcomes:
+        for obs in outcome.observations:
             remote_id = resolve_remote_identity(obs.remote_device_id_raw, identity_map)
-            if remote_id is not None and remote_id in all_targets:
+            if remote_id is not None and remote_id in plan:
                 resolved.append((obs, remote_id))
             else:
                 unresolved.append(
@@ -1451,59 +1608,42 @@ def discover_topology(lab_root=None, include_l3: bool = False, hostkeys=None) ->
 
     links, conflicts = reconcile_links(resolved)
     _fail_on_link_ambiguity(links, conflicts, unresolved)
-    protocol_status = {label: devs for label, devs in status_devices.items() if devs}
-    if protocol_status and not links:
-        protocol_warnings.append(
-            "No physical links were discovered; the topology candidate will contain devices but no links."
-        )
 
-    devices = {device_id: {"type": "iosxr"} for device_id in iosxr_targets}
-    devices.update({device_id: {"type": "iosxe"} for device_id in iosxe_targets})
-    devices.update({device_id: {"type": "ios"} for device_id in ios_targets})
+    devices: dict[str, dict] = {}
+    for outcome in outcomes:
+        fields: dict = {"type": outcome.device_type} if outcome.device_type else {}
+        if outcome.l3_state == "ok":
+            fields["interfaces"] = outcome.l3_interfaces
+        devices[outcome.device_id] = fields
 
-    # L3 enrichment runs only for an explicit `discover topology l3`, and
-    # then fails closed: a missing/unrecognized L3 output for any device
-    # fails the whole Discovery (nothing is returned, so no candidate is
-    # ever partially enriched).
-    l3_enriched_device_count = 0
-    l3_interface_count = 0
-    if include_l3:
-        for device_id, info in collected.items():
-            management_address = all_targets[device_id].get("address")
-            try:
-                if device_id in iosxr_targets:
-                    raw_l3 = parse_ipv4_interface_brief(info.get("show_ipv4_interface_brief", ""))
-                else:
-                    ip_brief = parse_ip_interface_brief(info.get("show_ip_interface_brief", ""))
-                    vrf_by_interface = parse_show_vrf(info.get("show_vrf", ""))
-                    raw_l3 = _combine_ios_style_l3(ip_brief, vrf_by_interface)
-            except L3ParseError as exc:
-                raise DiscoveryError(f"Device '{device_id}': L3 interface collection failed: {exc}") from exc
-            interface_fields = _build_device_interface_fields(raw_l3, management_address)
-            devices[device_id]["interfaces"] = interface_fields
-            l3_enriched_device_count += 1
-            l3_interface_count += sum(1 for value in interface_fields.values() if value is not None)
-
+    l3_ok = [o for o in outcomes if o.l3_state == "ok"]
     return DiscoveryResult(
         access_info_name=access_info_name,
         default_topology_name=access_info_name,
         iosxr_target_count=len(iosxr_targets),
-        connected_count=len(collected),
-        observation_count=observation_count,
+        connected_count=sum(1 for o in outcomes if o.connection == "connected"),
+        observation_count=len(_observations_from(outcomes, "lldp")),
         iosxe_target_count=len(iosxe_targets),
-        cdp_observation_count=cdp_observation_count,
+        cdp_observation_count=len(_observations_from(outcomes, "cdp")),
         ios_target_count=len(ios_targets),
-        l3_enriched_device_count=l3_enriched_device_count,
-        l3_interface_count=l3_interface_count,
+        l3_enriched_device_count=len(l3_ok),
+        l3_interface_count=sum(
+            1 for o in l3_ok for value in (o.l3_interfaces or {}).values() if value is not None
+        ),
         devices=devices,
         managed_links=links,
         unresolved=unresolved,
         conflicts=conflicts,
         identity_map=identity_map,
-        protocol_warnings=protocol_warnings,
-        protocol_status=protocol_status,
         include_l3=include_l3,
+        outcomes=outcomes,
+        warnings=[f"{o.device_id}: {message}" for o in outcomes for message in o.warnings],
     )
+
+
+def _observations_from(outcomes: list[DeviceOutcome], source: str):
+    """Every usable observation of one protocol ("lldp"/"cdp")."""
+    return [obs for o in outcomes for obs in o.observations if obs.source == source]
 
 
 # The one measured "CDP not supported" case (live read-only capture, IOS XR
@@ -1622,41 +1762,105 @@ def _topology_link_key(link: dict) -> tuple:
     return tuple(sorted((endpoint_a, endpoint_b)))
 
 
-# Topology device fields Discovery owns and rebuilds from scratch on every
-# run; any other field of a still-managed device is left as it was.
-_DISCOVERY_OWNED_DEVICE_FIELDS = ("type", "interfaces")
+def _canonical_endpoint(device: str, interface: str | None) -> tuple[str, str]:
+    return (device, _canonicalize_interface_name(interface) if interface else "")
+
+
+def _canonical_link_key(link: dict) -> tuple:
+    """Identity of a topology link: its unordered pair of (device, canonical
+    interface) endpoints, so spelling variants and endpoint order never
+    produce a second copy of the same physical link."""
+    return tuple(
+        sorted(
+            (
+                _canonical_endpoint(link.get("a"), link.get("a_interface")),
+                _canonical_endpoint(link.get("b"), link.get("b_interface")),
+            )
+        )
+    )
+
+
+def _format_endpoint(device: str, interface: str | None) -> str:
+    return f"{device} {interface}" if interface else device
+
+
+def _format_topology_link(link: dict) -> str:
+    return (
+        f"{_format_endpoint(link.get('a'), link.get('a_interface'))} <-> "
+        f"{_format_endpoint(link.get('b'), link.get('b_interface'))}"
+    )
 
 
 def build_discovery_candidate(result: DiscoveryResult, base: dict) -> dict:
-    """Rebuild a topology candidate from this run's DiscoveryResult only.
+    """Merge this run's DiscoveryResult into `base` -- additive and
+    non-destructive. Discovery never deletes anything.
 
-    `base` is the existing topology data (or a new empty topology); it
-    contributes only what Discovery does not own: the top-level `name`,
-    `description` and any unknown top-level keys, plus unrelated extra
-    fields of a device that is still managed. Devices and links are NEVER
-    carried over from `base` -- a device absent from the active
-    access-info, an earlier link, and earlier L3 `interfaces` all vanish
-    unless this run observed them again (L2 runs therefore never carry L3
-    data). Output is deterministic: devices sorted by ID, each link's
-    endpoints in canonical (device, interface) order, links sorted. Pure,
-    no I/O, never mutates `base`."""
+    `base` is the existing topology data (or a new empty topology). Every
+    device, link, interface and unknown field it holds is kept. A new device
+    is added; a device's missing `type` is filled in; a new link is added
+    (an already-known link, in any endpoint order or interface spelling, is
+    never duplicated and keeps its stored attributes); a newly observed L3
+    interface or L3 field value is added/updated in place. Nothing observed
+    as absent, unassigned, `None` or unreachable removes or blanks anything.
+
+    A contradiction is never resolved by overwriting: a device `type` that
+    differs from the stored one, or a newly observed link that claims an
+    interface already used by a different stored link, raises
+    DiscoveryError (the caller then leaves the candidate untouched). The
+    only way to rebuild a topology from scratch is for the user to delete it
+    explicitly (`no topology <name>`) and run Discovery again.
+
+    Output is deterministic: existing devices and links keep their order,
+    newly added devices are sorted by ID and newly added links are in
+    canonical (device, interface) endpoint order, sorted. Pure, no I/O, never
+    mutates `base`."""
     candidate = {key: copy.deepcopy(value) for key, value in base.items() if key not in ("devices", "links")}
-    base_devices = base.get("devices") or {}
-    devices: dict[str, dict] = {}
+    devices: dict[str, dict] = {
+        device_id: (copy.deepcopy(value) if isinstance(value, dict) else {})
+        for device_id, value in (base.get("devices") or {}).items()
+    }
+    problems: list[str] = []
+
     for device_id in sorted(result.devices):
         fields = result.devices[device_id]
-        device = {
-            key: copy.deepcopy(value)
-            for key, value in (base_devices.get(device_id) or {}).items()
-            if key not in _DISCOVERY_OWNED_DEVICE_FIELDS
-        }
-        device["type"] = fields["type"]
+        device = devices.setdefault(device_id, {})
+        new_type = fields.get("type")
+        old_type = device.get("type")
+        if new_type:
+            if not old_type:
+                device["type"] = new_type
+            else:
+                try:
+                    same = lab.normalize_device_type(str(old_type)) == new_type
+                except lab.LabConfigError:
+                    same = False
+                if not same:
+                    problems.append(
+                        f"Device '{device_id}': access-info type '{new_type}' conflicts with the topology's "
+                        f"existing type '{old_type}'"
+                    )
         interfaces = fields.get("interfaces")
         if interfaces is not None:
-            device["interfaces"] = {name: dict(value) for name, value in sorted(interfaces.items()) if value is not None}
-        devices[device_id] = device
+            merged = device.get("interfaces")
+            merged = dict(merged) if isinstance(merged, dict) else {}
+            by_canonical = {_canonicalize_interface_name(str(name)): name for name in merged}
+            for name, value in sorted(interfaces.items()):
+                if value is None:
+                    continue  # unassigned/management/unobserved: never blanks stored data
+                key = by_canonical.get(_canonicalize_interface_name(name), name)
+                stored = merged.get(key)
+                merged[key] = {**(stored if isinstance(stored, dict) else {}), **value}
+            device["interfaces"] = merged
 
-    links: list[dict] = []
+    links: list[dict] = copy.deepcopy(base.get("links") or [])
+    known = {_canonical_link_key(link) for link in links}
+    owners: dict[tuple[str, str], dict] = {}
+    for link in links:
+        for device, interface in ((link.get("a"), link.get("a_interface")), (link.get("b"), link.get("b_interface"))):
+            endpoint = _canonical_endpoint(device, interface)
+            if endpoint[1]:
+                owners.setdefault(endpoint, link)
+    new_links: list[dict] = []
     for managed_link in result.managed_links:
         first, second = sorted(
             (
@@ -1664,8 +1868,86 @@ def build_discovery_candidate(result: DiscoveryResult, base: dict) -> dict:
                 (managed_link.b_device, managed_link.b_interface),
             )
         )
-        links.append({"a": first[0], "a_interface": first[1], "b": second[0], "b_interface": second[1]})
-    links.sort(key=_topology_link_key)
+        link = {"a": first[0], "a_interface": first[1], "b": second[0], "b_interface": second[1]}
+        key = _canonical_link_key(link)
+        if key in known:
+            continue
+        for endpoint in key:
+            owner = owners.get(endpoint)
+            if owner is not None:
+                problems.append(
+                    f"Discovered link {_format_topology_link(link)} conflicts with existing link "
+                    f"{_format_topology_link(owner)}"
+                )
+                break
+        known.add(key)
+        new_links.append(link)
+    if problems:
+        raise DiscoveryError(
+            "Discovery contradicts the existing topology: "
+            + "; ".join(dict.fromkeys(sorted(problems)))
+            + ". Nothing was overwritten. Edit the topology, or delete it explicitly with "
+            "'no topology <name>' and run Discovery again."
+        )
+    new_links.sort(key=_topology_link_key)
     candidate["devices"] = devices
-    candidate["links"] = links
+    candidate["links"] = links + new_links
     return candidate
+
+
+@dataclass(frozen=True)
+class TopologyChanges:
+    """What a merge actually changed, computed from the topology as it was
+    before Discovery and the validated final candidate. Nothing is ever
+    removed, so there is no "removed" count."""
+
+    devices_added: int = 0
+    devices_updated: int = 0
+    devices_retained: int = 0
+    links_added: int = 0
+    links_retained: int = 0
+    interfaces_added: int = 0
+    interfaces_updated: int = 0
+    interfaces_retained: int = 0
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.devices_added or self.devices_updated or self.links_added)
+
+
+def topology_changes(before: dict, after: dict) -> TopologyChanges:
+    before_devices = {k: (v if isinstance(v, dict) else {}) for k, v in (before.get("devices") or {}).items()}
+    after_devices = {k: (v if isinstance(v, dict) else {}) for k, v in (after.get("devices") or {}).items()}
+    added = updated = retained = 0
+    if_added = if_updated = if_retained = 0
+    for device_id, device in after_devices.items():
+        old = before_devices.get(device_id)
+        old_interfaces = ((old or {}).get("interfaces")) or {}
+        for name, value in (device.get("interfaces") or {}).items():
+            if name not in old_interfaces:
+                if_added += 1
+            elif old_interfaces[name] != value:
+                if_updated += 1
+        if old is None:
+            added += 1
+        elif old != device:
+            updated += 1
+        else:
+            retained += 1
+    for device_id, old in before_devices.items():
+        new_interfaces = ((after_devices.get(device_id) or {}).get("interfaces")) or {}
+        for name, value in (old.get("interfaces") or {}).items():
+            if name in new_interfaces and new_interfaces[name] == value:
+                if_retained += 1
+    before_links = {_canonical_link_key(link) for link in (before.get("links") or [])}
+    after_links = {_canonical_link_key(link) for link in (after.get("links") or [])}
+    return TopologyChanges(
+        devices_added=added,
+        devices_updated=updated,
+        devices_retained=retained,
+        links_added=len(after_links - before_links),
+        links_retained=len(before_links & after_links),
+        interfaces_added=if_added,
+        interfaces_updated=if_updated,
+        interfaces_retained=if_retained,
+    )

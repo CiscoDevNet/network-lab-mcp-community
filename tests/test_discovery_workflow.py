@@ -25,13 +25,30 @@ def _fake_result(
     unresolved=None,
     conflicts=None,
 ):
+    devices = devices if devices is not None else {"R1": {"type": "iosxr"}, "R2": {"type": "iosxr"}}
+    outcomes = [
+        discovery.DeviceOutcome(
+            device_id,
+            fields.get("type"),
+            True,
+            True,
+            "connected",
+            hostname=f"HOST-{device_id}",
+            lldp="enabled",
+            cdp="enabled",
+            lldp_ok=True,
+            cdp_ok=True,
+        )
+        for device_id, fields in devices.items()
+    ]
     return discovery.DiscoveryResult(
         access_info_name="sample_lab",
         default_topology_name=default_topology_name,
         iosxr_target_count=2,
         connected_count=2,
         observation_count=2,
-        devices=devices if devices is not None else {"R1": {"type": "iosxr"}, "R2": {"type": "iosxr"}},
+        outcomes=outcomes,
+        devices=devices,
         managed_links=managed_links
         if managed_links is not None
         else [discovery.ManagedLink("R1", "GigabitEthernet0/0/0/2", "R2", "GigabitEthernet0/0/0/2")],
@@ -126,7 +143,7 @@ def test_mcp_visibility_unchanged_until_explicit_running_config_selection(lab_ro
 # ---- existing topology merge (target name already committed) ----
 
 
-def test_existing_topology_rebuild_preserves_description_but_drops_unmanaged_devices(lab_root, monkeypatch, capsys):
+def test_existing_topology_merge_keeps_description_devices_and_links_and_announces_no_removal(lab_root, monkeypatch, capsys):
     lab.write_topology(
         "sample_lab",
         {
@@ -139,6 +156,7 @@ def test_existing_topology_rebuild_preserves_description_but_drops_unmanaged_dev
     )
     session = cfgmod.CliSession(lab_root)
     session.enter_configure()
+    capsys.readouterr()
     _run_discover(
         session,
         monkeypatch,
@@ -150,18 +168,20 @@ def test_existing_topology_rebuild_preserves_description_but_drops_unmanaged_dev
 
     candidate = session.definition_candidate
     assert candidate["description"] == "hand-authored description"
-    # Rebuilt from this Discovery run alone (IC-1): a device that is not in
-    # the active access-info and the hand-authored link are NOT carried
-    # over; the removal is announced before the candidate is replaced.
-    assert "PC1" not in candidate["devices"]
+    # Additive merge (M10): a device that is not in the active access-info and
+    # the hand-authored link are both kept; the observed link is added.
+    assert candidate["devices"]["PC1"] == {"type": "host"}
     assert candidate["links"] == [
-        {"a": "R1", "a_interface": "GigabitEthernet0/0/0/2", "b": "R2", "b_interface": "GigabitEthernet0/0/0/2"}
+        {"a": "R1", "b": "R2"},
+        {"a": "R1", "a_interface": "GigabitEthernet0/0/0/2", "b": "R2", "b_interface": "GigabitEthernet0/0/0/2"},
     ]
     out = capsys.readouterr().out
-    assert "device PC1" in out
-    assert "link   R1 <-> R2" in out
+    assert "will remove" not in out and "device PC1" not in out
+    assert "Devices added            : 0" in out and "Devices retained         : 3" in out
+    assert "Links added              : 1" in out and "Links retained           : 1" in out
+    assert "Topology candidate updated." in out
     # Nothing is persisted before commit.
-    assert lab.load_topology("sample_lab", lab_root)["devices"]["PC1"]["type"] == "host"
+    assert len(lab.load_topology("sample_lab", lab_root)["links"]) == 1
 
 
 def test_existing_topology_merge_does_not_duplicate_an_already_present_discovered_link(lab_root, monkeypatch):
@@ -190,7 +210,7 @@ def test_existing_topology_merge_does_not_duplicate_an_already_present_discovere
     assert len(session.definition_candidate["links"]) == 1  # same link, unordered endpoints -- not duplicated
 
 
-def test_existing_topology_rebuild_drops_a_link_not_observed_this_run(lab_root, monkeypatch):
+def test_existing_topology_keeps_a_link_not_observed_this_run(lab_root, monkeypatch, capsys):  # M06, M07
     lab.write_topology(
         "sample_lab",
         {
@@ -203,9 +223,10 @@ def test_existing_topology_rebuild_drops_a_link_not_observed_this_run(lab_root, 
     )
     session = cfgmod.CliSession(lab_root)
     session.enter_configure()
+    capsys.readouterr()
     _run_discover(session, monkeypatch, _fake_result(default_topology_name="sample_lab", managed_links=[]))
-    assert session.definition_candidate["links"] == []
-    # The committed definition is untouched until commit.
+    assert session.definition_candidate["links"] == [{"a": "R1", "b": "R2"}]
+    assert "Topology candidate unchanged." in capsys.readouterr().out
     assert lab.load_topology("sample_lab", lab_root)["links"] == [{"a": "R1", "b": "R2"}]
 
 
@@ -286,7 +307,7 @@ def test_device_scoped_view_does_not_leak_other_devices_via_links(lab_root, monk
 # ---- fail-closed contract itself) ----
 
 
-def test_lldp_parse_failure_fails_discovery_without_touching_prior_candidate(lab_root, monkeypatch):
+def test_lldp_parse_failure_drops_only_that_observation_without_touching_prior_candidate(lab_root, monkeypatch):
     def _fake_bootstrap_collect(device_id, device_config):
         if device_id == "R1":
             return {
@@ -294,12 +315,14 @@ def test_lldp_parse_failure_fails_discovery_without_touching_prior_candidate(lab
                 "show_version": "Cisco IOS XR Software",
                 "show_running_config": "hostname HOST-R1",
                 "show_lldp_neighbors": "% Invalid input detected at '^' marker.\n",
+                "show_cdp_neighbors": "% CDP is not enabled\n",
             }
         return {
             "hostname": "HOST-R2",
             "show_version": "Cisco IOS XR Software",
             "show_running_config": "hostname HOST-R2",
             "show_lldp_neighbors": "Device ID       Local Intf                      Hold-time  Capability      Port ID\nTotal entries displayed: 0\n",
+            "show_cdp_neighbors": "% CDP is not enabled\n",
         }
 
     monkeypatch.setattr(discovery, "_bootstrap_collect", _fake_bootstrap_collect)
@@ -310,18 +333,41 @@ def test_lldp_parse_failure_fails_discovery_without_touching_prior_candidate(lab
     mode_before = session.mode
     committed_before = lab.load_topology("sample_lab", lab_root)
 
-    with pytest.raises(discovery.DiscoveryError):
-        discovery.discover_topology(lab_root)
+    result = discovery.discover_topology(lab_root)
 
-    # discover_topology() itself never touches the CLI session/candidate --
-    # it only ever returns a DiscoveryResult or raises. Confirm the
-    # candidate-application step (session.apply_discovery_result) was never
-    # reached by asserting the session is exactly as it was before.
+    # Parser fail-closed: R1's unusable LLDP contributes nothing (Partial,
+    # warning) while the run itself and both registrations succeed.
+    assert sorted(result.devices) == ["R1", "R2"] and result.managed_links == []
+    assert [(o.device_id, o.lldp, o.cdp, o.status) for o in result.outcomes] == [
+        ("R1", "unknown", "disabled", "Partial"),
+        ("R2", "enabled", "disabled", "Complete"),
+    ]
+    assert result.warnings[0].startswith("R1: LLDP observations were not used")
+    # discover_topology() itself never touches the CLI session/candidate or disk.
     assert session.definition_candidate == candidate_before
     assert session.mode == mode_before
-    # The real committed topology this run would have merged into is also
-    # completely untouched -- discover_topology() never writes to disk.
     assert lab.load_topology("sample_lab", lab_root) == committed_before
+
+
+def test_failed_discovery_prints_no_summary_and_keeps_an_existing_candidate(lab_root, monkeypatch, capsys):
+    session = cfgmod.CliSession(lab_root)
+    session.enter_configure()
+    _run_discover(session, monkeypatch, _fake_result(default_topology_name="sample_lab", managed_links=[
+        discovery.ManagedLink("R1", "Gi0/0/0/1", "R2", "Gi0/0/0/1")]))
+    candidate = session.definition_candidate
+    session.go_to_global()
+
+    def _raise(lab_root=None, include_l3=False):
+        raise discovery.DiscoveryError("simulated fatal problem")
+
+    monkeypatch.setattr(discovery, "discover_topology", _raise)
+    capsys.readouterr()
+    climain.execute_command_line(session, "discover topology")
+    out = capsys.readouterr().out
+    assert "% simulated fatal problem" in out and "% Topology candidate not updated." in out
+    assert "The existing candidate for 'sample_lab' is preserved" in out
+    assert "Device Discovery Summary" not in out and "Topology candidate updated" not in out  # C12
+    assert session.definition_candidate == candidate
 
 
 # ---- `ios` type + L3 interface enrichment through the same ----

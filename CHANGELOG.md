@@ -3,6 +3,19 @@
 ## Unreleased
 
 ### Changed
+- **Topology Discovery: partial success and a non-destructive merge.** `discover topology` no longer fails as a whole
+  when one device cannot be reached or has no usable LLDP/CDP. Every device of the selected access-info is registered
+  (ID and type only; devices without a type or of an unsupported type are registered with discovery not attempted); a
+  connection/authentication failure, a session that ends mid-collection, a disabled/unsupported/unparsable
+  LLDP/CDP or a failed L3 read is a warning for that device (status `Partial`) and everything collected correctly is
+  kept (results completed before a failure are retained; an interrupted command's output is not used). L3 collection no
+  longer depends on LLDP/CDP. The candidate is now **merged**, never rebuilt: devices, links, interfaces and L3 fields are
+  only added or updated, and nothing is removed (not a device dropped from the access-info, not an unobserved link, not
+  L3 data after an L2 run). A contradiction with the stored topology (a new link on an interface used by another stored
+  link, a differing device `type`) refuses the update instead of overwriting. A full rebuild needs an explicit `no topology
+  <name>` + `commit` first. New output: Device Discovery Summary, Topology Changes, per-device warnings and a closing
+  line (`updated` / `updated with limitations` / `unchanged`). Host-key problems, unexpected errors and Ctrl-C remain
+  fatal and apply nothing. MCP tools and the topology schema are unchanged.
 - **SSH host keys: lab TOFU (trust on first use) replaces the typed approval.** A host key that no known_hosts file
   has an entry for is registered automatically, for `discover topology` and managed terminals, with no key-type or
   fingerprint input. Method: an authentication-free OpenSSH probe (dummy user `nlm-hostkey-probe`, only the `none`

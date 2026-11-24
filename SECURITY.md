@@ -383,9 +383,16 @@ does not review them.
 
 `discover topology` collects LLDP/CDP (and optional IPv4/VRF) information with
 read-only `show` commands, plus `terminal length 0` to disable paging, and
-turns the result into a **topology candidate**. It does not auto-commit or
-auto-select the topology, and parsing or reconciliation that is ambiguous
-fails closed instead of guessing. A human reviews and commits the candidate.
+merges the result into a **topology candidate**. It does not auto-commit or
+auto-select the topology. Every device of the access-info is registered by ID and
+`type` only (never addresses, credentials, ports, transports or jump hosts). A
+per-device failure (unreachable, authentication, session ended) or an unparsable
+protocol output is a warning for that device: the parsers stay fail-closed (their
+rejected output is never used), and what cannot be trusted is simply not merged.
+Anything security-relevant -- a changed or unverifiable SSH host key, an ambiguous
+credential target -- or any contradiction with the stored topology is *not* a
+warning: nothing is applied. Discovery only adds and updates; it never deletes
+topology information. A human reviews and commits the candidate.
 
 This describes how discovery results are applied locally. It is not a safety
 guarantee for terminal commands in general.

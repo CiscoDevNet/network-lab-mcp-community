@@ -506,6 +506,75 @@ and re-selecting the same reference is an exact net-zero: no diff, no
 policy (clear text, same as definition-mode `show running-config` for
 access-info) — it does not change what MCP tools, logs, or errors expose.
 
+## Discovery output and merge rules
+
+`discover topology` prints a **Device Discovery Summary** (one row per device of the selected access-info, in access-info order), counts, **Topology Changes**, **Warnings** and a closing line:
+
+```text
+network-lab(config)# discover topology
+Discovering topology from access-info 'sr-training'...
+
+Device Discovery Summary
+---------------------------------------------------------------
+Device   Type    Connection   LLDP       CDP           Status
+---------------------------------------------------------------
+R1       iosxr   Connected    Enabled    Unsupported   Complete
+R2       iosxr   Connected    Disabled   Unsupported   Partial
+R3       iosxr   Connected    Enabled    Unsupported   Complete
+R4       iosxr   Failed       Unknown    Unknown       Partial
+---------------------------------------------------------------
+
+Devices registered       : 4
+Devices connected        : 3
+Devices not connected    : 1
+Devices with neighbors   : 2
+Devices without protocol : 1
+Discovered links         : 2
+
+Topology Changes
+--------------------------------
+Devices added            : 4
+Devices updated          : 0
+Devices retained         : 0
+Links added              : 2
+Links retained           : 0
+L3 interfaces retained   : 0
+L3 enrichment            : Disabled (existing L3 data is kept)
+
+Warnings:
+  R2: No usable neighbor discovery protocol.
+  R4: Session 'network-lab-discovery-R4' exited while waiting for expected output.
+
+Topology candidate updated with limitations.
+Review the candidate using 'show configuration'.
+Commit is required to save the topology.
+network-lab(config-topology-sr-training)#
+```
+
+**Columns.** `Connection`: `Connected` (login prompt identity confirmed), `Failed` (an attempt that did not get that far) or `Not attempted` (type unset/unsupported, or connection information incomplete). `LLDP` / `CDP`: `Enabled`, `Disabled`, `Unsupported`, `Unknown` (not confirmed — never shown as `Disabled`/`Unsupported`) or `N/A` (not applicable: classic IOS has no LLDP; devices Discovery does not support). `Status`: `Complete` = connected and at least one neighbor protocol was read successfully (an empty neighbor table is a success), with no warning; `Partial` = registered but limited. A session that ends after login stays `Connected` and is `Partial` with a warning.
+
+**Counts.** `Devices registered`: devices of this run's registration plan that are in the final candidate (not the topology's size). `connected` / `not connected` (failed or not attempted). `with neighbors`: devices whose usable protocol saw at least one neighbor. `without protocol`: connected devices confirmed to have no usable neighbor protocol (a device whose state is `Unknown` is not counted here; a `Devices protocol unknown` line appears when there are such connected devices). `Discovered links`: distinct links this run observed (not links merely retained).
+
+**Topology Changes** compares the topology before the run with the final, validated candidate: `Devices added` / `updated` (an existing device whose fields changed) / `retained` (all other existing devices, including ones not in this run), `Links added` / `retained`. An `l3` run adds `L3 interfaces added/updated/retained`; an L2 run shows `L3 interfaces retained` and that existing L3 data is kept. There is no "removed": Discovery never deletes.
+
+**Closing line.** `Topology candidate updated.` (all devices `Complete`), `Topology candidate updated with limitations.` (at least one `Partial`), or `Topology candidate unchanged.` (the warnings are still listed). A fatal error prints only `% <message>` and `% Topology candidate not updated.` (plus a note when an existing candidate is preserved) and no summary.
+
+**Warnings vs. fatal errors.** Warnings (device stays registered): connection/login/timeout failure, session ended mid-collection, incomplete connection information, type unset or unsupported, no usable neighbor protocol, unrecognized/unparsable LLDP, CDP or L3 output. Fatal (nothing applied): invalid access-info, no devices, a changed or unverifiable SSH host key or an ambiguous credential target, an unexpected internal error, LLDP/CDP reconciliation conflicts or an interface in more than one link, a new link or device type that contradicts the stored topology, an invalid candidate.
+
+**Merge.** Devices, links and L3 interfaces are only added or updated, never removed — including a device dropped from the access-info, a link not seen this run, a link after a successful "zero neighbors" result, and L3 data after an L2 run. A known link is never duplicated. A stored `type` is never removed, and a differing one is refused. What is retained may be stale: it was not necessarily re-observed.
+
+**Rebuilding a topology from scratch** needs an explicit delete (`no topology` + `commit`) before `discover topology`:
+
+```text
+network-lab(config)# no topology sr-training
+network-lab(config)# commit
+network-lab(config)# discover topology
+network-lab(config-topology-sr-training)# show configuration
+network-lab(config-topology-sr-training)# commit
+```
+
+If that topology is the **active** one, `commit` is refused (`Cannot remove topology '<name>' because it is active in running-config.`): `running-config`, `topology <other>`, `exit`, `commit` first (select another existing topology), then delete, rediscover and commit, and select the rebuilt topology again if desired.
+
 ## SSH host keys during `discover topology`
 
 `discover topology` needs **no input for a new device**. Every SSH hop (the target and, for ProxyJump, the jump server) is checked first:
@@ -570,8 +639,8 @@ Replace the trusted host key? [yes/no] (default: no):
 | Command | Effect |
 |---------|--------|
 | `running-config` | Enter running-config selection mode (`network-lab(config-running)#`). |
-| `discover topology` | Run IOS XR/IOS XE/IOS LLDP+CDP discovery (L2 only; no L3 command is sent) against the committed `active_access_info` and **rebuild** the same-named topology candidate from this run alone (no merge with existing links; earlier L3 data is not carried over) — see [architecture.md](architecture.md#topology-discovery). Enters topology definition mode on success. Never commits, never selects `active_topology`. Rejected if a *different* definition is open and dirty, or if the target topology has manual edits since the last discovery (use `clear`). Devices/links removed by the rebuild are listed before the candidate is replaced. On any failure the candidate is left unchanged (`% Topology candidate not updated.`). |
-| `discover topology l3` | Same, plus per-device L3 interface enrichment (IPv4 + VRF). Any L3 collection/parse failure fails the whole run. |
+| `discover topology` | Register every device of the committed `active_access_info` in the same-named topology candidate (ID and `type` only), collect IOS XR/IOS XE/IOS LLDP+CDP information from the supported ones in parallel (L2 only; no L3 command is sent), and **merge** the result into the candidate without deleting anything — see "Discovery output and merge rules" below and [architecture.md](architecture.md#topology-discovery). Per-device and per-protocol failures are warnings, not errors. Enters topology definition mode on success. Never commits, never selects `active_topology`. Rejected if a *different* definition is open and dirty, or if the target topology has manual edits since the last discovery (use `clear`). On a fatal error the candidate is left unchanged (`% Topology candidate not updated.`); Ctrl-C applies nothing. |
+| `discover topology l3` | Same, plus per-device L3 interface enrichment (IPv4 + VRF), which does not depend on LLDP/CDP. New interfaces are added and a changed valid value is updated; an L3 failure for a device is a warning and keeps its existing L3 data. |
 | `access-info <name>` | Create or edit an access-info definition; `<name>` existing loads it, otherwise starts a new one. Enters access-info definition mode. |
 | `topology <name>` | Create or edit a topology definition (see "Case-only topology-name collision safeguard" below). Enters topology definition mode. |
 | `scenario <name>` | Create or edit a scenario definition. Enters scenario definition mode. |
@@ -1846,7 +1915,7 @@ password entry on that one controlled path.
 ## Limitations
 
 - No structured `link`/`interfaces` editing command; `links` and a
-  device's `interfaces` are only ever set by `discover topology` or the
+  device's `interfaces` are only ever added or updated by `discover topology` or the
   external `edit` -- `show`/`show configuration`/`show running-config`
   display them as read-only review information, not as re-typeable
   command lines (see "Topology device mode commands" above). Any other

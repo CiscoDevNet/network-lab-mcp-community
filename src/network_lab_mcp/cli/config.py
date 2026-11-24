@@ -193,14 +193,6 @@ _DEFINITION_KIND_LABELS: dict[str, str] = {
 }
 
 
-def _format_link(link: dict) -> str:
-    def endpoint(side: str) -> str:
-        interface = link.get(f"{side}_interface")
-        return f"{link.get(side)} {interface}" if interface else str(link.get(side))
-
-    return f"{endpoint('a')} <-> {endpoint('b')}"
-
-
 def load_committed_definition(kind: str, name: str, lab_root: Path) -> Optional[dict]:
     """Return the current committed-on-disk data for a definition of the
     given kind/name, or None if it does not exist yet.
@@ -565,32 +557,16 @@ class CliSession:
                 )
         return True, None
 
-    def discovery_removals(self, result: "discovery.DiscoveryResult") -> tuple[list[str], list[str]]:
-        """Committed devices and links of the target topology that the
-        rebuilt candidate will not contain (sorted, for display before the
-        candidate is replaced). Read-only; empty for a new topology."""
-        committed = load_committed_definition("topology", result.default_topology_name, self.lab_root)
-        if committed is None:
-            return [], []
-        new = discovery.build_discovery_candidate(result, {})
-        removed_devices = sorted(set(committed.get("devices") or {}) - set(new["devices"]))
-        new_keys = {discovery._topology_link_key(link) for link in new["links"]}
-        removed_links = sorted(
-            _format_link(link)
-            for link in committed.get("links") or []
-            if discovery._topology_link_key(link) not in new_keys
-        )
-        return removed_devices, removed_links
-
-    def apply_discovery_result(self, result: "discovery.DiscoveryResult") -> None:
-        """Replace the target topology's candidate with one rebuilt from
-        this Discovery run alone (see discovery.build_discovery_candidate()):
-        no existing device or link is merged in; only the name,
-        description and unknown top-level metadata survive. The new
-        candidate is built and validated *before* any session state is
-        touched, so a failure leaves the previous candidate, mode and
-        tracking untouched. Never committed and never selected as
-        active_topology."""
+    def apply_discovery_result(self, result: "discovery.DiscoveryResult") -> "discovery.TopologyChanges":
+        """Merge this Discovery run into the target topology's candidate
+        (see discovery.build_discovery_candidate()): additive and
+        non-destructive -- no existing device, link, interface or L3 field is
+        ever removed, and a contradiction with the existing topology raises
+        DiscoveryError. The merged candidate is built and validated *before*
+        any session state is touched, so a failure leaves the previous
+        candidate, mode and tracking untouched. Never committed and never
+        selected as active_topology. Returns what the merge changed, computed
+        from the topology as it was before Discovery."""
         plan = self.plan_topology_definition(result.default_topology_name)
         if plan.kind == "case_collision":
             raise ConfigError("A case-only topology collision must be confirmed before it can be applied.")
@@ -603,9 +579,11 @@ class CliSession:
             lab.validate_topology_data(plan.name, candidate)
         except lab.LabConfigError as exc:
             raise discovery.DiscoveryError(f"Discovered topology candidate is invalid: {exc}") from exc
+        changes = discovery.topology_changes(base, candidate)
         self.apply_topology_definition_plan(plan)
         self.definition_candidate = candidate
         self._discovery_baseline_rev = self._mutation_rev
+        return changes
 
     def enter_access_info_definition(self, name: str) -> None:
         self._enter_definition("access_info", name, "access_info")
