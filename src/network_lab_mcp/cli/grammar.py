@@ -34,6 +34,7 @@ enum -- this grammar never maintains its own separate copy of it.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -150,6 +151,15 @@ def validate_freeform(value: str) -> ValidationOutcome:
     """Accept any token as-is. Used for object identifiers and free-form
     device fields (address/username/description); existence and semantic
     checks are the caller's responsibility, not the grammar's."""
+    return _ok(value)
+
+
+def validate_credential_value(value: str) -> ValidationOutcome:
+    """A private credential token: any text except control characters
+    (which could inject terminal input). The message never echoes the
+    value."""
+    if not value or any(unicodedata.category(ch) == "Cc" for ch in value):
+        return _fail("Credential must not be empty or contain control characters.")
     return _ok(value)
 
 
@@ -1258,6 +1268,14 @@ def _build_access_device_root() -> Node:
         hint="<password>",
     )
     add_field(
+        "enable-password",
+        "Set the device privileged EXEC password",
+        "access_device.set_enable_password",
+        validate=validate_credential_value,
+        sensitive=True,
+        hint="<enable-password>",
+    )
+    add_field(
         "jump-host",
         "Reference a jump host for this device (single-hop OpenSSH ProxyJump)",
         "access_device.set_jump_host",
@@ -1272,6 +1290,7 @@ def _build_access_device_root() -> Node:
         ("transport", "access_device.clear_transport", "Clear the device transport"),
         ("username", "access_device.clear_username", "Clear the device username"),
         ("password", "access_device.clear_password", "Clear the device password"),
+        ("enable-password", "access_device.clear_enable_password", "Clear the device privileged EXEC password"),
         ("port", "access_device.clear_port", "Clear the device port"),
         ("jump-host", "access_device.clear_jump_host", "Clear the device jump-host reference"),
     ):

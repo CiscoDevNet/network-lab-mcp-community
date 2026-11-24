@@ -82,6 +82,39 @@ addresses (`192.0.2.0/24`) and placeholder credentials that are not real. The
 ignore rules reduce the risk of a mistake; they are not a security boundary,
 so review changes before pushing.
 
+### 3a. Enable password (privileged EXEC)
+
+- **Storage.** `enable-password` (YAML `enable_password`) is a private credential like `password`: it lives only in
+  the private access-info, in **plain text** on disk. Protect the file with filesystem permissions. The local
+  management CLI shows it in clear text (`show`, `show configuration`, `show running-config`), by design. It never
+  appears in topology, scenarios, references, MCP results, warnings or errors, and it never enters CLI history
+  (any first word starting `pa` or `en` followed by an argument is not recorded, even if the grammar rejects it).
+- **When it is used.** Only for a *new* managed or Discovery session of a device whose type is `ios` or `iosxe`
+  and that has an explicit `enable_password`, only at a complete user EXEC prompt (`<host>>`) after login. Never for
+  an existing session, never for `iosxr`/`nxos`/`host`/an unset type, never if the session is already `<host>#`,
+  and the login password is never used as an enable password. Without an `enable_password`, nothing new is sent.
+- **Send limits.** Per automatic attempt: at most one `enable` and at most one password; no retry, no re-send on a
+  repeated `Password:` prompt, no later command after a failure; the new session is closed. The password is sent
+  only to the pane id verified (and re-verified immediately before the send) as the owned pane, only in answer to a
+  `Password:` prompt that appeared after `enable` was typed, and success requires the same hostname with `#`.
+  Delivery uses the same stdin/unique-buffer path as every other secret (never argv).
+- **AAA / lockout.** A failed enable may count toward device-side AAA (TACACS+/RADIUS) failure logging or lockout;
+  this tool cannot know those limits. The fixed error text tells the AI client not to retry automatically, but
+  this does not technically stop a later independent `terminal_open()`; repeated calls can accumulate failures.
+  Fix the configured `enable-password` (or `no enable-password`) before retrying.
+- **Unexpected echo.** If the configured password reappears in the pane after it was sent (whole, wrapped or in
+  several chunks; the cause may be the device, a Telnet client or local echo, and is not assumed), authentication
+  is stopped as failed (`Unexpected credential echo during authentication.`), nothing is re-sent, the session is
+  closed, and in Discovery the whole run fails (no candidate change; other workers can start no further credential
+  send). Detection cannot see transformed, encoded or delayed output, and secrets shorter than 4 characters are only
+  detected as a whole line. **Residual risk:** the echoed copy can remain in the private `0600` terminal log and
+  was briefly visible in the raw pane (and to a concurrent human monitor); delete that log
+  (`delete logging`) and change the password. Prefer SSH to Telnet: Telnet is unencrypted, so the enable password
+  crosses the network in clear text.
+- **Discovery.** An ordinary enable failure is a per-device warning (device connected, status Partial, no further
+  commands, the session closed); a credential echo or lost pane ownership is fatal. A fatal error cancels the run
+  at once and no credential send starts after that.
+
 ## 4. Credential isolation is not output sanitization
 
 The boundary above protects Network Lab MCP's *private access credentials*. It
@@ -175,9 +208,9 @@ of that session.
   transcript. This depends on the remote side behaving that way and is not
   something Network Lab MCP guarantees. A Telnet username is echoed by the
   device and can appear in the log.
-- Network Lab MCP does not set special file permissions on log files and does
-  not rotate or expire them. Files use your default umask and are not
-  encrypted. Retention, access control, and cleanup are your responsibility
+- New log files are created owner-only (`0600`) before logging starts, and new
+  log directories owner-only (`0700`); existing files and directories are never
+  changed. Logs are not rotated, expired or encrypted. Retention, access control, and cleanup are your responsibility
   (the CLI provides `show logging` and `delete logging` commands for local
   cleanup).
 - `logs/` is ignored by Git. Never commit real lab logs.

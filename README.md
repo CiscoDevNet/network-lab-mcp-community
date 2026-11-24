@@ -543,6 +543,7 @@ On **November 2, 2026**, macOS real-lab E2E checks succeeded for an SSH-enabled 
 - The **local workstation ↔ jump server** SSH connection is encrypted.
 - The **jump server ↔ legacy Telnet-only device** path carries **unencrypted Telnet** traffic; use only an authorized, protected lab/management network and account for this risk.
 - Local port forwarding through `127.0.0.1` is not a process-level access-control boundary.
+- An optional per-device `enable-password` (IOS / IOS XE) is a private credential like `password`; it is used only for new sessions, at most once per attempt, with no retry (see SECURITY.md 3a).
 - Private device and jump-server passwords are resolved internally; they must not be put in AI prompts, published logs, or repository examples.
 - SSH host-key verification must remain enabled. First-use keys are registered automatically (TOFU, see above); a changed or other-type key is refused and can only be replaced by a human in the CLI.
 

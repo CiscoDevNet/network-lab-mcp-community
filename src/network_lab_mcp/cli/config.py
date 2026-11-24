@@ -101,7 +101,7 @@ def new_reference_data(name: str) -> dict:
     return {"name": name, "description": "", "guidance": []}
 
 
-DEVICE_FIELD_ORDER = ("type", "address", "transport", "port", "username", "password", "jump_host")
+DEVICE_FIELD_ORDER = ("type", "address", "transport", "port", "username", "password", "enable_password", "jump_host")
 JUMP_HOST_FIELD_ORDER = ("type", "address", "transport", "port", "username", "password")
 
 # Which config mode "exit" moves up to. Only "global" is missing here --

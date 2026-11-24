@@ -733,7 +733,7 @@ def test_access_jump_host_no_leaf_parses():
         assert result.action == action
 
 
-def test_access_device_no_help_lists_all_seven_leaves():
+def test_access_device_no_help_lists_all_eight_leaves():  # enable-password added with Enable Password support
     ctx = make_ctx()
     result = grammar.help("access_device", "no ", ctx)
     assert [(line.token, line.description) for line in result.lines] == [
@@ -742,6 +742,7 @@ def test_access_device_no_help_lists_all_seven_leaves():
         ("transport", "Clear the device transport"),
         ("username", "Clear the device username"),
         ("password", "Clear the device password"),
+        ("enable-password", "Clear the device privileged EXEC password"),
         ("port", "Clear the device port"),
         ("jump-host", "Clear the device jump-host reference"),
     ]
@@ -770,7 +771,7 @@ def test_access_device_no_leaf_set_matches_configurable_leaf_set():
     configurable = set(root.literal_children) - _RESERVED_SUBMODE_KEYWORDS
     removable = set(root.literal_children["no"].literal_children)
     assert configurable == removable == {
-        "type", "address", "transport", "port", "username", "password", "jump-host",
+        "type", "address", "transport", "port", "username", "password", "enable-password", "jump-host",
     }
 
 

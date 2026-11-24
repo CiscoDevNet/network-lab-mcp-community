@@ -816,6 +816,16 @@ structured CLI field: it is populated by `discover topology` or the
 external `edit` command, and displayed as read-only review information by
 `show`/`show configuration`/`show running-config`.
 
+## Access-info device mode: `enable-password`
+
+`enable-password <password>` sets the device's privileged EXEC (enable) password, `no enable-password` removes it.
+It is independent of `password` (changing or clearing one never touches the other), is kept when the device `type`
+changes, is shown in clear text by `show` / `show configuration` / `show running-config` (like `password`), is never
+recorded in command history, and is not available for jump hosts. It is used automatically only for new `ios`/`iosxe`
+sessions (see SECURITY.md section 3a). If a wrong value makes `terminal_open()` fail: set the right
+`enable-password` and `commit`, or `no enable-password` and `commit`, then open the session again (an existing
+session is never re-authenticated automatically). `en` is ambiguous in this mode (`end` / `enable-password`).
+
 ## Access-info definition mode commands
 
 | Command | Effect |
@@ -843,6 +853,7 @@ access-info has no `edit` command — see
 | `transport <ssh\|telnet>` | Device transport. Validated immediately (invalid input is rejected with a caret, not accepted into the candidate). |
 | `port <1-65535>` | Device port. Validated immediately. |
 | `username <value>` | Device username. |
+| `enable-password <password>` / `no enable-password` | Optional privileged EXEC password for `ios`/`iosxe` (see above and SECURITY.md 3a). Stored for any type; clear-text in `show`; never in history. |
 | `password <value>` | Device password. Stored in plain text (this is a lab tool, not a secret manager); never completed or retained in history (see "Password safety" below) — but shown in **clear text** by this mode's own `show`/`show configuration`/`show running-config` (see "Password display policy"). |
 | `jump-host <name>` | Reference a jump host (by name, within this same access-info definition) for a single-hop OpenSSH ProxyJump connection. Tab/`?` complete existing jump-host names in this definition; the name is validated to exist, and this device's `transport` to be `ssh`, at commit time. |
 | `no type` / `no address` / `no transport` / `no username` / `no password` / `no port` / `no jump-host` | Clear the corresponding field from the candidate only. Every settable field has a matching `no` command (see "Candidate may be temporarily incomplete" below). |

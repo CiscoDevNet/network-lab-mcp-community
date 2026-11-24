@@ -903,6 +903,20 @@ function -- translating a rejected outcome into their own wording
 (`DiscoveryError` vs. `TerminalError`), never re-implementing the
 attribution rule itself.
 
+### Privileged EXEC (enable) authentication
+
+`terminal.run_privileged_exec_authentication()` is the one implementation, used by `open_device_terminal()` (new
+sessions only) and by Discovery's `_login_ios_style()` (user EXEC prompt only). It runs only when
+`enable_applicable()` (type `ios`/`iosxe` and a configured `enable_password`). State: `ENABLE_NOT_STARTED -> ENABLE_SENT
+-> PASSWORD_SENT -> DONE | FAILED` (`EnableAttempt` also counts sends); state is set *before* each send so an unknown
+send outcome is never retried. Each send is preceded by an `admit()` callback (Discovery's cancellation gate) and an
+identity check of the pane (pane id + creation-time pid); the pane id itself is the send target. New output after the
+`enable` / password is compared against the pane baseline; unknown baselines fail closed. After the password is
+sent every observation first checks for an echo of the secret (fatal `CredentialEchoError`), then for the exact
+`<host>#` prompt. Timeouts: 15 s per stage (the existing managed settle bound), 30 s for the whole authentication;
+session cleanup is separate. Discovery has a per-run `_RunControl`: `cancel()` and `admit()` share one short lock, so
+no credential send is admitted after a fatal error, the KeyboardInterrupt path included.
+
 ### Managed-terminal private authentication
 
 `terminal.open_device_terminal()` completes target authentication itself,

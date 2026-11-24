@@ -26,6 +26,7 @@ name and the launched command differ.
 
 from __future__ import annotations
 
+import enum
 import logging
 import os
 import re
@@ -595,7 +596,7 @@ def _cleanup_buffer(buffer_name: str) -> str:
     return BUFFER_CLEANUP_FAILED
 
 
-def _send_text_via_stdin(session_name: str, text: str) -> None:
+def _send_text_via_stdin(session_name: str, text: str, *, pinned_pane: str | None = None) -> None:
     """Deliver `text` into `session_name`'s pane without ever placing it in
     a subprocess's own argv: `text` is piped (explicit UTF-8 bytes) to
     `tmux load-buffer -` into a buffer unique to this one operation, then
@@ -607,8 +608,13 @@ def _send_text_via_stdin(session_name: str, text: str) -> None:
     Failure paths clean up only this operation's own buffer via
     _cleanup_buffer(). Errors are fixed messages; no external stderr,
     exception object or payload is ever copied or chained into them, and
-    nothing is retried: after a paste timeout delivery is unknown."""
-    target = _send_target(session_name)
+    nothing is retried: after a paste timeout delivery is unknown.
+
+    `pinned_pane`, when given, is the exact pane id (recorded earlier, with
+    its ownership verified) to type into: the text is then never routed by
+    session name, so a recreated or vanished pane can only make the send
+    fail, never land in a different pane."""
+    target = pinned_pane if pinned_pane is not None else _send_target(session_name)
 
     encoding_failed = False
     payload = b""
@@ -677,8 +683,8 @@ def _send_special_keys(session_name: str, keys: list[str]) -> None:
         _run(["send-keys", "-t", target, "--", *keys])
 
 
-def _send_enter(session_name: str) -> None:
-    target = _send_target(session_name)
+def _send_enter(session_name: str, *, pinned_pane: str | None = None) -> None:
+    target = pinned_pane if pinned_pane is not None else _send_target(session_name)
     _run(["send-keys", "-t", target, "--", "Enter"])
 
 
@@ -800,8 +806,21 @@ def _unique_log_path(log_dir: Path, timestamp: str) -> Path:
 
 def _start_session_logging(session_name: str, device_name: str) -> Path:
     log_dir = _device_log_dir(device_name)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = _unique_log_path(log_dir, _session_start_timestamp())
+    # Private transcript: new directories are created owner-only (0700) and
+    # the log file is created owner-only (0600) *before* tmux's `cat >>`
+    # ever opens it -- permissions are never widened-then-narrowed. Existing
+    # directories/files are left exactly as they are.
+    LOGS_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    log_dir.mkdir(mode=0o700, exist_ok=True)
+    timestamp = _session_start_timestamp()
+    while True:
+        log_path = _unique_log_path(log_dir, timestamp)
+        try:
+            fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError:
+            continue  # another session of this device took the name first: pick the next suffix
+        os.close(fd)
+        break
     # -o: only start piping if this pane isn't already being piped (a no-op
     # on an already-logging pane, so this is safe to call unconditionally
     # right after session creation).
@@ -1626,6 +1645,352 @@ def _authenticate_managed_telnet_session(
 
 
 # --------------------------------------------------------------------------
+# Privileged EXEC ("enable") authentication for Cisco IOS / IOS XE
+#
+# Runs only for a NEW managed/Discovery session this process just created,
+# only for device type ios/iosxe, and only when an `enable_password` is
+# explicitly configured in the private access-info. Nothing here is ever
+# attempted for an existing (reused) session, and nothing ever substitutes
+# the login password. Per attempt: at most one `enable` and at most one
+# enable-password are sent; any failure is final (no retry), the caller
+# closes the session it created.
+#
+# Safety rules (see SECURITY.md): the exact pane id recorded after an
+# ownership check is the only send target; credentials go through the same
+# unique-buffer stdin path as every other secret; the password is sent only
+# in response to a *new* "Password:" prompt that appeared after `enable`
+# was typed; any appearance of the password in the pane afterwards (also
+# split across lines) is an unexpected credential echo and always fatal.
+# --------------------------------------------------------------------------
+
+ENABLE_CAPABLE_DEVICE_TYPES = frozenset({"ios", "iosxe"})
+# Per-stage wait reuses the existing managed-authentication settle bound; the
+# whole authentication (both stages) may never exceed twice that. Session
+# cleanup afterwards is separate and bounded by tmux's own command timeouts.
+ENABLE_STAGE_TIMEOUT_SECONDS = _MANAGED_AUTH_SETTLE_TIMEOUT_SECONDS
+ENABLE_TOTAL_TIMEOUT_SECONDS = 2 * ENABLE_STAGE_TIMEOUT_SECONDS
+_ENABLE_POLL_SECONDS = 0.2
+
+ENABLE_FAILED_MESSAGE = (
+    "Enable authentication failed. Do not retry automatically. "
+    "Repeated attempts may trigger device-side authentication lockout. "
+    "Ask a human operator to verify the configured enable-password before retrying."
+)
+ENABLE_ECHO_MESSAGE = "Unexpected credential echo during authentication."
+ENABLE_OWNERSHIP_MESSAGE = "Session ownership could not be verified; no credential was sent."
+
+_USER_EXEC_LINE_RE = re.compile(r"^(?P<hostname>[\w.-]+)>\s*$")
+_PRIV_EXEC_LINE_RE = re.compile(r"^(?P<hostname>[\w.-]+)#\s*$")
+_ANY_EXEC_LINE_RE = re.compile(r"^[\w.-]+(?:\([^)\s]*\))?[#>]\s*$")
+_ENABLE_FAILURE_RE = re.compile(
+    r"%\s*Bad secrets|%\s*Bad passwords|%\s*Access denied|Authorization failed|%\s*No password set",
+    re.IGNORECASE,
+)
+
+
+class EnableState(enum.Enum):
+    ENABLE_NOT_STARTED = "ENABLE_NOT_STARTED"
+    ENABLE_SENT = "ENABLE_SENT"
+    PASSWORD_SENT = "PASSWORD_SENT"
+    DONE = "DONE"
+    FAILED = "FAILED"
+
+
+@dataclass
+class EnableAttempt:
+    """State and counters of one enable authentication attempt. A fresh
+    object per attempt; the counters make the "at most once" guarantees
+    directly assertable."""
+
+    state: EnableState = EnableState.ENABLE_NOT_STARTED
+    enable_sends: int = 0
+    password_sends: int = 0
+
+
+class EnableAuthenticationError(TerminalError):
+    """Ordinary, device-level enable failure (rejected, timeout, session
+    ended, unexpected prompt). Fixed message only; `reason` is one of a
+    small fixed vocabulary and never contains device output."""
+
+    def __init__(self, reason: str):
+        super().__init__(ENABLE_FAILED_MESSAGE)
+        self.reason = reason
+
+
+class CredentialEchoError(TerminalError):
+    """The configured credential reappeared in the pane. Always fatal."""
+
+    def __init__(self):
+        super().__init__(ENABLE_ECHO_MESSAGE)
+
+
+class PaneOwnershipError(TerminalError):
+    """The recorded pane is no longer the verified, owned pane. Fatal."""
+
+    def __init__(self):
+        super().__init__(ENABLE_OWNERSHIP_MESSAGE)
+
+
+def enable_applicable(device_config: dict) -> bool:
+    """True only for an ios/iosxe device with an explicitly configured
+    enable_password. Device type is never guessed (unset -> False)."""
+    from network_lab_mcp import lab  # local import: lab imports terminal
+
+    password = device_config.get("enable_password")
+    if not isinstance(password, str) or not password:
+        return False
+    raw_type = device_config.get("type")
+    if raw_type in (None, ""):
+        return False
+    try:
+        return lab.normalize_device_type(str(raw_type)) in ENABLE_CAPABLE_DEVICE_TYPES
+    except lab.LabConfigError:
+        return False
+
+
+def _region_after(baseline_prefix: list[str], text: str) -> list[str] | None:
+    """Lines of `text` after the unchanged baseline prefix, or None when
+    the baseline can no longer be located (scrollback truncation etc.): the
+    caller then fails closed instead of guessing what is new."""
+    lines = text.splitlines()
+    count = len(baseline_prefix)
+    if lines[:count] != baseline_prefix:
+        return None
+    return lines[count:]
+
+
+def _credential_echoed(region: list[str], password: str) -> bool:
+    normalized = "".join(password.split())
+    if not normalized:
+        return False
+    if len(normalized) >= 4:
+        # whitespace-insensitive and line-wrap-insensitive (a long echo may
+        # be wrapped by the pane or arrive in several chunks)
+        return normalized in "".join("".join(line.split()) for line in region)
+    # Very short secrets cannot be searched as substrings without matching
+    # ordinary text; only a line that is the secret itself, or a prompt line
+    # directly followed by it, counts (documented limitation).
+    for line in region:
+        stripped = line.strip()
+        if stripped == password.strip() or stripped.lower().endswith("password:" + password.strip().lower()):
+            return True
+        if stripped.lower().endswith("password: " + password.strip().lower()):
+            return True
+    return False
+
+
+def _last_nonblank(lines: list[str]) -> str:
+    for line in reversed(lines):
+        if line.strip():
+            return line
+    return ""
+
+
+def _pane_identity(session_name: str) -> tuple[str, str]:
+    """(pane id, creation-time pane pid) of the verified managed pane. The
+    pid is recorded at creation, so a pane id that tmux reuses after a server
+    restart still compares unequal to the pane that was verified earlier."""
+    pane_id = _managed_pane_target(session_name)
+    return pane_id, _pane_option(session_name, _OPT_PANE_PID)
+
+
+def _pinned_pane_still_owned(session_name: str, identity: tuple[str, str]) -> None:
+    ended = False
+    current = None
+    try:
+        current = _pane_identity(session_name)
+    except TerminalError:
+        ended = True
+    if ended:
+        raise EnableAuthenticationError("session_ended")
+    if current != identity:
+        raise PaneOwnershipError()
+
+
+def wait_for_stable_exec_prompt(session_name: str, timeout: float | None = None) -> tuple[str, str]:
+    """Wait (bounded) for a complete classic-IOS exec prompt that stays the
+    last line across two consecutive captures. Returns (hostname, "user" |
+    "privileged"); raises EnableAuthenticationError otherwise. Read-only."""
+    deadline = time.monotonic() + (timeout if timeout is not None else _MANAGED_LOGIN_TIMEOUT_SECONDS)
+    previous = None
+    while True:
+        text = _capture_pane(session_name, HISTORY_LIMIT)
+        last = _last_nonblank_line(text)
+        match = _USER_EXEC_LINE_RE.match(last) or _PRIV_EXEC_LINE_RE.match(last)
+        if match and last == previous:
+            return match.group("hostname"), ("user" if last.rstrip().endswith(">") else "privileged")
+        previous = last if match else None
+        if _pane_state(session_name) == "exited":
+            raise EnableAuthenticationError("session_ended")
+        if time.monotonic() >= deadline:
+            raise EnableAuthenticationError("timeout")
+        time.sleep(0.3)
+
+
+def run_privileged_exec_authentication(
+    session_name: str,
+    expected_hostname: str,
+    enable_password: str,
+    *,
+    admit=None,
+    attempt: EnableAttempt | None = None,
+) -> EnableAttempt:
+    """Move a freshly logged-in session from the user EXEC prompt
+    `<expected_hostname>>` to `<expected_hostname>#`. Raises
+    EnableAuthenticationError (ordinary failure), CredentialEchoError or
+    PaneOwnershipError (fatal), or whatever `admit` raises (Discovery's
+    cancellation). Never retries and never sends anything after a failure.
+
+    `admit()` is called immediately before each send step (the `enable`
+    command, then the password); it must raise to refuse, which makes the
+    send step not happen."""
+    attempt = attempt if attempt is not None else EnableAttempt()
+    started = time.monotonic()
+    total_deadline = started + ENABLE_TOTAL_TIMEOUT_SECONDS
+    failure: BaseException | None = None
+    try:
+        _enable_flow(session_name, expected_hostname, enable_password, admit, attempt, total_deadline)
+    except BaseException as exc:  # noqa: BLE001 - state bookkeeping, re-raised below
+        attempt.state = EnableState.FAILED
+        failure = exc
+    if failure is not None:
+        raise failure
+    return attempt
+
+
+def _enable_flow(session_name, expected_hostname, enable_password, admit, attempt, total_deadline) -> None:
+    ownership_failed = False
+    identity = ("", "")
+    try:
+        identity = _pane_identity(session_name)
+    except TerminalError:
+        ownership_failed = True
+    if ownership_failed:
+        raise PaneOwnershipError()
+    pane_id = identity[0]
+    if attempt.state is not EnableState.ENABLE_NOT_STARTED:
+        raise EnableAuthenticationError("already_attempted")
+
+    base_text = _capture_pane(session_name, HISTORY_LIMIT)
+    base_lines = base_text.splitlines()
+    last = _last_nonblank(base_lines)
+    user_match = _USER_EXEC_LINE_RE.match(last)
+    if user_match is None or user_match.group("hostname") != expected_hostname or last != base_lines[-1]:
+        raise EnableAuthenticationError("unknown_prompt")
+    prefix = base_lines[:-1]
+
+    # ---- stage 1: `enable` ----
+    if admit is not None:
+        admit()
+    _pinned_pane_still_owned(session_name, identity)  # immediately before the send
+    attempt.state = EnableState.ENABLE_SENT  # before the send: its outcome may be unknown
+    attempt.enable_sends += 1
+    _send_text_via_stdin(session_name, "enable", pinned_pane=pane_id)
+    _send_enter(session_name, pinned_pane=pane_id)
+
+    stage_deadline = min(time.monotonic() + ENABLE_STAGE_TIMEOUT_SECONDS, total_deadline)
+    password_prompt_text = None
+    while password_prompt_text is None:
+        text = _capture_pane(session_name, HISTORY_LIMIT)
+        region = _region_after(prefix, text)
+        if region is None:
+            raise EnableAuthenticationError("baseline_lost")
+        after_command = region[1:]
+        last_line = _last_nonblank(after_command)
+        if after_command:
+            if _ENABLE_FAILURE_RE.search("\n".join(after_command)):
+                raise EnableAuthenticationError("rejected")
+            priv = _PRIV_EXEC_LINE_RE.match(last_line)
+            if PASSWORD_PROMPT_RE.search(last_line) and not _ANY_EXEC_LINE_RE.match(last_line):
+                password_prompt_text = text
+                break
+            if priv is not None:
+                if priv.group("hostname") != expected_hostname:
+                    raise EnableAuthenticationError("unknown_prompt")
+                attempt.state = EnableState.DONE  # privileged without a password prompt
+                return
+            if _ANY_EXEC_LINE_RE.match(last_line):
+                raise EnableAuthenticationError("rejected" if _USER_EXEC_LINE_RE.match(last_line) else "unknown_prompt")
+        if _pane_state(session_name) == "exited":
+            raise EnableAuthenticationError("session_ended")
+        if time.monotonic() >= stage_deadline:
+            raise EnableAuthenticationError("timeout")
+        time.sleep(_ENABLE_POLL_SECONDS)
+
+    # ---- stage 2: the password, only at the new Password: prompt ----
+    if attempt.state is not EnableState.ENABLE_SENT or attempt.password_sends != 0 or not enable_password:
+        raise EnableAuthenticationError("invalid_state")
+    pw_lines = password_prompt_text.splitlines()
+    pw_prefix = pw_lines[:-1]
+    prompt_line = _last_nonblank(pw_lines)
+    if prompt_line != pw_lines[-1]:
+        raise EnableAuthenticationError("unknown_prompt")
+    # Re-verify immediately before sending (pane identity, liveness, and
+    # that the very same prompt is still the last line).
+    recheck = _capture_pane(session_name, HISTORY_LIMIT).splitlines()
+    if not recheck or recheck[-1] != prompt_line or recheck[:-1] != pw_prefix:
+        raise EnableAuthenticationError("prompt_changed")
+    if admit is not None:
+        admit()
+    _pinned_pane_still_owned(session_name, identity)  # immediately before the send
+    attempt.state = EnableState.PASSWORD_SENT  # before the send: the outcome may be unknown
+    attempt.password_sends += 1
+    _send_text_via_stdin(session_name, enable_password, pinned_pane=pane_id)
+    _send_enter(session_name, pinned_pane=pane_id)
+
+    stage_deadline = min(time.monotonic() + ENABLE_STAGE_TIMEOUT_SECONDS, total_deadline)
+    while True:
+        text = _capture_pane(session_name, HISTORY_LIMIT)
+        region = _region_after(pw_prefix, text)
+        if region is None:
+            raise EnableAuthenticationError("baseline_lost")
+        # echo is checked first on every observation: an echo that arrives
+        # together with (or just before) a privileged prompt, or a
+        # disconnect, is still an echo.
+        if _credential_echoed(region, enable_password):
+            raise CredentialEchoError()
+        after_prompt = region[1:]
+        if after_prompt:
+            if _ENABLE_FAILURE_RE.search("\n".join(after_prompt)):
+                raise EnableAuthenticationError("rejected")
+            last_line = _last_nonblank(after_prompt)
+            priv = _PRIV_EXEC_LINE_RE.match(last_line)
+            if priv is not None:
+                if priv.group("hostname") != expected_hostname:
+                    raise EnableAuthenticationError("unknown_prompt")
+                attempt.state = EnableState.DONE
+                return
+            if PASSWORD_PROMPT_RE.search(last_line):
+                raise EnableAuthenticationError("rejected")  # re-prompt: never answered again
+            if _ANY_EXEC_LINE_RE.match(last_line):
+                raise EnableAuthenticationError("rejected" if _USER_EXEC_LINE_RE.match(last_line) else "unknown_prompt")
+        if _pane_state(session_name) == "exited":
+            raise EnableAuthenticationError("session_ended")
+        if time.monotonic() >= stage_deadline:
+            raise EnableAuthenticationError("timeout")
+        time.sleep(_ENABLE_POLL_SECONDS)
+
+
+def _enable_for_new_managed_session(device_name: str, device_config: dict, session_name: str) -> None:
+    """Called from open_device_terminal() for a session this call created
+    (never a reused one) after login. No-op unless enable_applicable()."""
+    if not enable_applicable(device_config):
+        return
+    hostname, level = wait_for_stable_exec_prompt(session_name)
+    if level == "privileged":
+        return  # already privileged: nothing is sent
+    run_privileged_exec_authentication(session_name, hostname, device_config["enable_password"])
+
+
+def authenticate_bootstrap_enable(device_name: str, hostname: str, enable_password: str, *, admit=None) -> EnableAttempt:
+    """Discovery entry point: run enable authentication on this device's
+    own Discovery session (serialized by that session's lock)."""
+    session_name = derive_discovery_session_name(device_name)
+    with _session_lock(session_name):
+        return run_privileged_exec_authentication(session_name, hostname, enable_password, admit=admit)
+
+
+# --------------------------------------------------------------------------
 # Telnet over an SSH local port forward (logical session = tunnel + device)
 #
 # One logical Managed Terminal ("LegacyRouter") is two tmux sessions, each created
@@ -2015,7 +2380,9 @@ def open_device_terminal(device_name: str, device_config: dict) -> dict:
         reused = _ensure_managed_session(session_name, command, log_device_name=device_name)
         try:
             _authenticate_managed_session(device_name, device_config, session_name, newly_created=not reused)
-        except TerminalError:
+            if not reused:
+                _enable_for_new_managed_session(device_name, device_config, session_name)
+        except BaseException:  # incl. KeyboardInterrupt: never leave a half-authenticated new session behind
             if not reused:
                 _close_session(session_name)
             raise

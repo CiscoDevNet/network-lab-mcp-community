@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Added
+- **Enable password (privileged EXEC) for Cisco IOS / IOS XE.** New access-info device command `enable-password
+  <password>` / `no enable-password` (YAML `enable_password`, optional, stored for any device type, private like
+  `password`). For a new managed terminal session (SSH or Telnet) or Discovery session of an `ios`/`iosxe` device that
+  has one, the user EXEC prompt is advanced with one `enable` and at most one password send, after verifying pane
+  ownership, a fresh `Password:` prompt and the same-hostname `#` result. No retry; failure closes the new session
+  (managed: fixed error; Discovery: per-device warning, status Partial). Unexpected credential echo is fatal (Discovery
+  fails without touching the candidate). A fatal Discovery error now cancels the run at once and no credential send
+  starts afterwards. Existing sessions and devices without `enable_password` are untouched. New terminal logs are
+  created `0600` (directories `0700`).
+- **CLI compatibility note:** in access-info device mode `en` is now ambiguous (`end` / `enable-password`); use `end`
+  or `ena`/`enable-p`.
+
 ### Changed
 - **Topology Discovery: partial success and a non-destructive merge.** `discover topology` no longer fails as a whole
   when one device cannot be reached or has no usable LLDP/CDP. Every device of the selected access-info is registered

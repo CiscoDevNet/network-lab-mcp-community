@@ -60,6 +60,7 @@ from __future__ import annotations
 import concurrent.futures
 import copy
 import re
+import threading
 from dataclasses import dataclass, field
 
 from network_lab_mcp import hostkey_flow, lab, terminal
@@ -205,6 +206,53 @@ def _resolve_login_password(device_id: str, device_config: dict, prompt_line: st
     )
 
 
+class _RunCancelled(DiscoveryError):
+    """Raised inside a worker that was refused permission to start a
+    credential send (or to start at all) because the run was cancelled."""
+
+
+class _RunControl:
+    """Per-run cancellation with an admission gate. `cancel()` and
+    `admit()` take the same small lock, so once cancel() has returned no
+    later admit() can succeed: after cancellation is decided, the number of
+    newly started credential sends is exactly zero. Sends admitted before
+    that point are already in flight and finish through their own bounded
+    paths (nothing is retroactively un-sent). Never held across any I/O,
+    so devices are never serialized by it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self.admitted = 0
+        self.refused = 0
+        self.admitted_after_cancel = 0
+
+    @property
+    def cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+
+    def admit(self) -> None:
+        with self._lock:
+            if self._cancelled:
+                self.refused += 1
+                raise _RunCancelled("Discovery was cancelled; no further credential is sent.")
+            self.admitted += 1
+
+
+_ACTIVE_RUN: "_RunControl | None" = None
+
+
+def _admit_credential_send(device_id: str) -> None:
+    run = _ACTIVE_RUN
+    if run is not None:
+        run.admit()
+
+
 # Set only by discover_topology(hostkeys=...) -- i.e. only by the interactive human CLI.
 _ACTIVE_HOSTKEYS: "hostkey_flow.Coordinator | None" = None
 
@@ -263,6 +311,7 @@ def _require_trusted_hops(device_id: str) -> None:
     """With the host-key coordinator active, no credential is sent unless
     every hop of the device is trusted (also guaranteed structurally by
     StrictHostKeyChecking=yes on every hop)."""
+    _admit_credential_send(device_id)  # cancellation gate: before every credential send
     if _ACTIVE_HOSTKEYS is None:
         return
     try:
@@ -350,10 +399,48 @@ def _login_ios_style(device_id: str, device_config: dict) -> str:
         _require_trusted_hops(device_id)
         terminal.send_secret_to_bootstrap(device_id, password)
         text = terminal.wait_for_bootstrap_pattern(device_id, _IOS_STYLE_PROMPT_RE, LOGIN_TIMEOUT_SECONDS)
-    match = _IOS_STYLE_PROMPT_RE.search(_last_nonblank_line(text))
+    last_prompt_line = _last_nonblank_line(text)
+    match = _IOS_STYLE_PROMPT_RE.search(last_prompt_line)
     if not match:
         raise DeviceCollectionError(f"Device '{device_id}': did not reach an exec prompt after login.")
-    return match.group("hostname")
+    hostname = match.group("hostname")
+    if last_prompt_line.rstrip().endswith(">") and terminal.enable_applicable(device_config):
+        _enable_privileged_exec(device_id, device_config, hostname)
+    return hostname
+
+
+def _enable_privileged_exec(device_id: str, device_config: dict, hostname: str) -> None:
+    """Privileged EXEC authentication for an ios/iosxe Discovery session at
+    the user EXEC prompt, only because an enable_password is configured.
+    Ordinary failures become a continuable per-device warning (the device is
+    still registered as connected, status partial); a credential echo or a
+    lost pane ownership is fatal for the whole run. Fixed messages only."""
+    outcome = None
+    try:
+        terminal.authenticate_bootstrap_enable(
+            device_id, hostname, device_config["enable_password"], admit=lambda: _admit_credential_send(device_id)
+        )
+    except terminal.CredentialEchoError:
+        outcome = "echo"
+    except terminal.PaneOwnershipError:
+        outcome = "ownership"
+    except terminal.EnableAuthenticationError as exc:
+        outcome = exc.reason
+    if outcome is None:
+        return
+    if outcome == "echo":
+        raise DiscoveryError(f"Device '{device_id}': Unexpected credential echo during authentication.")
+    if outcome == "ownership":
+        raise DiscoveryError(f"Device '{device_id}': {terminal.ENABLE_OWNERSHIP_MESSAGE}")
+    if outcome == "timeout":
+        message = "Timed out while waiting for privileged exec prompt."
+    else:
+        message = "Privileged EXEC authentication failed."
+    raise DeviceCollectionError(
+        f"Device '{device_id}': {message}",
+        collected={"hostname": hostname},
+        session_ended=outcome == "session_ended",
+    )
 
 
 def _extract_command_output(full_text: str, command_text: str, prompt_re: re.Pattern) -> str:
@@ -454,7 +541,9 @@ def _collect_device(
             else:
                 collected[key] = _run_command(device_id, command, prompt_re)
     except DeviceCollectionError as exc:
-        exc.collected = collected
+        # keep anything the raising step itself attached (e.g. the login
+        # hostname when only privileged-EXEC authentication failed)
+        exc.collected = {**exc.collected, **collected}
         raise
     except terminal.TerminalError as exc:
         raise DeviceCollectionError(
@@ -1531,18 +1620,36 @@ def discover_topology(lab_root=None, include_l3: bool = False, hostkeys=None) ->
     # and no candidate/topology state is touched until every result has
     # been collected below.
     collect_kwargs = {"include_l3": True} if include_l3 else {}
-    global _ACTIVE_HOSTKEYS
+    global _ACTIVE_HOSTKEYS, _ACTIVE_RUN
     if hostkeys is not None and all_targets:
         try:
             hostkeys.prepare(all_targets)
         except hostkey_flow.HostKeyError as exc:
             raise DiscoveryError(str(exc)) from None
     _ACTIVE_HOSTKEYS = hostkeys
+    run = _RunControl()
+    _ACTIVE_RUN = run
     futures: dict[str, concurrent.futures.Future] = {}
+
+    def guarded(collector, device_id, device_cfg):
+        # A fatal condition in any worker cancels the whole run at once --
+        # not only after every future has finished -- so other workers
+        # cannot start any further credential send, and queued workers do
+        # not start at all.
+        run.admit()
+        try:
+            return collector(device_id, device_cfg, **collect_kwargs)
+        except DeviceCollectionError:
+            raise
+        except BaseException:
+            run.cancel()
+            raise
+
     try:
         if all_targets:
             worker_count = min(len(all_targets), DISCOVERY_MAX_WORKERS)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=worker_count)
+            try:
                 for device_id, device_cfg in all_targets.items():
                     if device_id in iosxr_targets:
                         collector = _bootstrap_collect
@@ -1550,13 +1657,20 @@ def discover_topology(lab_root=None, include_l3: bool = False, hostkeys=None) ->
                         collector = _bootstrap_collect_iosxe
                     else:
                         collector = _bootstrap_collect_ios
-                    futures[device_id] = executor.submit(collector, device_id, device_cfg, **collect_kwargs)
-            # The `with` block above only exits once every submitted future has
-            # finished (successfully or not) -- so every bootstrap session below
-            # is either fully collected or has already failed, never still
-            # in flight.
+                    futures[device_id] = executor.submit(guarded, collector, device_id, device_cfg)
+                executor.shutdown(wait=True)
+            except BaseException:
+                # e.g. the operator's KeyboardInterrupt: stop new sends, drop
+                # queued work, then let already-running steps finish.
+                run.cancel()
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise
+            # Every submitted future has finished (successfully or not) --
+            # so every bootstrap session below is either fully collected or
+            # has already failed, never still in flight.
     finally:
         _ACTIVE_HOSTKEYS = None
+        _ACTIVE_RUN = None
         for device_id in all_targets:
             terminal.close_bootstrap_terminal(device_id)
 
@@ -1566,6 +1680,7 @@ def discover_topology(lab_root=None, include_l3: bool = False, hostkeys=None) ->
     # Any other DiscoveryError (host key, credential-target ambiguity),
     # HostKeyChanged, an unexpected worker exception and KeyboardInterrupt
     # propagate and fail the run closed -- there is deliberately no catch-all.
+    cancelled_devices: list[str] = []
     for device_id, outcome in plan.items():
         if device_id not in futures:
             continue
@@ -1574,6 +1689,8 @@ def discover_topology(lab_root=None, include_l3: bool = False, hostkeys=None) ->
             info = futures[device_id].result()
         except DeviceCollectionError as exc:
             _record_collection(outcome, exc.collected, exc, include_l3, management_address)
+        except _RunCancelled:
+            cancelled_devices.append(device_id)  # a consequence of another worker's fatal error
         except (DiscoveryError, hostkey_flow.HostKeyChanged):
             raise
         except Exception as exc:
@@ -1584,6 +1701,9 @@ def discover_topology(lab_root=None, include_l3: bool = False, hostkeys=None) ->
             raise DiscoveryError(f"Device '{device_id}': unexpected collection failure: {exc}") from exc
         else:
             _record_collection(outcome, info, None, include_l3, management_address)
+
+    if cancelled_devices:
+        raise DiscoveryError("Discovery was cancelled before every device finished; the candidate was not changed.")
 
     outcomes = list(plan.values())
     identity_map = {o.device_id: o.hostname for o in outcomes if o.connection == "connected"}

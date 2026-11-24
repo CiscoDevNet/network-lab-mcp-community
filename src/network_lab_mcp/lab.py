@@ -27,6 +27,7 @@ from __future__ import annotations
 import errno
 import ipaddress
 import os
+import unicodedata
 import secrets
 from pathlib import Path
 from typing import Any, Optional
@@ -308,7 +309,7 @@ def validate_device_types(context_label: str, devices: dict) -> None:
 
 # Private device-access fields that must live in access-info, never in
 # topology, since topology is exposed to Claude via get_active_topology().
-TOPOLOGY_ACCESS_FIELDS = ("address", "transport", "port", "username", "password")
+TOPOLOGY_ACCESS_FIELDS = ("address", "transport", "port", "username", "password", "enable_password", "enable-password")
 
 
 def validate_topology_device_names(topology_name: str, devices: dict) -> None:
@@ -611,6 +612,25 @@ def validate_connection_values(context_label: str, devices: dict, jump_hosts: di
                 raise LabConfigError(str(exc)) from None
 
 
+def validate_enable_passwords(context_label: str, devices: dict) -> None:
+    """The optional private `enable_password` of a device must be a
+    non-empty string without control characters (terminal-input
+    injection). The value is never included in the error."""
+    for device_name, device in devices.items():
+        value = (device or {}).get("enable_password")
+        if value is None:
+            continue
+        if (
+            not isinstance(value, str)
+            or not value
+            or any(unicodedata.category(ch) == "Cc" for ch in value)
+        ):
+            raise LabConfigError(
+                f"{context_label} device '{device_name}' has an invalid enable_password: it must be a "
+                "non-empty string (quote numeric values) without control characters."
+            )
+
+
 def validate_access_info_data(name: str, data: Any) -> None:
     """Validate an in-memory access-info mapping. Device names only need
     basic sanity here (non-empty strings) -- unlike topology, access-info
@@ -634,6 +654,7 @@ def validate_access_info_data(name: str, data: Any) -> None:
     validate_jump_hosts(f"Access information '{name}'", jump_hosts)
     validate_device_jump_host_references(f"Access information '{name}'", devices, jump_hosts)
     validate_connection_values(f"Access information '{name}'", devices, jump_hosts)
+    validate_enable_passwords(f"Access information '{name}'", devices)
 
 
 def load_access_info(name: str, lab_root: Path | None = None) -> dict:

@@ -77,7 +77,19 @@ def _is_password_command(line: str) -> bool:
     first, _, rest = stripped.partition(" ")
     if not rest.strip():
         return False
-    return bool(first) and "password".startswith(first.lower())
+    first = first.lower()
+    # Any prefix of a credential keyword is treated as credential-bearing,
+    # whether or not the grammar would resolve it (fail safe: this runs
+    # before/independent of grammar resolution, so an invalid or ambiguous
+    # abbreviation never reaches history either).
+    if not first:
+        return False
+    # Besides every prefix of a credential keyword, any first word starting
+    # "pa" or "en" is treated as credential-bearing too, so a mistyped or
+    # control-character-corrupted credential command (which the grammar will
+    # reject) can never be recalled either. Over-matching only costs history
+    # recall of a rejected line.
+    return "password".startswith(first) or "enable-password".startswith(first) or first.startswith(("pa", "en"))
 
 
 # --------------------------------------------------------------------------
@@ -361,7 +373,7 @@ def build_context(session: cfgmod.CliSession) -> grammar.CliContext:
 # A device's 'jump_host' field is spelled 'jump-host' as a CLI keyword and
 # in every rendered view; every other field is spelled identically in YAML
 # and in the CLI.
-_FIELD_DISPLAY_NAMES = {"jump_host": "jump-host"}
+_FIELD_DISPLAY_NAMES = {"jump_host": "jump-host", "enable_password": "enable-password"}
 
 
 def _display_field_name(field_name: str) -> str:
@@ -2278,6 +2290,14 @@ def h_access_device_clear_username(session: cfgmod.CliSession, args: dict) -> No
     session.clear_device_field("username")
 
 
+def h_access_device_set_enable_password(session: cfgmod.CliSession, args: dict) -> None:
+    session.set_device_field("enable_password", args["value"])
+
+
+def h_access_device_clear_enable_password(session: cfgmod.CliSession, args: dict) -> None:
+    session.clear_device_field("enable_password")
+
+
 def h_access_device_clear_password(session: cfgmod.CliSession, args: dict) -> None:
     session.clear_device_field("password")
 
@@ -2414,6 +2434,8 @@ HANDLERS: dict[str, Callable[[cfgmod.CliSession, dict], None]] = {
     "access_device.clear_transport": h_access_device_clear_transport,
     "access_device.clear_username": h_access_device_clear_username,
     "access_device.clear_password": h_access_device_clear_password,
+    "access_device.set_enable_password": h_access_device_set_enable_password,
+    "access_device.clear_enable_password": h_access_device_clear_enable_password,
     "access_device.clear_port": h_access_device_clear_port,
     "access_device.clear_jump_host": h_access_device_clear_jump_host,
     "access_jump_host.set_type": h_access_jump_host_set_type,
