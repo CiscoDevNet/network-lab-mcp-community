@@ -375,7 +375,7 @@ def test_failed_paste_leaves_no_tmux_buffer_behind(monkeypatch, tmp_path):
     with pytest.raises(terminal.TerminalError):
         terminal._send_literal_text(session, "FICTIONAL-SENTINEL-TEXT")
     buffers = terminal._run(["list-buffers", "-F", "#{buffer_name}"], check=False).stdout
-    assert f"text-{session}" not in buffers
+    assert "nlm-" not in buffers
 
 
 # ---------------------------------------------------------------------------

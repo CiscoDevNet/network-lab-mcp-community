@@ -63,7 +63,7 @@ def test_send_secret_text_never_places_the_secret_in_subprocess_argv(monkeypatch
         assert _SENTINEL not in joined, f"secret leaked into subprocess argv: {args}"
     # Confirm the secret *did* travel, just via stdin, not merely absent
     # everywhere (a no-op fake would trivially "pass" the check above).
-    assert any(stdin_input == _SENTINEL for _, stdin_input in calls)
+    assert any(stdin_input == _SENTINEL.encode("utf-8") for _, stdin_input in calls)
 
 
 def test_send_secret_text_types_the_secret_into_the_pane(monkeypatch):
@@ -91,7 +91,7 @@ def test_send_secret_text_cleans_up_its_named_buffer(monkeypatch):
     result = subprocess.run(
         terminal._tmux_base() + ["list-buffers"], capture_output=True, text=True
     )
-    assert f"secret-{session_name}" not in result.stdout
+    assert "nlm-" not in result.stdout
 
 
 def test_send_secret_to_bootstrap_never_places_the_secret_in_subprocess_argv(monkeypatch, tmp_path):
@@ -109,4 +109,4 @@ def test_send_secret_to_bootstrap_never_places_the_secret_in_subprocess_argv(mon
 
     for args, _stdin_input in calls:
         assert _SENTINEL not in " ".join(args)
-    assert any(stdin_input == _SENTINEL for _, stdin_input in calls)
+    assert any(stdin_input == _SENTINEL.encode("utf-8") for _, stdin_input in calls)

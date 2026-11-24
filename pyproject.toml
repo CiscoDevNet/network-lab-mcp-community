@@ -33,4 +33,5 @@ where = ["src"]
 [tool.pytest.ini_options]
 markers = [
     "real_lab: requires real lab hardware (IOS XR/IOS XE/classic IOS); opt-in via NETWORK_LAB_REAL_TESTS=1 (skipped by default).",
+    "stress: long tmux buffer Stress tests; opt-in via NETWORK_LAB_STRESS=1 (NLM_STRESS_SCALE multiplies counts); skipped by default.",
 ]

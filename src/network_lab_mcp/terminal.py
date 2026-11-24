@@ -26,12 +26,15 @@ name and the launched command differ.
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 import shlex
 import shutil
 import subprocess
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -519,61 +522,147 @@ def _ensure_managed_session(session_name: str, command: list[str], *, log_device
     return reused
 
 
-def _send_text_via_stdin(session_name: str, buffer_name: str, text: str) -> None:
-    """Deliver `text` into `session_name`'s pane without ever placing it in
-    a subprocess's own argv (a process listing on the host, or a
-    `f"...{' '.join(args)}..."`-style error message from a failed command,
-    could otherwise reveal it): `text` is piped to `tmux load-buffer -`
-    over stdin into a `buffer_name`-named buffer, then `tmux paste-buffer
-    -r -d` types that buffer's content into the pane and deletes the
-    buffer immediately afterward. `-r` ("no replacement") is required, not
-    optional -- paste-buffer's own default silently replaces every LF in
-    the buffer with a CR separator, which would corrupt any literal text
-    or secret containing an embedded newline; `-r` preserves every byte
-    exactly, matching `send-keys -l --`'s own literal, unmodified-byte
-    behavior (confirmed empirically against a real tmux session; see
-    tests/test_terminal_send_literal_text_injection.py). `buffer_name`
-    must be unique across concurrently-active sessions (the caller derives
-    it from `session_name`), so concurrent text delivery on different
-    sessions never shares a buffer. Neither this function's own tmux
-    command lines nor its error messages ever include `text` itself."""
-    target = _send_target(session_name)
-    load_result = subprocess.run(
-        _tmux_base() + ["load-buffer", "-b", buffer_name, "-"],
-        input=text,
-        capture_output=True,
-        text=True,
-    )
-    if load_result.returncode != 0:
-        raise TerminalError(f"tmux command failed: load-buffer: {load_result.stderr.strip()}")
+# Bounded waits for the three buffer-transport tmux client calls. Each is a
+# local Unix-socket round trip that normally completes in milliseconds; the
+# bounds only stop a wedged tmux server from blocking a worker (and the
+# per-session lock it holds) forever. They sit well under the Managed login
+# (15s) and Discovery per-command timeouts. A timeout is never retried.
+_BUFFER_LOAD_TIMEOUT_SECONDS = 10
+_BUFFER_PASTE_TIMEOUT_SECONDS = 10
+_BUFFER_CLEANUP_TIMEOUT_SECONDS = 5
+
+# Outcomes of _cleanup_buffer(). Reporting only: no outcome ever triggers a
+# further (possibly dangerous) buffer command.
+BUFFER_CLEANED = "CLEANED"
+BUFFER_ALREADY_ABSENT = "ALREADY_ABSENT"
+BUFFER_CLEANUP_FAILED = "CLEANUP_FAILED"
+
+_log = logging.getLogger(__name__)
+
+
+def _new_buffer_name() -> str:
+    """A buffer name unique to ONE send operation, across threads and
+    processes. It never contains the payload, session, device or user."""
+    return f"nlm-{os.getpid()}-{uuid.uuid4().hex}"
+
+
+def _tmux_exec(args: list[str], *, stdin: bytes | None, timeout: float) -> tuple[str, int, str]:
+    """Run one tmux client call with a finite timeout. Returns (status,
+    returncode, stderr) with status "ok", "timeout" or "oserror". Every
+    external exception is reduced to a status here, so no exception object
+    (which may carry stdin/stdout/stderr) outlives this function. stderr is
+    for local classification only and is never copied into an error."""
+    argv = _tmux_base() + args
+    status = "ok"
+    result = None
     try:
-        _run(["paste-buffer", "-r", "-d", "-b", buffer_name, "-t", target])
-    finally:
-        # Defensive: `paste-buffer -d` already deletes the buffer itself on
-        # success; this only guards against a buffer surviving if
-        # paste-buffer raised (e.g. the session vanished mid-operation).
-        _run(["delete-buffer", "-b", buffer_name], check=False)
+        result = subprocess.run(argv, input=stdin, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        status = "timeout"
+    except (OSError, subprocess.SubprocessError):
+        status = "oserror"
+    if result is None:
+        return status, -1, ""
+    err = result.stderr or b""
+    if isinstance(err, bytes):
+        err = err.decode("utf-8", errors="replace")
+    return status, result.returncode, err
+
+
+def _cleanup_buffer(buffer_name: str) -> str:
+    """Remove this operation's own buffer after a failed send, safely.
+
+    `delete-buffer -b NAME` alone is forbidden: tmux 3.2a/3.3a fall back to
+    the NEWEST buffer when NAME does not exist and delete that (another
+    operation's) buffer. `save-buffer -b NAME /dev/null ; delete-buffer -b
+    NAME` is one client call: save-buffer fails for a missing NAME (no
+    fallback) and tmux then skips the rest of the command list, so
+    delete-buffer only runs for a buffer that existed an instant earlier.
+    The content goes to /dev/null, never to this process. This is not
+    atomic; safety rests on buffer ownership (the name is unique to this
+    operation and only this operation touches it) -- see
+    docs/architecture.md."""
+    status, rc, err = _tmux_exec(
+        ["save-buffer", "-b", buffer_name, "/dev/null", ";", "delete-buffer", "-b", buffer_name],
+        stdin=None,
+        timeout=_BUFFER_CLEANUP_TIMEOUT_SECONDS,
+    )
+    if status == "ok" and rc == 0:
+        return BUFFER_CLEANED
+    if status == "ok" and err.strip() == f"no buffer {buffer_name}":
+        return BUFFER_ALREADY_ABSENT
+    _log.warning("tmux buffer cleanup failed; a residual buffer may remain")
+    return BUFFER_CLEANUP_FAILED
+
+
+def _send_text_via_stdin(session_name: str, text: str) -> None:
+    """Deliver `text` into `session_name`'s pane without ever placing it in
+    a subprocess's own argv: `text` is piped (explicit UTF-8 bytes) to
+    `tmux load-buffer -` into a buffer unique to this one operation, then
+    `tmux paste-buffer -r -d` types it into the pane; `-d` deletes the
+    buffer, so success runs NO further delete (a second delete-buffer of an
+    already-deleted name made tmux 3.2a delete another worker's newest
+    buffer). `-r` is required: the default replaces LF with CR.
+
+    Failure paths clean up only this operation's own buffer via
+    _cleanup_buffer(). Errors are fixed messages; no external stderr,
+    exception object or payload is ever copied or chained into them, and
+    nothing is retried: after a paste timeout delivery is unknown."""
+    target = _send_target(session_name)
+
+    encoding_failed = False
+    payload = b""
+    try:
+        payload = text.encode("utf-8")
+    except UnicodeEncodeError:
+        encoding_failed = True
+    if encoding_failed:
+        raise TerminalError("Input cannot be encoded as UTF-8")
+
+    buffer_name = _new_buffer_name()
+
+    status, rc, _err = _tmux_exec(
+        ["load-buffer", "-b", buffer_name, "-"], stdin=payload, timeout=_BUFFER_LOAD_TIMEOUT_SECONDS
+    )
+    if status == "timeout" or status == "oserror" or rc != 0:
+        message = "tmux load-buffer timed out" if status == "timeout" else "tmux load-buffer failed"
+        if status != "oserror":
+            _cleanup_buffer(buffer_name)  # buffer state unknown (may exist)
+        raise TerminalError(message)
+
+    status, rc, err = _tmux_exec(
+        ["paste-buffer", "-r", "-d", "-b", buffer_name, "-t", target],
+        stdin=None,
+        timeout=_BUFFER_PASTE_TIMEOUT_SECONDS,
+    )
+    if status == "ok" and rc == 0:
+        return
+    if status == "ok" and err.strip() == f"no buffer {buffer_name}":
+        # Our buffer is already gone: nothing to clean, and cleaning would
+        # only risk tmux's newest-buffer fallback on older versions.
+        raise TerminalError("tmux buffer unexpectedly disappeared")
+    if status == "timeout":
+        message = "tmux paste-buffer timed out; delivery result is unknown"
+    elif status == "ok" and err.strip().startswith("can't find"):
+        message = "tmux target pane is unavailable"
+    else:
+        message = "tmux paste-buffer failed"
+    _cleanup_buffer(buffer_name)
+    raise TerminalError(message)
 
 
 def _send_literal_text(session_name: str, text: str) -> None:
-    """Ordinary operator/terminal_send() text -- see _send_text_via_stdin()
-    for why this never uses `send-keys -l --` (which would place `text` in
-    that tmux subprocess's own argv, and potentially in a raised
-    TerminalError's message on failure). `text` may itself be a username,
-    password, or other private configuration value being typed into a
-    device, so this path gets the same argv/error-message safety as
-    dedicated credential input, without changing terminal_send()'s public
-    byte-level delivery contract."""
-    _send_text_via_stdin(session_name, f"text-{session_name}", text)
+    """Ordinary operator/terminal_send() text -- see _send_text_via_stdin().
+    `text` may itself be a username, password or other private value, so
+    this path gets the same argv/error-message safety as credential input."""
+    _send_text_via_stdin(session_name, text)
 
 
 def _send_secret_text(session_name: str, secret: str) -> None:
     """Dedicated credential input (a password, or a Telnet username): see
-    _send_text_via_stdin() for the shared transport. Kept as its own named
-    wrapper (rather than calling _send_text_via_stdin() directly at each
-    call site) so every credential call site reads unambiguously as
-    credential-handling code."""
-    _send_text_via_stdin(session_name, f"secret-{session_name}", secret)
+    _send_text_via_stdin(). Kept as its own named wrapper so every
+    credential call site reads unambiguously as credential-handling code."""
+    _send_text_via_stdin(session_name, secret)
 
 
 def _send_special_keys(session_name: str, keys: list[str]) -> None:

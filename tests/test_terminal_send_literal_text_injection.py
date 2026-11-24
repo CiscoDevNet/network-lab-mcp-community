@@ -189,7 +189,7 @@ def test_send_literal_text_never_places_text_in_subprocess_argv(monkeypatch):
         assert _SENTINEL not in " ".join(args), f"text leaked into subprocess argv: {args}"
     # Confirm the text *did* travel, just via stdin -- a no-op fake must not
     # trivially satisfy the check above.
-    assert any(stdin_input == _SENTINEL for _, stdin_input in calls)
+    assert any(stdin_input == _SENTINEL.encode("utf-8") for _, stdin_input in calls)
 
 
 def test_send_literal_text_still_reaches_the_pane(monkeypatch):
@@ -211,7 +211,7 @@ def test_send_literal_text_cleans_up_its_named_buffer():
     terminal._send_literal_text(session_name, _SENTINEL)
 
     result = subprocess.run(terminal._tmux_base() + ["list-buffers"], capture_output=True, text=True)
-    assert session_name not in result.stdout
+    assert "nlm-" not in result.stdout
 
 
 # ---- error-message safety ----

@@ -428,6 +428,73 @@ one reported. Any collection failure — expected or an unexpected worker
 exception (converted to a bounded error, never a leaked raw traceback) —
 still fails the whole operation with zero candidate mutation.
 
+### tmux buffer transport: ownership, cleanup and deployment
+
+Text (including credentials) reaches a pane through `terminal._send_text_via_stdin()`:
+UTF-8 bytes piped over stdin to `tmux load-buffer -b NAME -`, then
+`tmux paste-buffer -r -d -b NAME -t TARGET`. Both ordinary text and credentials use it.
+
+**Why the old code lost buffers.** The old sender ran `paste-buffer -d` (which deletes the
+buffer) and then, in a `finally`, `delete-buffer -b NAME` again. On tmux 3.2a (measured on Ubuntu
+22.04) `delete-buffer -b MISSING` falls back to the *newest* buffer and deletes it, so one
+worker's second delete removed another worker's buffer; that worker's `paste-buffer` then failed
+with `no buffer`. This hit parallel Discovery. tmux 3.3a has the same fallback (source comparison
+only); 3.4 and 3.5a return `unknown buffer` (source comparison only). tmux 3.2a stays supported.
+
+**What changed.**
+- **No second delete on success.** `paste-buffer -d` is the only deletion on the success path.
+- **One buffer per operation.** Names are `nlm-<pid>-<uuid4hex>`; they never include the payload,
+  session, device or user. Distinct threads *and* processes cannot collide, so one send owns exactly one buffer
+  and never touches another's.
+- **Guarded cleanup on failure only**, via one client call (no `shell=True`; `;` is its own argv element):
+  `save-buffer -b NAME /dev/null ; delete-buffer -b NAME`. `save-buffer` fails for a missing name
+  without any newest-buffer fallback, and tmux skips the rest of the list, so `delete-buffer` runs only
+  for a buffer that existed an instant before. Content goes to `/dev/null`, never into this process.
+  Rejected: unconditional `delete-buffer`; `list-buffers` then delete (TOCTOU); `show-buffer`.
+- **Exact `no buffer <own name>` from `paste-buffer`** means our buffer is already gone: no cleanup is run.
+- **Finite timeouts** (load 10s, paste 10s, cleanup 5s), never retried and never resent. After a
+  paste timeout delivery is *unknown* and reported as such. Existing per-session locks are unchanged; no global
+  lock and no inter-process lock was added.
+- **Fixed error messages.** External stderr, stdout and exception objects are never copied or chained
+  into `TerminalError` (no `__cause__`/`__context__`). Unencodable input raises
+  `Input cannot be encoded as UTF-8` before any tmux call. Cleanup failures are logged with a fixed
+  message and never replace the original error.
+
+Cleanup outcomes (`CLEANED`, `ALREADY_ABSENT`, `CLEANUP_FAILED`) are for reporting only; no outcome triggers another delete.
+
+**Safety argument: ownership, not atomicity.** `save-buffer ; delete-buffer` is *not* shown to be atomic.
+Safety rests on each operation using only its own unique buffer, on all processes on one tmux server running
+the fixed code, and on nobody else deleting, renaming or overwriting `nlm-*` buffers. Those external
+operations are outside the supported conditions.
+
+**Evidence levels.**
+- Ubuntu tmux 3.2a measurements (provided): the fallback; 900-run comparisons; guarded-cleanup basic behavior
+  (missing name: rc 1, other buffers kept; existing name: only it deleted).
+- macOS tmux 3.8 measurements (`tests/test_tmux_buffer_real.py`): the same cleanup behavior and the exact
+  `no buffer NAME` text; thread, process, same-session and mixed-load runs; cleanup under load.
+- Fake (`tests/test_tmux_buffer_fake.py`): models 3.2a's fallback; not evidence about real tmux.
+- Not verified: guarded cleanup under tmux 3.2a concurrency; save-buffer queue suspension; whether a timed-out
+  `load-buffer` can complete on the server after cleanup (a residual buffer is then possible); interleaving
+  between processes writing to one pane beyond the runs recorded in the tests.
+- tmux 3.8 rewrites C0 control characters (e.g. STX/ETX) when pasting; only printable framing is used in tests.
+
+**Limits.** `SIGKILL` of a client between load and paste can leave a buffer; no prefix/age sweep is done because
+another process may be using it. Process-level exclusion of whole authentication or command flows on one session
+is out of scope.
+
+**Deployment rule.** Never run old and fixed processes against the same tmux server: an old process's
+unconditional `delete-buffer` can destroy a fixed process's buffer. `git pull` does not replace running
+processes. To roll out: stop starting new sends/Discovery, let work finish, exit the CLI and every MCP server
+(including those started by AI clients), update (and reinstall if packaging changed), restart them, and confirm the
+new code is running. Check what each exit does to Managed Sessions before assuming they survive; the tmux server
+itself is independent, but do not stop it or kill sessions as part of this.
+
+**Running the tests.**
+```
+python -m pytest tests/test_tmux_buffer_fake.py tests/test_tmux_buffer_real.py -s   # daily, prints NLM_SUMMARY JSON lines
+NETWORK_LAB_STRESS=1 python -m pytest tests/test_tmux_buffer_real.py -m stress -s   # Stress; NLM_STRESS_SCALE=N multiplies counts
+```
+
 ### Live read-only human monitoring
 
 ```
