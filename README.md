@@ -273,7 +273,9 @@ fi
 ./run_cli.sh
 ```
 
-Use the registration instructions below for your AI client. Linux behavior depends on the distribution, OpenSSH and Telnet clients, and network configuration; see the tested Windows/WSL2 case below for additional coverage.
+**Raspberry Pi OS (Linux ARM64).** The steps above were validated on a Raspberry Pi 4 Model B (4 GB RAM) running Raspberry Pi OS based on Debian 13 (Trixie), aarch64, with Python 3.13.5, tmux 3.5a, OpenSSH 10.0p2, Claude Code 2.1.331, and Network Lab MCP 0.3.0. The full automated test suite passed (2,329 passed, 2 skipped), and interactive CLI operation and MCP integration with Claude Code (`get_active_topology` and `get_execution_instructions`) were successfully verified.
+
+Use the registration instructions below for your AI client. Linux behavior depends on the distribution, OpenSSH and Telnet clients, and network configuration; see the tested Raspberry Pi OS case above and the tested Windows/WSL2 case below for additional coverage.
 
 ### Windows 11 / WSL2 installation
 
