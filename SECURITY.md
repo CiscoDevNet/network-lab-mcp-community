@@ -114,6 +114,15 @@ so review changes before pushing.
 - **Discovery.** An ordinary enable failure is a per-device warning (device connected, status Partial, no further
   commands, the session closed); a credential echo or lost pane ownership is fatal. A fatal error cancels the run
   at once and no credential send starts after that.
+- **Verification status.** *Verified:* automated tests against synthetic IOS / IOS XE devices (authentication success and
+  failure, send limits and no re-send, credential-echo detection, no exposure in errors or logs, Discovery behavior);
+  on macOS with a real IOS XE device, Discovery with an incorrect enable password produced a per-device warning (status
+  Partial, other devices unaffected), and after the enable password was corrected Discovery succeeded; on Ubuntu, a
+  real-device L2 Discovery that included an IOS XE device succeeded (this is a functional result, **not** a dedicated
+  enable-password safety validation on Ubuntu). *Not verified:* a dedicated safety validation of the interaction
+  between enable authentication and the Terminal Monitor, detailed credential-echo behavior on real devices, and
+  enable-password-specific safety validation on Ubuntu. The residual echo risk described above therefore stands, and
+  the feature should be used with these gaps in mind.
 
 ## 4. Credential isolation is not output sanitization
 

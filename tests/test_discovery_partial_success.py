@@ -399,7 +399,7 @@ def test_m16_a_typeless_access_info_never_removes_the_stored_type(lab_root, monk
 # L3 through the CLI
 # ==========================================================================
 
-L3_OK = f"{L3_HDR}\nGigabitEthernet0/0/0/1   10.0.12.1   Up Up default\nGigabitEthernet0/0/0/2   unassigned   Up Up default\n"
+L3_OK = f"{L3_HDR}\nGigabitEthernet0/0/0/1   198.51.100.1   Up Up default\nGigabitEthernet0/0/0/2   unassigned   Up Up default\n"
 
 
 def test_l01_l3_is_collected_even_when_no_neighbor_protocol_is_usable(lab_root, monkeypatch, capsys):
@@ -414,7 +414,7 @@ def test_l01_l3_is_collected_even_when_no_neighbor_protocol_is_usable(lab_root, 
     assert ok
     assert session.definition_candidate["devices"]["R1"] == {
         "type": "iosxr",
-        "interfaces": {"GigabitEthernet0/0/0/1": {"ipv4_address": "10.0.12.1", "vrf": "default"}},
+        "interfaces": {"GigabitEthernet0/0/0/1": {"ipv4_address": "198.51.100.1", "vrf": "default"}},
     }
     assert "R1       iosxr   Connected    Disabled   Unsupported   Partial" in out
     assert "Devices without protocol : 1" in out and "R1: No usable neighbor discovery protocol." in out
@@ -428,9 +428,9 @@ def test_l07_a_changed_address_updates_the_field_and_an_unassigned_one_never_bla
             "R1": {
                 "type": "iosxr",
                 "interfaces": {
-                    "GigabitEthernet0/0/0/1": {"ipv4_address": "10.9.9.9", "vrf": "default"},
-                    "GigabitEthernet0/0/0/2": {"ipv4_address": "10.0.23.1", "vrf": "default"},
-                    "GigabitEthernet0/0/0/3": {"ipv4_address": "10.0.34.1", "vrf": "default"},
+                    "GigabitEthernet0/0/0/1": {"ipv4_address": "203.0.113.9", "vrf": "default"},
+                    "GigabitEthernet0/0/0/2": {"ipv4_address": "198.51.100.5", "vrf": "default"},
+                    "GigabitEthernet0/0/0/3": {"ipv4_address": "198.51.100.9", "vrf": "default"},
                 },
             }
         },
@@ -441,9 +441,9 @@ def test_l07_a_changed_address_updates_the_field_and_an_unassigned_one_never_bla
     session = _session(lab_root)
     ok, out = _discover(session, capsys, "discover topology l3")
     interfaces = session.definition_candidate["devices"]["R1"]["interfaces"]
-    assert interfaces["GigabitEthernet0/0/0/1"]["ipv4_address"] == "10.0.12.1"  # L07: updated
-    assert interfaces["GigabitEthernet0/0/0/2"]["ipv4_address"] == "10.0.23.1"  # L08: `unassigned` != unset
-    assert interfaces["GigabitEthernet0/0/0/3"]["ipv4_address"] == "10.0.34.1"  # L06: not listed, kept
+    assert interfaces["GigabitEthernet0/0/0/1"]["ipv4_address"] == "198.51.100.1"  # L07: updated
+    assert interfaces["GigabitEthernet0/0/0/2"]["ipv4_address"] == "198.51.100.5"  # L08: `unassigned` != unset
+    assert interfaces["GigabitEthernet0/0/0/3"]["ipv4_address"] == "198.51.100.9"  # L06: not listed, kept
     assert "L3 interfaces updated    : 1" in out and "L3 interfaces retained   : 2" in out
 
 

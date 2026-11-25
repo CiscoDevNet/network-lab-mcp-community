@@ -543,7 +543,7 @@ On **November 2, 2026**, macOS real-lab E2E checks succeeded for an SSH-enabled 
 - The **local workstation ↔ jump server** SSH connection is encrypted.
 - The **jump server ↔ legacy Telnet-only device** path carries **unencrypted Telnet** traffic; use only an authorized, protected lab/management network and account for this risk.
 - Local port forwarding through `127.0.0.1` is not a process-level access-control boundary.
-- An optional per-device `enable-password` (IOS / IOS XE) is a private credential like `password`; it is used only for new sessions, at most once per attempt, with no retry (see SECURITY.md 3a).
+- An optional per-device `enable-password` (IOS / IOS XE) is a private credential like `password`; it is used only for new sessions, at most once per attempt, with no retry (see SECURITY.md 3a). Its verification status (what has and has not been validated) is stated in SECURITY.md 3a; dedicated safety validation is not complete.
 - Private device and jump-server passwords are resolved internally; they must not be put in AI prompts, published logs, or repository examples.
 - SSH host-key verification must remain enabled. First-use keys are registered automatically (TOFU, see above); a changed or other-type key is refused and can only be replaced by a human in the CLI.
 
@@ -589,6 +589,7 @@ The two commits serve different purposes: **the first saves the discovered topol
 - **The merge is non-destructive.** New devices, links and L3 interfaces are added; a newly observed, valid value (for example a changed IPv4 address on a known interface) updates that field. Nothing is ever removed: not a device that was dropped from the access-info, not a link that was not seen this time (including after a successful "zero neighbors" result, a disabled protocol or an unreachable device), not an interface or L3 data a run did not report (an L2 run keeps existing L3 data). The same link seen again is never duplicated, whatever the endpoint order or interface spelling, or LLDP/CDP source.
 - **Retained is not re-confirmed.** What Discovery keeps may be stale; a retained device, link or interface was not necessarily observed by this run.
 - **Contradictions are refused, not overwritten.** A new link that claims an interface already used by a different stored link, a device `type` that differs from the stored one, conflicting LLDP/CDP observations, an interface in more than one link, a changed or unverifiable SSH host key, an unexpected internal error, or an invalid candidate are fatal: nothing is applied (`% Topology candidate not updated.`) and the previous candidate is kept.
+- **Interface names are compared by identity, and unknown ones are never guessed.** Different spellings of one port (for example `Te0/0/0/3` / `TenGigE0/0/0/3`, or `TF1/1/3` / `Twe 1/1/3` on an IOS XE-owned port) are one interface, so the same physical link is registered once, while parallel links between the same two devices stay separate. An interface name the built-in Interface Type Registry cannot identify (unknown type, invalid format, or an alias that is ambiguous for that device type) is **not** registered under a guessed identity: the affected new link or L3 entry is deferred, an **Interface Normalization Warnings** section lists what was seen (device, interface names, protocol, observer, count, action taken), the rest of Discovery continues and nothing already stored is changed or removed. See the [CLI Reference](docs/cli_reference.md) for the warning format and [Architecture](docs/architecture.md#interface-identity-and-the-interface-type-registry) for how to extend the registry.
 - **To rebuild a topology from scratch, delete it explicitly** and discover again (see below). There is no `replace` option and Discovery never deletes anything on its own.
 - Discovery does not configure devices, enable LLDP/CDP, auto-commit, or auto-select a topology. Uncommitted manual edits block a re-run (`clear` first). Ctrl-C during Discovery applies nothing.
 - `clear` discards uncommitted candidate changes and restores the committed state.
@@ -597,7 +598,7 @@ Example (the output of a run where one device has no usable neighbor protocol an
 
 ```text
 network-lab(config)# discover topology
-Discovering topology from access-info 'sr-training'...
+Discovering topology from access-info 'example-lab'...
 
 Device Discovery Summary
 ---------------------------------------------------------------
@@ -637,7 +638,7 @@ Commit is required to save the topology.
 
 - **Status**: `Complete` -- connected, and at least one neighbor protocol was read successfully (an empty neighbor table counts), with no limitation. `Partial` -- the device is registered, but something was limited (not connected, no usable protocol, a failed parse or L3 read, a session that ended, unsupported or unset type). A session that ends after login still shows `Connected`, with `Partial` and a warning.
 - **LLDP / CDP**: `Enabled`, `Disabled`, `Unsupported`, `Unknown` (could not be confirmed -- for example the device was not reached) or `N/A`. `Unknown` is never reported as `Disabled` or `Unsupported`.
-- **Topology Changes** compares the topology before the run with the final candidate. `Discovered links` counts this run's observations; `Links retained` counts stored links that stayed. If nothing changed: `Topology candidate unchanged.`
+- **Topology Changes** compares the topology before the run with the final candidate. `Discovered links` counts the distinct physical links this run identified (spellings of one port count once; deferred observations are not links); `Links retained` counts stored links that stayed. If nothing changed: `Topology candidate unchanged.`
 
 To rebuild a topology completely (for example after replacing the lab), delete it and discover again:
 

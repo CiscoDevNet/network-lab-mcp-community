@@ -62,16 +62,16 @@ def test_reobserved_interface_value_is_updated_and_unobserved_interface_is_retai
 
 def test_extra_stored_fields_of_an_interface_survive_an_update():
     existing = {"devices": {"R1": {"interfaces": {"Gi0/0": {**_iface("10.0.0.1"), "note": "uplink"}}}}}
-    result = _result({"R1": {"type": "iosxr", "interfaces": {"Gi0/0": _iface("10.0.0.2")}}})
+    result = _result({"R1": {"type": "iosxr", "interfaces": {"Gi0/0": _iface("203.0.113.2")}}})
     interfaces = build_discovery_candidate(result, existing)["devices"]["R1"]["interfaces"]
-    assert interfaces == {"Gi0/0": {**_iface("10.0.0.2"), "note": "uplink"}}
+    assert interfaces == {"Gi0/0": {**_iface("203.0.113.2"), "note": "uplink"}}
 
 
 def test_interface_spelling_variants_update_the_stored_entry_instead_of_duplicating():
     existing = {"devices": {"R1": {"type": "iosxr", "interfaces": {"Gi0/0": _iface("10.0.0.1")}}}}
-    result = _result({"R1": {"type": "iosxr", "interfaces": {"GigabitEthernet0/0": _iface("10.0.0.2")}}})
+    result = _result({"R1": {"type": "iosxr", "interfaces": {"GigabitEthernet0/0": _iface("203.0.113.2")}}})
     interfaces = build_discovery_candidate(result, existing)["devices"]["R1"]["interfaces"]
-    assert interfaces == {"Gi0/0": _iface("10.0.0.2")}
+    assert interfaces == {"Gi0/0": _iface("203.0.113.2")}
 
 
 def test_device_with_no_l3_result_keeps_prior_interfaces():  # L04
@@ -209,7 +209,7 @@ def test_topology_changes_counts_added_updated_retained_and_l3():  # C11
     }
     result = _result(
         {
-            "R1": {"type": "iosxr", "interfaces": {"Gi0/0": _iface("10.0.0.2"), "Gi0/2": _iface("10.0.0.9")}},
+            "R1": {"type": "iosxr", "interfaces": {"Gi0/0": _iface("203.0.113.2"), "Gi0/2": _iface("10.0.0.9")}},
             "R2": {"type": "iosxr"},
             "R3": {},
         },

@@ -1324,16 +1324,20 @@ columns are read only far enough to skip past them (see
 would be brittle against IOS's two-word `administratively down` status),
 never persisted.
 
-**Interface-name canonicalization** (`_canonicalize_interface_name()`):
-classic IOS/IOS XE's `show vrf` and `show ip interface brief` can report
-the *same* interface in different abbreviated forms (e.g. `show vrf`'s
-Interfaces column showing `Gi0/0` while `show ip interface brief` shows
-`GigabitEthernet0/0`) -- a small, fixed lookup table expands known
-abbreviations to one canonical full name so the two commands' output can be
-matched up; an unrecognized prefix is left completely unchanged rather than
-guessed. This is a small, single-purpose SSOT, reused for both
-`show vrf`/`show ip interface brief` reconciliation and as the canonical
-key written into a device's `interfaces` mapping.
+**Interface names in L3 data.** Classic IOS/IOS XE's `show vrf` and
+`show ip interface brief` can report the *same* interface in different
+abbreviated forms (e.g. `Gi0/0` vs `GigabitEthernet0/0`). To join the two
+commands' output, `_canonicalize_interface_name()` -- now only a thin
+compatibility wrapper over `interface_identity.legacy_long_name()` -- expands
+the original legacy abbreviations to their long names exactly as before and
+returns every other name unchanged; it is used for L3 *naming and joining*
+only, never to decide whether two interfaces are the same. That decision
+belongs to the Interface Type Registry (see "Interface identity and the
+Interface Type Registry"): when L3 data is merged into the topology, each
+observed interface is matched against the stored interfaces **by identity**
+(stored spelling kept), so `Te0/0/0/3` and `TenGigE0/0/0/3` are one entry,
+and an interface that is unknown, invalid or ambiguous is not registered
+(a warning is shown) unless exactly that name is already stored.
 
 **Management-address exclusion**: access-info is *how* MCP reaches a
 device; topology is *what the network looks like* -- an observed
@@ -1374,10 +1378,13 @@ access-info and links not observed this run (also after a valid "zero
 neighbors" result, with a protocol disabled, or with a device unreachable).
 New devices are added (sorted by ID), a missing `type` is filled in, new links
 are appended in canonical endpoint order, and a known link is never duplicated
-(link identity is the unordered pair of `(device, canonical interface)`
-endpoints, so LLDP/CDP duplicates, endpoint order and `Gi`/`GigabitEthernet`
-spelling collapse into one; a stored link keeps its own attributes and
-spelling). Existing devices and links keep their order, so repeating a run
+(link identity is the unordered pair of `(device, interface identity)`
+endpoints, so LLDP/CDP duplicates, endpoint order and alias spellings such as
+`Gi`/`GigabitEthernet` or `TF`/`Twe` collapse into one, while parallel links
+between the same two devices on different interfaces stay separate; a stored
+link keeps its own attributes and spelling, and a new link that is only
+"possibly" the same as a stored one -- because the stored interface type is not
+in the registry -- is deferred rather than guessed). Existing devices and links keep their order, so repeating a run
 produces an identical candidate.
 
 A contradiction is never resolved by overwriting: a device `type` that differs

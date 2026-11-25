@@ -512,7 +512,7 @@ access-info) — it does not change what MCP tools, logs, or errors expose.
 
 ```text
 network-lab(config)# discover topology
-Discovering topology from access-info 'sr-training'...
+Discovering topology from access-info 'example-lab'...
 
 Device Discovery Summary
 ---------------------------------------------------------------
@@ -548,7 +548,7 @@ Warnings:
 Topology candidate updated with limitations.
 Review the candidate using 'show configuration'.
 Commit is required to save the topology.
-network-lab(config-topology-sr-training)#
+network-lab(config-topology-example-lab)#
 ```
 
 **Columns.** `Connection`: `Connected` (login prompt identity confirmed), `Failed` (an attempt that did not get that far) or `Not attempted` (type unset/unsupported, or connection information incomplete). `LLDP` / `CDP`: `Enabled`, `Disabled`, `Unsupported`, `Unknown` (not confirmed — never shown as `Disabled`/`Unsupported`) or `N/A` (not applicable: classic IOS has no LLDP; devices Discovery does not support). `Status`: `Complete` = connected and at least one neighbor protocol was read successfully (an empty neighbor table is a success), with no warning; `Partial` = registered but limited. A session that ends after login stays `Connected` and is `Partial` with a warning.
@@ -568,11 +568,11 @@ network-lab(config-topology-sr-training)#
 **Rebuilding a topology from scratch** needs an explicit delete (`no topology` + `commit`) before `discover topology`:
 
 ```text
-network-lab(config)# no topology sr-training
+network-lab(config)# no topology example-lab
 network-lab(config)# commit
 network-lab(config)# discover topology
-network-lab(config-topology-sr-training)# show configuration
-network-lab(config-topology-sr-training)# commit
+network-lab(config-topology-example-lab)# show configuration
+network-lab(config-topology-example-lab)# commit
 ```
 
 If that topology is the **active** one, `commit` is refused (`Cannot remove topology '<name>' because it is active in running-config.`): `running-config`, `topology <other>`, `exit`, `commit` first (select another existing topology), then delete, rediscover and commit, and select the rebuilt topology again if desired.
