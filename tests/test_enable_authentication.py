@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Privileged EXEC (enable-password) authentication for managed terminals,
 against a synthetic IOS/IOS XE device in a real isolated tmux pane.

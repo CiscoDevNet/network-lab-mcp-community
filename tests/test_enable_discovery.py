@@ -1,3 +1,5 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
 # SPDX-License-Identifier: Apache-2.0
 """Enable authentication inside Topology Discovery: real tmux + synthetic
 IOS/IOS XE devices (D-series IDs in names), plus deterministic cancellation
