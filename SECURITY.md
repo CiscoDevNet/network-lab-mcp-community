@@ -114,15 +114,25 @@ so review changes before pushing.
 - **Discovery.** An ordinary enable failure is a per-device warning (device connected, status Partial, no further
   commands, the session closed); a credential echo or lost pane ownership is fatal. A fatal error cancels the run
   at once and no credential send starts after that.
-- **Verification status.** *Verified:* automated tests against synthetic IOS / IOS XE devices (authentication success and
-  failure, send limits and no re-send, credential-echo detection, no exposure in errors or logs, Discovery behavior);
-  on macOS with a real IOS XE device, Discovery with an incorrect enable password produced a per-device warning (status
-  Partial, other devices unaffected), and after the enable password was corrected Discovery succeeded; on Ubuntu, a
-  real-device L2 Discovery that included an IOS XE device succeeded (this is a functional result, **not** a dedicated
-  enable-password safety validation on Ubuntu). *Not verified:* a dedicated safety validation of the interaction
-  between enable authentication and the Terminal Monitor, detailed credential-echo behavior on real devices, and
-  enable-password-specific safety validation on Ubuntu. The residual echo risk described above therefore stands, and
-  the feature should be used with these gaps in mind.
+- **Scope of the guarantee (design decision).** Network Lab MCP is for trusted network engineers using AI in a lab; it is
+  not a controlled production management platform and not a complete isolation against a malicious AI. If a device or
+  terminal client abnormally echoes the credential, a copy can appear in the raw terminal pane, the private terminal log
+  and a human terminal monitor; this is an accepted, documented residual risk. What is *not* accepted, and is tested:
+  Network Lab MCP itself printing a credential, returning it from an MCP tool or error, passing it in process
+  arguments, sending it to another device, or retrying authentication automatically after a failure.
+- **Verification status.** *Verified (synthetic devices in an isolated tmux environment):* authentication success and
+  failure, send limits and no re-send, credential-echo detection (the session is closed, nothing is sent again),
+  no exposure in errors or logs, Discovery behavior; with a terminal monitor running continuously, authentication was
+  unaffected and a normal (non-echoing) authentication never showed the enable or login password on the monitor,
+  parallel authentication of several devices (including a rejected one) mixed no credential into any device's monitor,
+  and MCP tool results and errors (open, read, list, close; rejection; echo) contained no credential. *Measured, not a
+  guarantee:* when a synthetic device echoed the password, the monitor displayed the echoed copy in most runs (13 of 15
+  and 10 of 15 runs in two measurements; timing dependent), so detection must not be read as non-exposure to a monitor.
+  On macOS with a real IOS XE device, Discovery with an incorrect enable password produced a per-device warning (status
+  Partial, other devices unaffected) and after correction Discovery succeeded; on Ubuntu a real-device L2 Discovery that
+  included an IOS XE device succeeded (a functional result, **not** an enable-password safety validation on Ubuntu).
+  *Not verified:* terminal-monitor behavior for Discovery sessions during enable authentication, detailed credential-echo
+  behavior on real devices, and enable-password-specific safety validation on Ubuntu.
 
 ## 4. Credential isolation is not output sanitization
 
