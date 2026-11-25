@@ -44,6 +44,7 @@ from prompt_toolkit.utils import get_cwidth
 
 import network_lab_mcp
 from network_lab_mcp import discovery
+from network_lab_mcp import interface_identity
 from network_lab_mcp import lab
 from network_lab_mcp import terminal
 from network_lab_mcp.cli import config as cfgmod
@@ -1932,6 +1933,56 @@ def _render_table(headers: tuple, rows: list) -> list:
     return [rule, line(headers), rule, *(line(row) for row in rows), rule]
 
 
+_STATUS_TITLES = {
+    "UNKNOWN_TYPE": "Unknown interface type",
+    "INVALID_FORMAT": "Invalid interface format",
+    "AMBIGUOUS": "Ambiguous interface alias",
+    "RECOGNIZED": "Existing topology",
+}
+
+
+def render_interface_normalization_warnings(diagnostics) -> list[str]:
+    """Grouped, deterministic, display-safe Interface Normalization Warnings.
+    Empty list when there is nothing to report. Group key: owner device, OS,
+    reason, interface type, protocol, field, observing OS and action; interface
+    names are de-duplicated, observers listed, and every observation counted."""
+    if not diagnostics:
+        return []
+    safe = interface_identity.safe_display
+    groups: dict[tuple, dict] = {}
+    for d in diagnostics:
+        key = (d.owner_device or "", d.owner_os or "", d.status, d.type_token or "", d.reason, d.protocol or "",
+               d.field, d.observing_os or "", d.action)
+        group = groups.setdefault(key, {"names": set(), "observers": set(), "count": 0})
+        group["names"].add(d.raw_name)
+        if d.observing_device:
+            group["observers"].add(d.observing_device)
+        group["count"] += 1
+    lines = ["", "Interface Normalization Warnings:"]
+    for key in sorted(groups):
+        owner, owner_os, status, token, reason, protocol, field_name, obs_os, action = key
+        group = groups[key]
+        lines.append(f"  Device: {safe(owner) if owner else 'Unknown'} ({safe(owner_os) if owner_os else 'type unknown'})")
+        lines.append(f"    {_STATUS_TITLES.get(status, status)}: {safe(reason)}")
+        if token:
+            lines.append(f"    Interface type: {safe(token)}")
+        names = sorted(group["names"])
+        lines.append("    Interfaces:")
+        lines += [f"      {safe(n)}" for n in names[:20]]
+        if len(names) > 20:
+            lines.append(f"      ... {len(names) - 20} more not shown")
+        if protocol:
+            lines.append(f"    Protocol: {safe(protocol).upper() if protocol != 'l3' else 'L3 interface table'}")
+        if group["observers"]:
+            where = f" ({safe(obs_os)})" if obs_os else ""
+            lines.append(f"    Observed by: {', '.join(safe(o) for o in sorted(group['observers']))}{where}")
+        if field_name:
+            lines.append(f"    Field: {field_name}")
+        lines.append(f"    Observations: {group['count']}")
+        lines.append(f"    Action: {safe(action)}")
+    return lines
+
+
 def render_discovery_summary(
     result: "discovery.DiscoveryResult", changes: "discovery.TopologyChanges | None" = None
 ) -> str:
@@ -2004,6 +2055,8 @@ def render_discovery_summary(
     if result.warnings:
         lines += ["", "Warnings:"]
         lines += [f"  {warning}" for warning in result.warnings]
+    all_diagnostics = list(result.interface_diagnostics) + list(changes.merge_diagnostics)
+    lines += render_interface_normalization_warnings(all_diagnostics)
     grouped_unresolved = _group_unresolved_neighbors(result.unresolved)
     if grouped_unresolved:
         lines += ["", "Unresolved neighbors:"]
@@ -2015,7 +2068,7 @@ def render_discovery_summary(
                     f"    {obs.local_device_id} {obs.local_interface} -> {obs.remote_port_id} ({capability})"
                 )
     lines.append("")
-    limited = any(o.status != "Complete" for o in outcomes)
+    limited = any(o.status != "Complete" for o in outcomes) or bool(all_diagnostics)
     if not changes.changed:
         lines.append("Topology candidate unchanged.")
     else:

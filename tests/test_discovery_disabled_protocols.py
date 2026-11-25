@@ -179,7 +179,7 @@ def test_i04_disabled_device_is_not_a_contradiction_and_one_way_policy_kept(lab_
         {"R1": (LLDP_OFF, CDP_EMPTY), "R2": (lldp_table(("HOST-R1", "Gi0/0/0/5", "Gi0/0/0/9")), CDP_EMPTY)},
     )
     assert r.conflicts == []
-    assert _pairs(r) == [("R2", "Gi0/0/0/5", "R1", "Gi0/0/0/9")]
+    assert _pairs(r) == [("R1", "Gi0/0/0/9", "R2", "Gi0/0/0/5")]  # oriented by device id
 
 
 def test_i05_i12_other_devices_continue_and_no_inference(lab_root, monkeypatch):

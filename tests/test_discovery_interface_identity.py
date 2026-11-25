@@ -46,7 +46,7 @@ def test_display_names_are_deterministic_and_use_each_devices_own_spelling(order
     # ManagedLink orientation follows the first observation (the candidate builder
     # sorts endpoints); the endpoint pair and display spellings must not vary.
     assert {frozenset({(l.a_device, l.a_interface), (l.b_device, l.b_interface)}) for l in links} == {
-        frozenset({("AGENT", "Gig 0/0"), ("SW1", "Gi0/0/0/10")})
+        frozenset({("AGENT", "Gig0/0"), ("SW1", "Gi0/0/0/10")})
     }
 
 
@@ -78,14 +78,16 @@ def test_same_port_with_different_neighbor_ports_is_still_a_conflict():
 
 
 def test_unknown_prefix_is_not_guessed():
+    # Intentional change (interface identity work): an unknown interface type is no
+    # longer registered by raw text. Both observations are deferred with a diagnostic
+    # and never merged or guessed.
     resolved = [
         (_obs("lldp", "SW1", "weird0/0", "Gi0/0"), "AGENT"),
         (_obs("cdp", "SW1", "weird 0/0", "Gi0/0"), "AGENT"),
     ]
-    links, conflicts = reconcile_links(resolved)
-    assert conflicts == [] and len(links) == 2  # kept apart, never merged
-    with pytest.raises(discovery.DiscoveryError, match="more than one link"):
-        discovery._fail_on_link_ambiguity(links, conflicts, [])
+    links, conflicts, diagnostics, deferred = discovery.reconcile_links_detailed(resolved)
+    assert conflicts == [] and links == [] and deferred == 2
+    assert {d.status for d in diagnostics} == {"UNKNOWN_TYPE"}
 
 
 def test_gi_and_subinterface_and_gi_vs_gigabit_long_form():
@@ -145,7 +147,7 @@ def test_pipeline_ios_cdp_plus_xr_lldp_yields_one_link_and_stable_rediscovery(pi
     cand2 = discovery.build_discovery_candidate(second, cand1)
     assert cand1 == cand2
     assert cand1["links"] == [
-        {"a": "AGENT", "a_interface": "Gig 0/0", "b": "SW1", "b_interface": "Gi0/0/0/10"}
+        {"a": "AGENT", "a_interface": "Gig0/0", "b": "SW1", "b_interface": "Gi0/0/0/10"}
     ]
 
 
@@ -165,13 +167,13 @@ FULL = [
 
 @pytest.mark.parametrize("order", list(itertools.permutations(range(3))))
 def test_candidate_is_identical_for_every_observation_order(order):
-    expected = [{"a": "AGENT", "a_interface": "Gig 0/0", "b": "SW1", "b_interface": "Gi0/0/0/10"}]
+    expected = [{"a": "AGENT", "a_interface": "Gig0/0", "b": "SW1", "b_interface": "Gi0/0/0/10"}]
     assert _candidate_links([FULL[i] for i in order]) == expected
 
 
 def test_one_sided_observation_uses_the_only_spellings_seen():
     links = _candidate_links([FULL[2]])
-    assert links == [{"a": "AGENT", "a_interface": "Gig 0/0", "b": "SW1", "b_interface": "Gig 0/0/0/10"}]
+    assert links == [{"a": "AGENT", "a_interface": "Gig0/0", "b": "SW1", "b_interface": "Gig0/0/0/10"}]
 
 
 def test_own_spelling_beats_neighbors_spelling_when_protocol_set_changes():
@@ -182,7 +184,7 @@ def test_own_spelling_beats_neighbors_spelling_when_protocol_set_changes():
     only_sw1_lldp = _candidate_links([FULL[0]])[0]
     assert (only_sw1_lldp["a_interface"], only_sw1_lldp["b_interface"]) == ("Gi0/0", "Gi0/0/0/10")
     both_sides = _candidate_links([FULL[0], FULL[2]])[0]
-    assert (both_sides["a_interface"], both_sides["b_interface"]) == ("Gig 0/0", "Gi0/0/0/10")
+    assert (both_sides["a_interface"], both_sides["b_interface"]) == ("Gig0/0", "Gi0/0/0/10")
 
 
 def test_two_peers_claiming_one_port_under_different_spellings_is_fatal():

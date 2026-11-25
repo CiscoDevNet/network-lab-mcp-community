@@ -64,6 +64,7 @@ import threading
 from dataclasses import dataclass, field
 
 from network_lab_mcp import hostkey_flow, lab, terminal
+from network_lab_mcp import interface_identity as ii
 
 LOGIN_TIMEOUT_SECONDS = 30
 COMMAND_TIMEOUT_SECONDS = 25
@@ -913,68 +914,15 @@ class L3ParseError(Exception):
     operation."""
 
 
-# A conservative, deliberately small set of known Cisco interface-name
-# abbreviations, each mapped to its one canonical full name -- used only
-# to let `show vrf`'s (possibly abbreviated)
-# Interfaces column match `show ip interface brief`'s (full-name) Interface
-# column for the same physical interface. An unrecognized prefix is left
-# completely unchanged (never guessed) -- this is intentionally not a
-# general-purpose interface-alias framework, just the smallest lookup
-# needed to reconcile these two specific commands' output.
-_INTERFACE_TYPE_ALIASES: dict[str, str] = {
-    "gi": "GigabitEthernet",
-    "gig": "GigabitEthernet",
-    "gigabitethernet": "GigabitEthernet",
-    "fa": "FastEthernet",
-    "fas": "FastEthernet",
-    "fastethernet": "FastEthernet",
-    "te": "TenGigabitEthernet",
-    "tengigabitethernet": "TenGigabitEthernet",
-    "fo": "FortyGigabitEthernet",
-    "fortygigabitethernet": "FortyGigabitEthernet",
-    "hu": "HundredGigE",
-    "hundredgige": "HundredGigE",
-    "tw": "TwoGigabitEthernet",
-    "twogigabitethernet": "TwoGigabitEthernet",
-    "et": "Ethernet",
-    "eth": "Ethernet",
-    "ethernet": "Ethernet",
-    "vl": "Vlan",
-    "vlan": "Vlan",
-    "lo": "Loopback",
-    "loopback": "Loopback",
-    "po": "Port-channel",
-    "port-channel": "Port-channel",
-    "se": "Serial",
-    "serial": "Serial",
-    "bv": "BVI",
-    "bvi": "BVI",
-    "tu": "Tunnel",
-    "tunnel": "Tunnel",
-}
-_INTERFACE_PREFIX_RE = re.compile(r"^([A-Za-z-]+)(.*)$")
-
 _DEFAULT_VRF = "default"
 
 
 def _canonicalize_interface_name(raw: str) -> str:
-    """Expand a KNOWN interface-type abbreviation (e.g. "Gi0/0",
-    "Fas 0/0") to its one canonical full name ("GigabitEthernet0/0",
-    "FastEthernet0/0"), preserving the slot/port/sub-interface suffix
-    (including a dotted sub-interface, e.g. ".2000") unchanged. An
-    embedded space (as CDP sometimes renders, e.g. "Fas 0/0") is removed
-    only as part of a *recognized* rewrite. An unrecognized prefix is
-    returned completely unchanged (including any embedded space) -- never
-    over-normalized."""
-    cleaned = raw.strip().replace(" ", "")
-    match = _INTERFACE_PREFIX_RE.match(cleaned)
-    if not match:
-        return raw.strip()
-    prefix, rest = match.group(1), match.group(2)
-    canonical = _INTERFACE_TYPE_ALIASES.get(prefix.lower())
-    if canonical is None:
-        return raw.strip()
-    return f"{canonical}{rest}"
+    """Compatibility wrapper (L3 interface naming only): a legacy alias
+    expands exactly as before ("Gi0/0", "Fas 0/0" -> "GigabitEthernet0/0",
+    "FastEthernet0/0"); anything else is returned stripped and unchanged.
+    Identity comparison does NOT use this -- see interface_identity.normalize()."""
+    return ii.legacy_long_name(raw)
 
 
 def parse_ipv4_interface_brief(raw_text: str) -> dict[str, tuple[str | None, str]]:
@@ -1195,101 +1143,178 @@ class UnresolvedNeighbor:
     capabilities: tuple[str, ...]
 
 
-def reconcile_links(
+@dataclass(frozen=True)
+class InterfaceDiagnostic:
+    """One interface name that could not be turned into a safe identity (or
+    whose handling was limited), with enough context to extend the registry
+    later. Display-only; never persisted. `action` states what was really done."""
+
+    owner_device: str | None
+    owner_os: str | None
+    raw_name: str
+    status: str  # a RecognitionStatus value, or "RECOGNIZED" for relationship notes
+    type_token: str | None
+    reason: str
+    observing_device: str | None
+    observing_os: str | None
+    protocol: str | None
+    field: str  # local | remote | l3 | topology
+    action: str
+
+
+def _interface_diagnostic(result: "ii.NormalizationResult", ctx: "ii.ObservationContext", action: str) -> InterfaceDiagnostic:
+    return InterfaceDiagnostic(
+        ctx.owner_device, ii.normalize_os(ctx.owner_os), result.raw_name, result.status.value, result.parsed_type,
+        result.reason, ctx.observing_device, ii.normalize_os(ctx.observing_os), ctx.protocol, ctx.field or "", action,
+    )
+
+
+def _display_candidates(spellings: set[tuple[int, str]], identity: "ii.InterfaceIdentity", owner_os: str | None):
+    """Space-free spellings that still resolve to `identity` from the stored
+    topology alone (owner device type), as (rank, text)."""
+    out = set()
+    for rank, raw in spellings:
+        compact = ii.compact_display(ii.normalize(raw, ii.ObservationContext(owner_os=owner_os)))
+        if compact is not None and ii.re_resolves(compact, identity, owner_os):
+            out.add((rank, compact))
+    return out
+
+
+def reconcile_links_detailed(
     resolved_observations: list[tuple[NeighborObservation, str]],
-) -> tuple[list[ManagedLink], list[LinkConflict]]:
+    device_types: dict[str, str] | None = None,
+) -> tuple[list[ManagedLink], list[LinkConflict], list[InterfaceDiagnostic], int]:
     """Deduplicate reciprocal, multi-protocol observations into physical
-    links.
+    links, comparing endpoints by interface *identity* (interface_identity),
+    never by spelling.
 
-    `resolved_observations` is a list of (observation, resolved_remote_id)
-    pairs from either protocol, already filtered to observations whose
-    remote resolved uniquely to a managed device (see
-    resolve_remote_identity()) -- the protocol that produced each
-    observation is irrelevant to this function beyond its own `source`
-    field, which callers may use for diagnostics. A physical link is keyed
-    by its unordered pair of (device, interface) endpoints, so two parallel
-    links between the same router pair on different interfaces stay
-    distinct.
+    `device_types` maps device id -> OS type (the interface owner's OS, used
+    for owner-dependent aliases); unknown devices simply have no OS.
 
-    Two conflict cases are both reported (never silently resolved by
-    picking one side), and both fail closed only for the specific local
-    interface(s) involved -- an unrelated link elsewhere still reconciles
-    normally:
+    An observation whose local or remote interface is not RECOGNIZED
+    (unknown type / invalid / ambiguous) is deferred: it produces a
+    diagnostic per bad endpoint and no link. Returns (links, conflicts,
+    diagnostics, deferred_observation_count).
+
+    Two conflict cases are reported (never silently resolved) and fail
+    closed only for the interface(s) involved:
       1. A reciprocal pair that disagrees about the interface mapping.
-      2. *One* local interface has more than one
-         observation -- whether from different protocols (LLDP says one
-         neighbor, CDP says a different one) or the same protocol
-         producing incompatible rows -- that do not all agree on the same
-         (remote device, remote interface). Corroborating observations
-         (same protocol or not, same remote endpoint) are not a conflict;
-         they collapse into the same single candidate link."""
-    # Endpoint identity is (device, canonical interface name), so one port
-    # spelled "Gi0/0/0/10" (LLDP) and "Gig 0/0/0/10" (CDP) is one endpoint.
-    # Canonicalization is the existing known-abbreviation table only; an
-    # unrecognized spelling stays distinct (never guessed). Raw spellings
-    # are kept for display: a device's own spelling of its interface (as a
-    # local interface of one of its observations) beats a neighbor's
-    # spelling of it, then the lexicographically smallest raw name wins, so
-    # the result never depends on observation order.
-    def ident(device: str, interface: str) -> tuple[str, str]:
-        return (device, _canonicalize_interface_name(interface))
+      2. One local interface with observations that do not all agree on the
+         same (remote device, remote interface).
+    Corroborating observations collapse into one link. Parallel links
+    between the same devices stay distinct (different endpoints).
 
-    spellings: dict[tuple[str, str], set[tuple[int, str]]] = {}
+    Result order and the displayed spelling are independent of observation
+    order: a device's own spelling of its interface beats a neighbour's
+    (rank), then the smallest space-free spelling that re-resolves to the
+    same identity wins; links are oriented and sorted by identity."""
+    types = {k: v for k, v in (device_types or {}).items()}
+    diagnostics: list[InterfaceDiagnostic] = []
+    deferred = 0
+    usable: list[tuple[NeighborObservation, str, "ii.NormalizationResult", "ii.NormalizationResult"]] = []
+    # Deferred observations whose *local* interface is still identified: they
+    # keep claiming that endpoint for conflict detection (a different
+    # neighbor *device* is a contradiction whatever the remote port type).
+    deferred_local: list[tuple[NeighborObservation, str, "ii.NormalizationResult"]] = []
     for obs, remote_id in resolved_observations:
-        spellings.setdefault(ident(obs.local_device_id, obs.local_interface), set()).add((0, obs.local_interface))
-        spellings.setdefault(ident(remote_id, obs.remote_port_id), set()).add((1, obs.remote_port_id))
+        local_ctx = ii.ObservationContext(
+            owner_device=obs.local_device_id, owner_os=types.get(obs.local_device_id),
+            observing_device=obs.local_device_id, observing_os=types.get(obs.local_device_id),
+            protocol=obs.source, field="local",
+        )
+        remote_ctx = ii.ObservationContext(
+            owner_device=remote_id, owner_os=types.get(remote_id),
+            observing_device=obs.local_device_id, observing_os=types.get(obs.local_device_id),
+            protocol=obs.source, field="remote",
+        )
+        local_res = ii.normalize(obs.local_interface, local_ctx)
+        remote_res = ii.normalize(obs.remote_port_id, remote_ctx)
+        bad = [(r, c) for r, c in ((local_res, local_ctx), (remote_res, remote_ctx)) if not r.recognized]
+        if bad:
+            deferred += 1
+            diagnostics += [_interface_diagnostic(r, c, "Observation deferred") for r, c in bad]
+            if local_res.recognized:
+                deferred_local.append((obs, remote_id, local_res))
+            continue
+        usable.append((obs, remote_id, local_res, remote_res))
 
-    def shown(endpoint: tuple[str, str]) -> tuple[str, str]:
-        return (endpoint[0], min(spellings[endpoint])[1])
+    def ident(device: str, result: "ii.NormalizationResult") -> tuple[str, "ii.InterfaceIdentity"]:
+        return (device, result.identity)
 
-    by_local_endpoint: dict[tuple[str, str], list[tuple[NeighborObservation, str]]] = {}
-    for obs, remote_id in resolved_observations:
-        by_local_endpoint.setdefault(ident(obs.local_device_id, obs.local_interface), []).append((obs, remote_id))
+    spellings: dict[tuple, set[tuple[int, str]]] = {}
+    for obs, remote_id, local_res, remote_res in usable:
+        spellings.setdefault(ident(obs.local_device_id, local_res), set()).add((0, obs.local_interface.strip()))
+        spellings.setdefault(ident(remote_id, remote_res), set()).add((1, obs.remote_port_id.strip()))
+
+    for obs, _remote_id, local_res in deferred_local:
+        spellings.setdefault(ident(obs.local_device_id, local_res), set()).add((0, obs.local_interface.strip()))
+
+    shown_cache: dict[tuple, tuple[str, str]] = {}
+
+    def shown(endpoint: tuple) -> tuple[str, str]:
+        if endpoint not in shown_cache:
+            device, identity = endpoint
+            candidates = _display_candidates(spellings[endpoint], identity, ii.normalize_os(types.get(device)))
+            shown_cache[endpoint] = (device, min(candidates or spellings[endpoint])[1])
+        return shown_cache[endpoint]
+
+    by_local_endpoint: dict[tuple, list] = {}
+    for obs, remote_id, local_res, remote_res in usable:
+        by_local_endpoint.setdefault(ident(obs.local_device_id, local_res), []).append((obs, remote_id, remote_res))
 
     links: list[ManagedLink] = []
     conflicts: list[LinkConflict] = []
-    # Endpoints are consumed by their own dict key (local_dev, local_intf),
-    # never by a "canonical pair" derived from a claimed remote port --
-    # in a conflict the two sides claim *different* remote ports, so only
-    # marking each side's own key reliably prevents processing the same
-    # physical endpoint twice.
-    seen_endpoints: set[tuple[str, str]] = set()
-
-    resolved_by_endpoint: dict[tuple[str, str], tuple[NeighborObservation, str]] = {}
+    seen_endpoints: set[tuple] = set()
+    claims: dict[tuple, list[tuple[NeighborObservation, str]]] = {}
+    for obs, remote_id, local_res, _remote_res in usable:
+        claims.setdefault(ident(obs.local_device_id, local_res), []).append((obs, remote_id))
+    for obs, remote_id, local_res in deferred_local:
+        claims.setdefault(ident(obs.local_device_id, local_res), []).append((obs, remote_id))
+    for endpoint, claim_list in claims.items():
+        other = next(((o, r) for o, r in claim_list if r != claim_list[0][1]), None)
+        if other is not None:
+            conflicts.append(LinkConflict(shown(endpoint), shown(endpoint), claim_list[0][0], other[0]))
+            seen_endpoints.add(endpoint)
+    resolved_by_endpoint: dict[tuple, tuple[NeighborObservation, str, tuple]] = {}
     for endpoint, obs_list in by_local_endpoint.items():
-        first_obs, first_remote_id = obs_list[0]
-        first_remote = ident(first_remote_id, first_obs.remote_port_id)
-        agree = all(ident(remote_id, obs.remote_port_id) == first_remote for obs, remote_id in obs_list)
-        if not agree:
-            second_obs, _second_remote_id = next(
-                (o, r) for o, r in obs_list if ident(r, o.remote_port_id) != first_remote
-            )
-            conflicts.append(LinkConflict(shown(endpoint), shown(endpoint), first_obs, second_obs))
+        if endpoint in seen_endpoints:
+            continue  # already reported as a neighbor-device conflict
+        first_obs, first_remote_id, first_res = obs_list[0]
+        first_remote = ident(first_remote_id, first_res)
+        disagreeing = [o for o, r, res in obs_list if ident(r, res) != first_remote]
+        if disagreeing:
+            conflicts.append(LinkConflict(shown(endpoint), shown(endpoint), first_obs, disagreeing[0]))
             seen_endpoints.add(endpoint)
             continue
-        resolved_by_endpoint[endpoint] = (first_obs, first_remote_id)
+        resolved_by_endpoint[endpoint] = (first_obs, first_remote_id, first_remote)
 
-    for endpoint_a, (obs, remote_id) in resolved_by_endpoint.items():
+    def order_key(endpoint: tuple) -> tuple:
+        return (endpoint[0], endpoint[1].type_id, endpoint[1].identifier)
+
+    for endpoint_a in sorted(resolved_by_endpoint, key=order_key):
         if endpoint_a in seen_endpoints:
             continue
-
-        endpoint_b = ident(remote_id, obs.remote_port_id)
-
+        obs, _remote_id, endpoint_b = resolved_by_endpoint[endpoint_a]
         reverse = resolved_by_endpoint.get(endpoint_b)
-        if reverse is None:
-            # One-sided observation -- still a valid managed link.
-            links.append(ManagedLink(*shown(endpoint_a), *shown(endpoint_b)))
-            seen_endpoints.add(endpoint_a)
-            continue
-
-        reverse_obs, reverse_remote_id = reverse
-        if ident(reverse_remote_id, reverse_obs.remote_port_id) == endpoint_a:
-            links.append(ManagedLink(*shown(endpoint_a), *shown(endpoint_b)))
+        if reverse is None or reverse[2] == endpoint_a:
+            first, second = sorted((endpoint_a, endpoint_b), key=order_key)
+            links.append(ManagedLink(*shown(first), *shown(second)))
         else:
-            conflicts.append(LinkConflict(shown(endpoint_a), shown(endpoint_b), obs, reverse_obs))
+            conflicts.append(LinkConflict(shown(endpoint_a), shown(endpoint_b), obs, reverse[0]))
         seen_endpoints.add(endpoint_a)
         seen_endpoints.add(endpoint_b)
 
+    links.sort(key=lambda l: (l.a_device, l.a_interface, l.b_device, l.b_interface))
+    conflicts.sort(key=lambda c: (c.endpoint_a, c.endpoint_b))
+    return links, conflicts, diagnostics, deferred
+
+
+def reconcile_links(
+    resolved_observations: list[tuple[NeighborObservation, str]],
+    device_types: dict[str, str] | None = None,
+) -> tuple[list[ManagedLink], list[LinkConflict]]:
+    """Compatibility form of reconcile_links_detailed() (links, conflicts)."""
+    links, conflicts, _diagnostics, _deferred = reconcile_links_detailed(resolved_observations, device_types)
     return links, conflicts
 
 
@@ -1366,6 +1391,10 @@ class DiscoveryResult:
     # deterministic "<device>: <message>" warning lines.
     outcomes: list[DeviceOutcome] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Interface Normalization: what could not be identified (see
+    # InterfaceDiagnostic) and how many neighbor observations were deferred.
+    interface_diagnostics: list[InterfaceDiagnostic] = field(default_factory=list)
+    deferred_observation_count: int = 0
 
 
 def _select_targets_by_type(access_data: dict, wanted_type: str) -> dict[str, dict]:
@@ -1708,14 +1737,28 @@ def discover_topology(lab_root=None, include_l3: bool = False, hostkeys=None) ->
     outcomes = list(plan.values())
     identity_map = {o.device_id: o.hostname for o in outcomes if o.connection == "connected"}
 
+    device_types = {o.device_id: o.device_type for o in outcomes if o.device_type}
     resolved: list[tuple[NeighborObservation, str]] = []
     unresolved: list[UnresolvedNeighbor] = []
+    unresolved_diagnostics: list[InterfaceDiagnostic] = []
     for outcome in outcomes:
         for obs in outcome.observations:
             remote_id = resolve_remote_identity(obs.remote_device_id_raw, identity_map)
             if remote_id is not None and remote_id in plan:
                 resolved.append((obs, remote_id))
             else:
+                # An unmanaged neighbor must not hide a problem with the
+                # managed device's own interface name.
+                local_ctx = ii.ObservationContext(
+                    owner_device=obs.local_device_id, owner_os=device_types.get(obs.local_device_id),
+                    observing_device=obs.local_device_id, observing_os=device_types.get(obs.local_device_id),
+                    protocol=obs.source, field="local",
+                )
+                local_res = ii.normalize(obs.local_interface, local_ctx)
+                if not local_res.recognized:
+                    unresolved_diagnostics.append(
+                        _interface_diagnostic(local_res, local_ctx, "No managed link involved (unmanaged neighbor)")
+                    )
                 unresolved.append(
                     UnresolvedNeighbor(
                         remote_device_id_raw=obs.remote_device_id_raw,
@@ -1726,8 +1769,8 @@ def discover_topology(lab_root=None, include_l3: bool = False, hostkeys=None) ->
                     )
                 )
 
-    links, conflicts = reconcile_links(resolved)
-    _fail_on_link_ambiguity(links, conflicts, unresolved)
+    links, conflicts, link_diagnostics, deferred_count = reconcile_links_detailed(resolved, device_types)
+    _fail_on_link_ambiguity(links, conflicts, unresolved, device_types)
 
     devices: dict[str, dict] = {}
     for outcome in outcomes:
@@ -1758,6 +1801,8 @@ def discover_topology(lab_root=None, include_l3: bool = False, hostkeys=None) ->
         include_l3=include_l3,
         outcomes=outcomes,
         warnings=[f"{o.device_id}: {message}" for o in outcomes for message in o.warnings],
+        interface_diagnostics=link_diagnostics + unresolved_diagnostics,
+        deferred_observation_count=deferred_count,
     )
 
 
@@ -1824,8 +1869,18 @@ def _cdp_table_recognized(raw_text: str) -> bool:
     return False
 
 
+def _endpoint_key(device: str, interface: str, device_types: dict[str, str] | None):
+    """Comparison key of a stored/observed endpoint using only the owner's
+    device type: an InterfaceIdentity, or an exact-text RawIdentity."""
+    owner_os = (device_types or {}).get(device)
+    return (device, ii.normalize(interface, ii.ObservationContext(owner_os=owner_os)).key)
+
+
 def _fail_on_link_ambiguity(
-    links: list[ManagedLink], conflicts: list[LinkConflict], unresolved: list[UnresolvedNeighbor]
+    links: list[ManagedLink],
+    conflicts: list[LinkConflict],
+    unresolved: list[UnresolvedNeighbor],
+    device_types: dict[str, str] | None = None,
 ) -> None:
     """Fail Discovery (DiscoveryError) instead of producing a candidate when
     the reconciled evidence is ambiguous: a reconciliation conflict, a
@@ -1840,18 +1895,18 @@ def _fail_on_link_ambiguity(
             problems.append(f"{a_dev} {a_intf}: conflicting neighbor observations")
         else:
             problems.append(f"{a_dev} {a_intf} <-> {b_dev} {b_intf}: inconsistent reciprocal observation")
-    owners: dict[tuple[str, str], list[ManagedLink]] = {}
-    raw_names: dict[tuple[str, str], str] = {}  # canonical identity -> a raw spelling for messages
+    owners: dict[tuple, list[ManagedLink]] = {}
+    raw_names: dict[tuple, str] = {}  # canonical identity -> a raw spelling for messages
     for link in links:
         for device, interface in ((link.a_device, link.a_interface), (link.b_device, link.b_interface)):
-            identity = (device, _canonicalize_interface_name(interface))
+            identity = _endpoint_key(device, interface, device_types)
             owners.setdefault(identity, []).append(link)
             raw_names.setdefault(identity, interface)
-    for endpoint in sorted(owners):
+    for endpoint in sorted(owners, key=lambda e: (e[0], repr(e[1]))):
         if len(owners[endpoint]) > 1:
             problems.append(f"{endpoint[0]} {raw_names[endpoint]}: interface appears in more than one link")
     for neighbor in unresolved:
-        endpoint = (neighbor.local_device_id, _canonicalize_interface_name(neighbor.local_interface))
+        endpoint = _endpoint_key(neighbor.local_device_id, neighbor.local_interface, device_types)
         if endpoint in owners:
             problems.append(
                 f"{endpoint[0]} {neighbor.local_interface}: observed with both a managed and an unmanaged neighbor"
@@ -1882,22 +1937,99 @@ def _topology_link_key(link: dict) -> tuple:
     return tuple(sorted((endpoint_a, endpoint_b)))
 
 
-def _canonical_endpoint(device: str, interface: str | None) -> tuple[str, str]:
-    return (device, _canonicalize_interface_name(interface) if interface else "")
+def topology_device_types(data: dict) -> dict[str, str]:
+    """device id -> normalized OS type from a topology's stored device `type`
+    (the only owner context that survives a save/reload)."""
+    types: dict[str, str] = {}
+    for device_id, device in (data.get("devices") or {}).items():
+        raw = (device or {}).get("type") if isinstance(device, dict) else None
+        if raw:
+            try:
+                types[device_id] = lab.normalize_device_type(str(raw))
+            except lab.LabConfigError:
+                pass
+    return types
 
 
-def _canonical_link_key(link: dict) -> tuple:
-    """Identity of a topology link: its unordered pair of (device, canonical
-    interface) endpoints, so spelling variants and endpoint order never
-    produce a second copy of the same physical link."""
+def _canonical_endpoint(device: str, interface: str | None, types: dict[str, str] | None = None) -> tuple:
+    """Plain, sortable endpoint identity: (device, kind, a, b). kind "id" =
+    recognized (type id, identifier); "raw" = exact text of an unrecognized
+    name (can never equal a recognized identity); "" = no interface."""
+    if not interface:
+        return (device, "", "", "")
+    key = ii.normalize(interface, ii.ObservationContext(owner_os=(types or {}).get(device))).key
+    if isinstance(key, ii.InterfaceIdentity):
+        return (device, "id", key.type_id, key.identifier)
+    return (device, "raw", key.raw, "")
+
+
+def _canonical_link_key(link: dict, types: dict[str, str] | None = None) -> tuple:
+    """Identity of a topology link: its unordered pair of canonical endpoint
+    identities, so spelling variants and endpoint order never produce a
+    second copy of the same physical link."""
     return tuple(
         sorted(
             (
-                _canonical_endpoint(link.get("a"), link.get("a_interface")),
-                _canonical_endpoint(link.get("b"), link.get("b_interface")),
+                _canonical_endpoint(link.get("a"), link.get("a_interface"), types),
+                _canonical_endpoint(link.get("b"), link.get("b_interface"), types),
             )
         )
     )
+
+
+_IDENT_TAIL_RE = re.compile(r"^[A-Za-z][A-Za-z-]*[ \t]*(.*)$", re.DOTALL)
+
+
+def _identifier_text(raw: str) -> str | None:
+    match = _IDENT_TAIL_RE.match(raw.strip())
+    return match.group(1) if match and match.group(1) else None
+
+
+def link_violations(data: dict) -> tuple[dict, dict]:
+    """Identity-based integrity findings of a topology's links, for
+    baseline-aware comparison: ({link_key: record_count} for links stored
+    more than once, {endpoint: set(peer endpoints)} for endpoints with more
+    than one distinct peer). Pure; never rejects anything by itself."""
+    types = topology_device_types(data)
+    counts: dict[tuple, int] = {}
+    peers: dict[tuple, set] = {}
+    for link in data.get("links") or []:
+        if not isinstance(link, dict):
+            continue
+        ea = _canonical_endpoint(link.get("a"), link.get("a_interface"), types)
+        eb = _canonical_endpoint(link.get("b"), link.get("b_interface"), types)
+        counts[tuple(sorted((ea, eb)))] = counts.get(tuple(sorted((ea, eb))), 0) + 1
+        for x, y in ((ea, eb), (eb, ea)):
+            if x[1]:
+                peers.setdefault(x, set()).add(y)
+    duplicates = {k: n for k, n in counts.items() if n >= 2}
+    conflicts = {e: p for e, p in peers.items() if len(p) >= 2}
+    return duplicates, conflicts
+
+
+def check_link_integrity_change(before: dict | None, after: dict) -> None:
+    """Baseline-aware rule (raises lab.LabConfigError): a change may keep or
+    reduce pre-existing link duplicates/endpoint conflicts but must not add a
+    new one or worsen one. `before` is the accepted (committed) state, or
+    None for a new topology (empty baseline)."""
+    dup_before, con_before = link_violations(before or {})
+    dup_after, con_after = link_violations(after)
+    problems = []
+    for key, count in sorted(dup_after.items()):
+        if count > dup_before.get(key, 1):
+            problems.append(
+                f"link {key[0][0]} {key[0][2]}:{key[0][3]} <-> {key[1][0]} {key[1][2]}:{key[1][3]} "
+                f"is stored {count} times (same interfaces under different spellings)"
+            )
+    for endpoint, peers in sorted(con_after.items()):
+        new_peers = peers - con_before.get(endpoint, set())
+        if new_peers:
+            problems.append(f"interface {endpoint[0]} {endpoint[2]}:{endpoint[3]} would have several different neighbors")
+    if problems:
+        raise lab.LabConfigError(
+            "Topology links add or worsen an inconsistency compared with the committed topology: "
+            + "; ".join(problems) + "."
+        )
 
 
 def _format_endpoint(device: str, interface: str | None) -> str:
@@ -1911,7 +2043,7 @@ def _format_topology_link(link: dict) -> str:
     )
 
 
-def build_discovery_candidate(result: DiscoveryResult, base: dict) -> dict:
+def build_discovery_candidate(result: DiscoveryResult, base: dict, notes: list | None = None) -> dict:
     """Merge this run's DiscoveryResult into `base` -- additive and
     non-destructive. Discovery never deletes anything.
 
@@ -1919,27 +2051,39 @@ def build_discovery_candidate(result: DiscoveryResult, base: dict) -> dict:
     device, link, interface and unknown field it holds is kept. A new device
     is added; a device's missing `type` is filled in; a new link is added
     (an already-known link, in any endpoint order or interface spelling, is
-    never duplicated and keeps its stored attributes); a newly observed L3
-    interface or L3 field value is added/updated in place. Nothing observed
-    as absent, unassigned, `None` or unreachable removes or blanks anything.
+    never duplicated and keeps its stored attributes and spelling); a newly
+    observed L3 interface or L3 field value is added/updated in place.
+    Nothing observed as absent, unassigned, `None` or unreachable removes or
+    blanks anything.
 
-    A contradiction is never resolved by overwriting: a device `type` that
-    differs from the stored one, or a newly observed link that claims an
-    interface already used by a different stored link, raises
-    DiscoveryError (the caller then leaves the candidate untouched). The
-    only way to rebuild a topology from scratch is for the user to delete it
-    explicitly (`no topology <name>`) and run Discovery again.
+    Interfaces are compared by identity (interface_identity), using each
+    device's stored `type` as owner context. A contradiction is never
+    resolved by overwriting: a device `type` that differs from the stored
+    one, a newly observed link claiming an interface (same identity) already
+    used by a different stored link, or an existing topology that already
+    contradicts itself, raises DiscoveryError (the caller then leaves the
+    candidate untouched).
+
+    Things that cannot be decided safely are deferred, not guessed: a new
+    link whose endpoint shares a device and interface number with an
+    existing link endpoint of unidentified type (unresolved relationship),
+    and L3 data for an interface whose identity is unknown/ambiguous/invalid
+    and that is not already stored under exactly that name. Each deferral is
+    appended to `notes` as an InterfaceDiagnostic. Existing duplicate links
+    are reported the same way and left in place.
 
     Output is deterministic: existing devices and links keep their order,
     newly added devices are sorted by ID and newly added links are in
-    canonical (device, interface) endpoint order, sorted. Pure, no I/O, never
-    mutates `base`."""
+    canonical (device, interface) endpoint order, sorted. Pure apart from
+    appending to `notes`; never mutates `base`."""
+    notes = notes if notes is not None else []
     candidate = {key: copy.deepcopy(value) for key, value in base.items() if key not in ("devices", "links")}
     devices: dict[str, dict] = {
         device_id: (copy.deepcopy(value) if isinstance(value, dict) else {})
         for device_id, value in (base.get("devices") or {}).items()
     }
     problems: list[str] = []
+    pending_interfaces: list[tuple[str, dict]] = []
 
     for device_id in sorted(result.devices):
         fields = result.devices[device_id]
@@ -1959,27 +2103,80 @@ def build_discovery_candidate(result: DiscoveryResult, base: dict) -> dict:
                         f"Device '{device_id}': access-info type '{new_type}' conflicts with the topology's "
                         f"existing type '{old_type}'"
                     )
-        interfaces = fields.get("interfaces")
-        if interfaces is not None:
-            merged = device.get("interfaces")
-            merged = dict(merged) if isinstance(merged, dict) else {}
-            by_canonical = {_canonicalize_interface_name(str(name)): name for name in merged}
-            for name, value in sorted(interfaces.items()):
-                if value is None:
-                    continue  # unassigned/management/unobserved: never blanks stored data
-                key = by_canonical.get(_canonicalize_interface_name(name), name)
-                stored = merged.get(key)
-                merged[key] = {**(stored if isinstance(stored, dict) else {}), **value}
-            device["interfaces"] = merged
+        if fields.get("interfaces") is not None:
+            pending_interfaces.append((device_id, fields["interfaces"]))
+
+    types = topology_device_types({"devices": devices})
+
+    for device_id, interfaces in pending_interfaces:
+        device = devices[device_id]
+        merged = device.get("interfaces")
+        merged = dict(merged) if isinstance(merged, dict) else {}
+        owner_os = types.get(device_id)
+        ctx = ii.ObservationContext(
+            owner_device=device_id, owner_os=owner_os, observing_device=device_id, observing_os=owner_os,
+            protocol="l3", field="l3",
+        )
+        results = {name: ii.normalize(name, ctx) for name in interfaces}
+        # Contradictory observations of one identity within this run are
+        # never resolved by order: hold them all.
+        by_identity: dict = {}
+        for name, res in results.items():
+            if res.recognized and interfaces[name] is not None:
+                by_identity.setdefault(res.identity, []).append(name)
+        held = {
+            n for names in by_identity.values() if len({tuple(sorted(interfaces[x].items())) for x in names}) > 1
+            for n in names
+        }
+        for name in sorted(held):
+            notes.append(_interface_diagnostic(results[name], ctx, "L3 update held (conflicting observations of one interface)"))
+        stored_results = {
+            k: ii.normalize(str(k), ii.ObservationContext(owner_os=owner_os)) for k in merged
+        }
+        for name, value in sorted(interfaces.items()):
+            if value is None or name in held:
+                continue  # unassigned/management/unobserved: never blanks stored data
+            res = results[name]
+            if res.recognized:
+                matches = [k for k, r in stored_results.items() if r.identity == res.identity]
+                if len(matches) > 1:
+                    notes.append(_interface_diagnostic(res, ctx, "L3 update held (several stored interfaces share one identity)"))
+                    continue
+                key = matches[0] if matches else name
+            else:
+                exact = [k for k in merged if str(k).strip() == name.strip()]
+                if len(exact) != 1:
+                    notes.append(_interface_diagnostic(res, ctx, "New L3 registration deferred"))
+                    continue
+                key = exact[0]
+            stored = merged.get(key)
+            merged[key] = {**(stored if isinstance(stored, dict) else {}), **value}
+        device["interfaces"] = merged
 
     links: list[dict] = copy.deepcopy(base.get("links") or [])
-    known = {_canonical_link_key(link) for link in links}
-    owners: dict[tuple[str, str], dict] = {}
+    # An existing topology that already contradicts itself cannot be safely
+    # extended by an automatic merge.
+    duplicates, conflicts = link_violations({"devices": devices, "links": links})
+    for endpoint, peers in sorted(conflicts.items()):
+        problems.append(f"existing topology: {endpoint[0]} interface {endpoint[2]}:{endpoint[3]} is linked to several different neighbors")
+    for key, count in sorted(duplicates.items()):
+        notes.append(
+            InterfaceDiagnostic(key[0][0], types.get(key[0][0]), f"{key[0][2]}:{key[0][3]}", "RECOGNIZED", None,
+                                f"link stored {count} times under different spellings", None, None, None, "topology",
+                                "Existing duplicate link detected (kept; not merged or removed)")
+        )
+    known = {_canonical_link_key(link, types) for link in links}
+    owners: dict[tuple, dict] = {}
+    unidentified: list[tuple[str, str, str, dict]] = []  # device, raw, identifier text, link
     for link in links:
         for device, interface in ((link.get("a"), link.get("a_interface")), (link.get("b"), link.get("b_interface"))):
-            endpoint = _canonical_endpoint(device, interface)
+            endpoint = _canonical_endpoint(device, interface, types)
             if endpoint[1]:
                 owners.setdefault(endpoint, link)
+                if endpoint[1] == "raw":
+                    text = _identifier_text(interface)
+                    if text:
+                        unidentified.append((device, interface, text, link))
     new_links: list[dict] = []
     for managed_link in result.managed_links:
         first, second = sorted(
@@ -1989,9 +2186,10 @@ def build_discovery_candidate(result: DiscoveryResult, base: dict) -> dict:
             )
         )
         link = {"a": first[0], "a_interface": first[1], "b": second[0], "b_interface": second[1]}
-        key = _canonical_link_key(link)
+        key = _canonical_link_key(link, types)
         if key in known:
             continue
+        conflict = False
         for endpoint in key:
             owner = owners.get(endpoint)
             if owner is not None:
@@ -1999,7 +2197,26 @@ def build_discovery_candidate(result: DiscoveryResult, base: dict) -> dict:
                     f"Discovered link {_format_topology_link(link)} conflicts with existing link "
                     f"{_format_topology_link(owner)}"
                 )
+                conflict = True
                 break
+        if conflict:
+            continue
+        unresolved_with = None
+        for endpoint in key:
+            for device, raw, text, _existing in unidentified:
+                if device == endpoint[0] and endpoint[1] == "id" and text == endpoint[3]:
+                    unresolved_with = (endpoint, raw)
+                    break
+            if unresolved_with:
+                break
+        if unresolved_with:
+            endpoint, raw = unresolved_with
+            notes.append(
+                InterfaceDiagnostic(endpoint[0], types.get(endpoint[0]), f"{endpoint[2]}:{endpoint[3]}", "RECOGNIZED", None,
+                                    f"stored interface '{ii.safe_display(raw)}' on this device has an unidentified type and the same number",
+                                    None, None, None, "topology", "Unresolved relationship with existing topology (link registration deferred)")
+            )
+            continue
         known.add(key)
         new_links.append(link)
     if problems:
@@ -2029,6 +2246,8 @@ class TopologyChanges:
     interfaces_added: int = 0
     interfaces_updated: int = 0
     interfaces_retained: int = 0
+    # InterfaceDiagnostic records produced by the merge (deferrals, notes).
+    merge_diagnostics: tuple = ()
 
     @property
     def changed(self) -> bool:
@@ -2059,8 +2278,10 @@ def topology_changes(before: dict, after: dict) -> TopologyChanges:
         for name, value in (old.get("interfaces") or {}).items():
             if name in new_interfaces and new_interfaces[name] == value:
                 if_retained += 1
-    before_links = {_canonical_link_key(link) for link in (before.get("links") or [])}
-    after_links = {_canonical_link_key(link) for link in (after.get("links") or [])}
+    before_types = topology_device_types(before)
+    after_types = topology_device_types(after)
+    before_links = {_canonical_link_key(link, before_types) for link in (before.get("links") or [])}
+    after_links = {_canonical_link_key(link, after_types) for link in (after.get("links") or [])}
     return TopologyChanges(
         devices_added=added,
         devices_updated=updated,

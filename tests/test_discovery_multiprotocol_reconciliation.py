@@ -36,8 +36,9 @@ def test_same_link_seen_via_both_protocols_dedupes_to_one_link():
     links, conflicts = reconcile_links(resolved)
     assert conflicts == []
     assert len(links) == 1
-    assert links[0].a_device == "R1" and links[0].a_interface == "Gi0/0/0/10"
-    assert links[0].b_device == "LegacyRouter" and links[0].b_interface == "Gig0/0"
+    # endpoints are oriented by identity (device id order), not by observation order
+    assert links[0].a_device == "LegacyRouter" and links[0].a_interface == "Gig0/0"
+    assert links[0].b_device == "R1" and links[0].b_interface == "Gi0/0/0/10"
 
 
 def test_reciprocal_cdp_only_observations_collapse_into_one_link():

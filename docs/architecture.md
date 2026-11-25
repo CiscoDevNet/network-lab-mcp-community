@@ -1197,12 +1197,91 @@ A link's identity is its unordered pair of `(device, interface)`
 endpoints, so two parallel links between the same router pair on
 different interfaces are never deduplicated together.
 
-Interface names are compared by their canonical identity (the known-abbreviation
-table also used for L3 enrichment, so `Gi0/0/0/10` and CDP's `Gig 0/0/0/10` are
-one port); an unrecognized spelling is never guessed and stays distinct. The
-candidate shows a device's own spelling of its interface when it observed it
-itself, otherwise the neighbor's, with the smallest raw name breaking ties, so
-the result does not depend on observation order.
+Interface names are compared by **identity**, never by spelling (see "Interface
+identity and the Interface Type Registry" below): `Gi0/0/0/10`, CDP's `Gig 0/0/0/10`,
+`TF1/1/3` and `Twe 1/1/3` (an IOS XE-owned port) are each one interface. Links are
+oriented and sorted by identity, and the spelling shown for an endpoint is chosen
+independently of observation order (a device's own spelling beats a neighbor's,
+then the smallest space-free spelling that still re-resolves to the same identity).
+An observation whose interface is not recognized is *deferred* (no link, a
+diagnostic), but a deferred observation whose local interface is recognized still
+counts as a claim on that endpoint: a different neighbor *device* is a conflict
+whatever the remote port type.
+
+### Interface identity and the Interface Type Registry
+
+`interface_identity.py` is the single place that decides whether two interface
+names are the same interface. It is pure (no I/O, no device access) and used by
+Discovery (reconciliation, merge, L3 merge) and by the baseline-aware topology
+checks.
+
+- **Raw name**: what a device printed. Kept in the Discovery result and the
+  terminal log, never in the topology YAML.
+- **Identity** (`InterfaceIdentity(type_id, identifier)`): comparison only. Not
+  shown, not sent to a device, not persisted. The identifier is kept as text
+  (`1/1/3`, `0/0/0/3.100`); leading zeros are not stripped.
+- **Display name**: the spelling stored in the topology. New names are space-free
+  (`Twe1/1/3`) and are only used if they re-resolve to the same identity from the
+  stored device `type` alone. Existing stored names (including ones with spaces)
+  are never rewritten.
+- **Recognition status**: `RECOGNIZED`, `UNKNOWN_TYPE`, `INVALID_FORMAT`,
+  `AMBIGUOUS`. Only `RECOGNIZED` yields an identity; nothing is guessed, there is
+  no prefix, fuzzy or learned matching, and the registry is never rewritten at
+  runtime.
+
+A name is split by a strict grammar into a type token and an identifier, then the
+token is looked up by exact (case-insensitive) match. `Tw` and `Twe` can therefore
+never be confused. Aliases carry an evidence class (`DOCUMENTED`, `OBSERVED`,
+`LEGACY`; unverified aliases are not in the active registry) and, where needed, an
+*owner-OS* condition. The owner OS is used because it survives a save/reload (the
+topology's device `type`); the observing OS, protocol and local/remote field are
+recorded for diagnostics only. An owner-dependent alias with unknown owner is
+`AMBIGUOUS`. The registry is validated at import (duplicate types, empty or
+malformed aliases, overlapping conditions for one alias); an inconsistent registry
+is an implementation error, never an `UNKNOWN_TYPE`.
+
+Resolution order for a new link: unknown/invalid/ambiguous endpoints are deferred
+with a warning and discovery continues; a new link that reuses an interface
+(same identity) already stored with a different neighbor is a confirmed conflict
+and fails the merge (candidate untouched); a new link whose endpoint shares a
+device and interface *number* with a stored interface of unidentified type is an
+*unresolved relationship* and is deferred (digits alone never establish identity).
+Stored links are only ever matched, never changed. Existing alias-variant duplicates
+are kept, reported ("Existing duplicate link detected") and never merged or
+removed; an existing endpoint with several different neighbors blocks an automatic
+merge until a person fixes the topology (`edit`).
+
+**Baseline-aware validation.** Loading a topology stays as lenient as before (a
+legacy alias duplicate loads). Changes are checked against the *committed* state of
+the topology being changed (read fresh; empty for a new topology; never an
+unaccepted candidate): per link identity a record count may not exceed what the
+baseline had, and a conflicted endpoint may not gain a neighbor it did not have.
+It runs when a Discovery result is merged (target = the discovery topology, not
+necessarily the active one), when an edited candidate is installed, and at commit.
+
+**L3 merge** uses the same identity: an observed interface is matched to the stored
+interface of the same identity (stored spelling kept), a new interface that is
+unknown/invalid/ambiguous is not registered (warning) unless that exact name is
+already stored, and several stored interfaces with one identity, or contradictory
+observations of one identity in one run, hold the update.
+
+#### Extending the Interface Type Registry
+
+Do not add a conversion to a parser or merge step; extend the registry and its tests.
+
+1. Take the raw interface name, owner device and OS, observing device/OS, protocol
+   and local/remote field from the *Interface Normalization Warnings* section.
+2. Find evidence (Cisco documentation or a real observation) and classify it
+   `DOCUMENTED` / `OBSERVED`; without evidence do not add the alias.
+3. Decide the type: an existing `type_id` or a new `TypeEntry` (a new category member
+   needs no code change elsewhere). Speed alone never merges two types.
+4. Add the `Alias` in `interface_identity.REGISTRY`; restrict it with `os=` when it
+   is only valid for an owner OS (the OS must be derivable from the stored device
+   type). `validate_registry()` rejects overlaps; extend it, not the callers.
+5. Add positive and negative tests (`tests/test_interface_identity_registry.py`),
+   a reconciliation case, an L3 merge case, and a save/reload case showing the
+   display name re-resolves.
+6. Record the public evidence in the change; keep device names and addresses out.
 
 ### L3 interface enrichment
 

@@ -16,6 +16,16 @@
   or `ena`/`enable-p`.
 
 ### Changed
+- **Interface identity and link reconciliation.** Interfaces are compared by identity from a validated, typed Interface
+  Type Registry (`interface_identity.py`) instead of the small alias table: `TF`/`Twe`/`TwentyFiveGigE`,
+  `Te`/`TenGigE` and more now resolve to one interface, which fixes duplicate links (9 instead of 5 in a mixed IOS XR /
+  IOS XE lab). Owner-dependent short names use the owner device `type`; unknown, invalid or ambiguous interface names
+  are never guessed: their new links/L3 entries are deferred with an *Interface Normalization Warnings* section while
+  discovery continues. **Intentional behavior change:** a new link or L3 interface whose name is not in the registry is
+  no longer registered under its raw text. New stored interface names contain no space (`Twe1/1/3`); stored names are
+  never rewritten. Discovery link orientation/order is now by identity. Topology changes are checked against the
+  committed state so existing alias duplicates are tolerated but not added or worsened. No schema, CLI grammar, MCP
+  tool or command change.
 - **Topology Discovery: partial success and a non-destructive merge.** `discover topology` no longer fails as a whole
   when one device cannot be reached or has no usable LLDP/CDP. Every device of the selected access-info is registered
   (ID and type only; devices without a type or of an unsupported type are registered with discovery not attempted); a

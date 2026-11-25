@@ -24,6 +24,8 @@ safety check, which is not a validator replacement.
 
 from __future__ import annotations
 
+import dataclasses
+
 import copy
 from collections import Counter
 from dataclasses import dataclass
@@ -574,12 +576,19 @@ class CliSession:
             base = self.definition_candidate
         else:
             base = load_committed_definition("topology", plan.name, self.lab_root) or new_topology_data(plan.name)
-        candidate = discovery.build_discovery_candidate(result, base)
+        # Baseline for the link-integrity comparison: the committed state of
+        # the topology Discovery is updating (not necessarily the active one),
+        # read fresh before the merge; empty for a new topology. An unaccepted
+        # candidate is never the baseline.
+        accepted = load_committed_definition("topology", plan.name, self.lab_root)
+        notes: list = []
+        candidate = discovery.build_discovery_candidate(result, base, notes)
         try:
             lab.validate_topology_data(plan.name, candidate)
+            discovery.check_link_integrity_change(accepted, candidate)
         except lab.LabConfigError as exc:
             raise discovery.DiscoveryError(f"Discovered topology candidate is invalid: {exc}") from exc
-        changes = discovery.topology_changes(base, candidate)
+        changes = dataclasses.replace(discovery.topology_changes(base, candidate), merge_diagnostics=tuple(notes))
         self.apply_topology_definition_plan(plan)
         self.definition_candidate = candidate
         self._discovery_baseline_rev = self._mutation_rev
@@ -600,6 +609,10 @@ class CliSession:
         same SSOT validator commit() will use -- an invalid edit never
         reaches the candidate."""
         _DEFINITION_VALIDATORS[self.definition_kind](self.definition_name, data)
+        if self.definition_kind == "topology":
+            discovery.check_link_integrity_change(
+                load_committed_definition("topology", self.definition_name, self.lab_root), data
+            )
         if data != self.definition_candidate:
             self._mutation_rev += 1
         self.definition_candidate = data
@@ -897,6 +910,11 @@ class CliSession:
         if definition_being_written and not definition_being_deleted:
             try:
                 _DEFINITION_VALIDATORS[self.definition_kind](self.definition_name, self.definition_candidate)
+                if self.definition_kind == "topology":
+                    discovery.check_link_integrity_change(
+                        load_committed_definition("topology", self.definition_name, self.lab_root),
+                        self.definition_candidate,
+                    )
             except lab.LabConfigError as exc:
                 errors.append(str(exc))
 
